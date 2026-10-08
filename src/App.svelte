@@ -1,0 +1,440 @@
+<script lang="ts">
+  import { onMount, tick } from 'svelte';
+  import Icon from './lib/Icon.svelte';
+  import type { AppInfo, Comment, Provider, Run, Task, TaskDetail, TaskInput, TaskStatus } from './lib/types';
+
+  type Scope = 'all' | 'scheduled' | 'attention' | 'completed';
+  type View = 'board' | 'list';
+  let info = $state<AppInfo | null>(null);
+  let tasks = $state<Task[]>([]);
+  let loading = $state(true);
+  let connectionError = $state('');
+  let search = $state('');
+  let provider = $state<'all' | Provider>('all');
+  let scope = $state<Scope>('all');
+  let view = $state<View>('board');
+  let showArchived = $state(false);
+  let selectedId = $state<string | null>(null);
+  let detail = $state<TaskDetail | null>(null);
+  let detailError = $state('');
+  let detailTab = $state<'conversation' | 'history'>('conversation');
+  let comment = $state('');
+  let answer = $state('');
+  let acknowledgeInterruption = $state(false);
+  let pending = $state<string[]>([]);
+  let toast = $state<{ text: string; type: 'success' | 'error' } | null>(null);
+  let drawer: HTMLDialogElement;
+  let editor: HTMLDialogElement;
+  let editorOpen = $state(false);
+  let editingId = $state<string | null>(null);
+  let formTitle = $state('');
+  let formInstruction = $state('');
+  let formProvider = $state<Provider>('codex');
+  let formCwd = $state('');
+  let formSchedule = $state<'manual' | 'interval'>('manual');
+  let formInterval = $state(60);
+  let formFirstRun = $state('');
+  let formPaused = $state(false);
+  let formError = $state('');
+  let submitting = $state(false);
+  let drawerSequence = 0;
+  let taskSequence = 0;
+  let toastTimer: ReturnType<typeof setTimeout>;
+  let searchInput: HTMLInputElement;
+
+  const labels: Record<TaskStatus, string> = {
+    ready: 'К запуску', running: 'В работе', cancelling: 'Останавливается', waiting_input: 'Нужен ответ', completed: 'Завершено',
+    blocked: 'Заблокировано', failed: 'Ошибка', interrupted: 'Прервано', cancelled: 'Отменено',
+  };
+  const columnData: { status: TaskStatus; title: string; icon: string; empty: string }[] = [
+    { status: 'ready', title: 'К запуску', icon: 'circle', empty: 'Следующая идея начинается здесь' },
+    { status: 'running', title: 'В работе', icon: 'bolt', empty: 'Агенты готовы к работе' },
+    { status: 'waiting_input', title: 'Нужен ответ', icon: 'message', empty: 'Ничего не требует вашего участия' },
+    { status: 'completed', title: 'Завершено', icon: 'circlecheck', empty: 'Здесь будут готовые результаты' },
+  ];
+  const scopeTitles: Record<Scope, string> = { all: 'Все задачи', scheduled: 'По расписанию', attention: 'Требуют внимания', completed: 'Завершённые задачи' };
+  const activeStatuses: TaskStatus[] = ['running', 'waiting_input', 'interrupted', 'cancelling'];
+  const attentionStatuses: TaskStatus[] = ['waiting_input', 'interrupted', 'failed', 'blocked'];
+  const archiveStatuses: TaskStatus[] = ['failed', 'blocked', 'cancelled', 'interrupted'];
+  let filtered = $derived(tasks.filter(task => {
+    const query = search.trim().toLocaleLowerCase();
+    return (provider === 'all' || task.provider === provider)
+      && (scope === 'all' || (scope === 'scheduled' && task.schedule === 'interval') || (scope === 'attention' && attentionStatuses.includes(task.status)) || (scope === 'completed' && task.status === 'completed'))
+      && (!query || `${task.title} ${task.instruction} ${task.cwd}`.toLocaleLowerCase().includes(query));
+  }));
+  let archived = $derived(filtered.filter(task => archiveStatuses.includes(task.status)));
+  let waitingCount = $derived(tasks.filter(task => attentionStatuses.includes(task.status)).length);
+  let runningCount = $derived(tasks.filter(task => task.status === 'running' || task.status === 'cancelling').length);
+  let completedCount = $derived(tasks.filter(task => task.status === 'completed').length);
+  let scheduledCount = $derived(tasks.filter(task => task.schedule === 'interval').length);
+  let selectedTask = $derived(detail?.task ?? tasks.find(task => task.id === selectedId) ?? null);
+  let currentRun = $derived(selectedTask?.latestRun ?? null);
+  let taskBusy = $derived(selectedId ? pending.includes(selectedId) : false);
+  let runCanResume = $derived(currentRun && ['waiting_input', 'interrupted'].includes(currentRun.status));
+  let providerAvailable = $derived(info?.mode === 'mock' || info?.providers.find(p => p.id === formProvider)?.available);
+
+  async function api<T>(path: string, options?: RequestInit): Promise<T> {
+    const response = await fetch(path, { ...options, headers: options?.method ? { 'Content-Type': 'application/json', ...options.headers } : options?.headers });
+    let body;
+    try { body = await response.json(); } catch { throw new Error('Сервер вернул неожиданный ответ. Проверьте, что Trackt запущен.'); }
+    if (!response.ok) throw new Error(body.error || `Ошибка запроса (${response.status})`);
+    return body as T;
+  }
+
+  function notify(text: string, type: 'success' | 'error' = 'success') {
+    clearTimeout(toastTimer);
+    toast = { text, type };
+    if (type === 'success') toastTimer = setTimeout(() => { toast = null; }, 4500);
+  }
+
+  async function loadTasks() {
+    const sequence = ++taskSequence;
+    try {
+      const result = await api<Task[]>('/api/tasks');
+      if (sequence !== taskSequence) return;
+      tasks = result;
+      connectionError = '';
+    } catch (error) {
+      if (sequence === taskSequence) connectionError = error instanceof Error ? error.message : 'Не удалось подключиться к серверу';
+    } finally { if (sequence === taskSequence) loading = false; }
+  }
+
+  async function loadDetail(id = selectedId) {
+    if (!id) return;
+    const sequence = ++drawerSequence;
+    try {
+      const result = await api<TaskDetail>(`/api/tasks/${encodeURIComponent(id)}`);
+      if (selectedId !== id || sequence !== drawerSequence) return;
+      detail = result;
+      detailError = '';
+    } catch (error) {
+      if (selectedId === id && sequence === drawerSequence) detailError = error instanceof Error ? error.message : 'Не удалось загрузить задачу';
+    }
+  }
+
+  async function refresh() {
+    await Promise.all([loadTasks(), selectedId ? loadDetail() : Promise.resolve()]);
+  }
+
+  async function loadInfo() {
+    try { info = await api<AppInfo>('/api/info'); } catch { /* The task list surfaces connectivity errors. */ }
+  }
+
+  onMount(() => {
+    void loadInfo();
+    void refresh();
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') { void refresh(); if (!info) void loadInfo(); }
+    }, 2000);
+    const onVisible = () => { if (document.visibilityState === 'visible') void refresh(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { clearInterval(interval); clearTimeout(toastTimer); document.removeEventListener('visibilitychange', onVisible); };
+  });
+
+  async function openTask(task: Task) {
+    selectedId = task.id;
+    detail = null;
+    detailError = '';
+    comment = '';
+    answer = '';
+    acknowledgeInterruption = false;
+    detailTab = 'conversation';
+    drawer.showModal();
+    await loadDetail(task.id);
+  }
+
+  function closeDrawer() {
+    drawer.close();
+    selectedId = null;
+    detail = null;
+    drawerSequence++;
+  }
+
+  function localInputDate(timestamp: number | null): string {
+    if (!timestamp) return '';
+    const date = new Date(timestamp);
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+  }
+
+  async function openEditor(task?: Task) {
+    editingId = task?.id ?? null;
+    formTitle = task?.title ?? '';
+    formInstruction = task?.instruction ?? '';
+    formProvider = task?.provider ?? 'codex';
+    formCwd = task?.cwd ?? info?.cwd ?? '';
+    formSchedule = task?.schedule ?? 'manual';
+    formInterval = task?.intervalMinutes ?? 60;
+    formFirstRun = localInputDate(task?.firstRunAt ?? null);
+    formPaused = task?.paused ?? false;
+    formError = '';
+    editorOpen = true;
+    await tick();
+    editor.showModal();
+    editor.querySelector<HTMLInputElement>('input[name="title"]')?.focus();
+  }
+
+  function closeEditor() {
+    if (submitting) return;
+    editor.close();
+    editorOpen = false;
+  }
+
+  async function saveTask(event: SubmitEvent) {
+    event.preventDefault();
+    if (submitting) return;
+    formError = '';
+    if (!formTitle.trim() || !formInstruction.trim() || !formCwd.trim()) {
+      formError = 'Укажите название, инструкцию и рабочую папку.'; return;
+    }
+    if (formSchedule === 'interval' && (!Number.isInteger(formInterval) || formInterval < 1)) {
+      formError = 'Интервал должен быть целым числом минут, не меньше 1.'; return;
+    }
+    const firstRunAt = formSchedule === 'interval' && formFirstRun ? new Date(formFirstRun).getTime() : null;
+    if (firstRunAt !== null && !Number.isFinite(firstRunAt)) { formError = 'Проверьте время первого запуска.'; return; }
+    const payload: TaskInput = {
+      title: formTitle.trim(), instruction: formInstruction.trim(), provider: formProvider, cwd: formCwd.trim(),
+      schedule: formSchedule, intervalMinutes: formSchedule === 'interval' ? formInterval : null,
+      firstRunAt, paused: formPaused,
+    };
+    const savedEditingId = editingId;
+    submitting = true;
+    try {
+      const saved = await api<Task>(savedEditingId ? `/api/tasks/${encodeURIComponent(savedEditingId)}` : '/api/tasks', { method: savedEditingId ? 'PATCH' : 'POST', body: JSON.stringify(payload) });
+      notify(savedEditingId ? 'Изменения сохранены' : 'Задача создана');
+      submitting = false;
+      closeEditor();
+      taskSequence++;
+      tasks = savedEditingId ? tasks.map(task => task.id === saved.id ? saved : task) : [saved, ...tasks];
+      if (detail?.task.id === saved.id) detail = { ...detail, task: saved };
+      if (!savedEditingId) await openTask(saved);
+      void refresh();
+    } catch (error) { formError = error instanceof Error ? error.message : 'Не удалось сохранить задачу'; }
+    finally { submitting = false; }
+  }
+
+  async function act(task: Task, action: 'run' | 'pause' | 'resume' | 'cancel', response?: string) {
+    if (pending.includes(task.id)) return;
+    if (action === 'run' && activeStatuses.includes(task.status)) return;
+    if (action === 'cancel' && task.status === 'cancelling') return;
+    if (action === 'resume' && task.latestRun?.status === 'interrupted' && !acknowledgeInterruption) return;
+    pending = [...pending, task.id];
+    try {
+      if (action === 'run') {
+        await api<Run>(`/api/tasks/${encodeURIComponent(task.id)}/run`, { method: 'POST', body: '{}' });
+        notify(info?.mode === 'mock' ? 'Демо-запуск начат' : 'Задача запущена');
+      } else if (action === 'pause') {
+        await api<Task>(`/api/tasks/${encodeURIComponent(task.id)}`, { method: 'PATCH', body: JSON.stringify({ paused: !task.paused }) });
+        notify(task.paused ? 'Расписание возобновлено' : 'Расписание приостановлено');
+      } else if (task.latestRun) {
+        const updatedRun = await api<Run>(`/api/runs/${encodeURIComponent(task.latestRun.id)}/${action}`, { method: 'POST', body: JSON.stringify(action === 'resume' ? { answer: response?.trim() || 'Продолжи выполнение задачи с того места, где остановился.', ...(task.latestRun.status === 'interrupted' ? { acknowledgeInterruption: true } : {}) } : {}) });
+        if (action === 'resume') answer = '';
+        notify(action === 'resume' ? 'Ответ отправлен, агент продолжает работу' : updatedRun.status === 'cancelling' ? 'Останавливаем процесс агента…' : 'Запуск отменён');
+      }
+      await refresh();
+    } catch (error) { notify(error instanceof Error ? error.message : 'Не удалось выполнить действие', 'error'); }
+    finally { pending = pending.filter(id => id !== task.id); }
+  }
+
+  async function sendComment(event: SubmitEvent) {
+    event.preventDefault();
+    const task = selectedTask;
+    const body = comment.trim();
+    if (!task || !body || taskBusy) return;
+    pending = [...pending, task.id];
+    try {
+      await api<Comment>(`/api/tasks/${encodeURIComponent(task.id)}/comments`, { method: 'POST', body: JSON.stringify({ body }) });
+      comment = '';
+      await loadDetail(task.id);
+    } catch (error) { notify(error instanceof Error ? error.message : 'Не удалось сохранить заметку', 'error'); }
+    finally { pending = pending.filter(id => id !== task.id); }
+  }
+
+  function dateTime(timestamp: number | null, short = false): string {
+    if (!timestamp) return '—';
+    return new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', ...(short ? {} : { hour: '2-digit', minute: '2-digit' }) }).format(timestamp);
+  }
+
+  function intervalLabel(minutes: number | null): string {
+    if (!minutes) return 'По расписанию';
+    if (minutes % 1440 === 0) return minutes === 1440 ? 'Каждый день' : `Каждые ${minutes / 1440} дн.`;
+    if (minutes % 60 === 0) return minutes === 60 ? 'Каждый час' : `Каждые ${minutes / 60} ч.`;
+    return `Каждые ${minutes} мин.`;
+  }
+
+  function providerName(value: Provider) { return value === 'codex' ? 'Codex' : 'Claude Code'; }
+  function shortPath(path: string) { const parts = path.replace(/\\/g, '/').split('/').filter(Boolean); return parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : path; }
+  function elapsed(run: Run) {
+    const seconds = Math.max(0, Math.floor(((run.finishedAt ?? run.updatedAt) - run.startedAt) / 1000));
+    return seconds < 60 ? `${seconds} сек.` : `${Math.floor(seconds / 60)} мин. ${seconds % 60} сек.`;
+  }
+  function resetFilters() { search = ''; provider = 'all'; scope = 'all'; }
+  function setScope(value: Scope) { scope = value; showArchived = value === 'attention'; }
+  function globalKey(event: KeyboardEvent) {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !editorOpen && !selectedId) {
+      event.preventDefault(); searchInput?.focus();
+    }
+  }
+  function tabKey(event: KeyboardEvent) {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    detailTab = event.key === 'Home' ? 'conversation' : event.key === 'End' ? 'history' : detailTab === 'conversation' ? 'history' : 'conversation';
+    drawer.querySelector<HTMLButtonElement>(`#${detailTab}-tab`)?.focus();
+  }
+  function backdropClick(event: MouseEvent, dialog: HTMLDialogElement, close: () => void) {
+    if (event.target !== dialog) return;
+    const rect = dialog.getBoundingClientRect();
+    if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) close();
+  }
+</script>
+
+<svelte:window onkeydown={globalKey} />
+
+{#snippet providerBadge(value: Provider, compact = false)}
+  <span class:compact class="provider-badge {value}"><span class="provider-mark">{#if value === 'codex'}<Icon name="code" size={compact ? 12 : 14} />{:else}<span class="claude-mark" aria-hidden="true">✳</span>{/if}</span>{providerName(value)}</span>
+{/snippet}
+
+{#snippet statusBadge(status: TaskStatus)}
+  <span class="status-badge status-{status}"><span class="status-dot"></span>{labels[status]}</span>
+{/snippet}
+
+{#snippet taskCard(task: Task)}
+  <article class="task-card {task.status}" class:paused-card={task.paused}>
+    <button class="card-main" onclick={() => openTask(task)} aria-label={'Открыть задачу: ' + task.title}>
+      <div class="card-top">{@render providerBadge(task.latestRun?.provider ?? task.provider, true)}<span class="task-ref">{task.id.slice(0, 6).toUpperCase()}</span></div>
+      <h3>{task.title}</h3>
+      <p class="card-description">{task.latestRun?.summary || task.instruction}</p>
+      {#if task.status === 'cancelling'}<div class="card-cancelling"><Icon name="refresh" size={13} class="spin" />Останавливается</div>{/if}
+      {#if task.status === 'waiting_input'}<div class="card-signal"><Icon name="message" size={13} /> Агент ждёт вашего ответа</div>{/if}
+      {#if task.status === 'interrupted'}<div class="card-signal"><Icon name="alert" size={13} /> Проверьте прерванный запуск</div>{/if}
+      {#if task.latestRun?.error && ['failed', 'blocked'].includes(task.status)}<div class="card-error">{task.latestRun.error}</div>{/if}
+      <div class="card-folder" title={task.cwd}><Icon name="folder" size={13} /><span>{shortPath(task.cwd)}</span></div>
+    </button>
+    <div class="card-footer">
+      <span class="card-schedule" class:is-paused={task.paused}><Icon name={task.paused ? 'pause' : task.schedule === 'interval' ? 'clock' : 'play'} size={12} />{task.paused ? 'Расписание на паузе' : task.schedule === 'interval' ? intervalLabel(task.intervalMinutes) : 'Вручную'}</span>
+      {#if !activeStatuses.includes(task.status)}
+        <button class="card-run icon-button" disabled={pending.includes(task.id)} onclick={() => act(task, 'run')} aria-label={'Запустить: ' + task.title} title="Запустить задачу"><Icon name={pending.includes(task.id) ? 'refresh' : 'play'} size={14} class={pending.includes(task.id) ? 'spin' : ''} /></button>
+      {:else}<span class="card-run-count" title="Количество запусков"><Icon name="history" size={12} />{task.runCount}</span>{/if}
+    </div>
+  </article>
+{/snippet}
+
+<div class="app-shell">
+  <aside class="sidebar" aria-label="Основная навигация">
+    <a class="brand" href="/" aria-label="Trackt — главная"><span class="brand-symbol"><Icon name="check" size={24} stroke={2.6} /></span><span>trackt<span class="brand-dot">.</span></span></a>
+    <div class="workspace-label"><span class="workspace-icon"><Icon name="folder" size={16} /></span><div><strong>Моё пространство</strong><span>Локальный workspace</span></div><span class="local-light"></span></div>
+    <div class="nav-label">РАБОЧЕЕ ПРОСТРАНСТВО</div>
+    <nav class="main-nav">
+      <button class:active={scope === 'all'} aria-label="Все задачи" onclick={() => setScope('all')}><Icon name="board" /><span>Все задачи</span><span class="nav-count">{tasks.length}</span></button>
+      <button class:active={scope === 'attention'} aria-label="Требуют внимания" onclick={() => setScope('attention')}><Icon name="inbox" /><span>Требуют внимания</span>{#if waitingCount}<span class="nav-count attention-count">{waitingCount}</span>{/if}</button>
+      <button class:active={scope === 'scheduled'} aria-label="По расписанию" onclick={() => setScope('scheduled')}><Icon name="clock" /><span>По расписанию</span>{#if scheduledCount}<span class="nav-count">{scheduledCount}</span>{/if}</button>
+      <button class:active={scope === 'completed'} aria-label="Завершённые задачи" onclick={() => setScope('completed')}><Icon name="circlecheck" /><span>Завершённые</span></button>
+    </nav>
+    <div class="nav-label agents-label">ВАШИ АГЕНТЫ <span>2</span></div>
+    <div class="agent-nav">
+      {#each ['codex', 'claude'] as agent}
+        <button class:chosen={provider === agent} onclick={() => { provider = provider === agent ? 'all' : agent as Provider; }} aria-pressed={provider === agent}>
+          <span class="agent-avatar {agent}">{#if agent === 'codex'}<Icon name="code" size={17} />{:else}<span class="claude-mark">✳</span>{/if}</span>
+          <div><strong>{providerName(agent as Provider)}</strong><span>{info?.mode === 'mock' ? 'Демо-адаптер' : info?.providers.find(p => p.id === agent)?.available ? 'CLI доступен' : info ? 'CLI не найден' : 'Проверяем подключение'}</span></div>
+          <span class="agent-light" class:online={info?.mode === 'cli' && info?.providers.find(p => p.id === agent)?.available}></span>
+        </button>
+      {/each}
+    </div>
+    <div class="sidebar-bottom">
+      <div class="private-note"><span class="private-icon"><Icon name="terminal" size={17} /></span><div><strong>Всё на вашем компьютере</strong><p>Локальная база и агенты.<br />Ваши задачи под контролем.</p></div></div>
+      <div class="workspace-footer"><span class="avatar">Я</span><div><strong>Личное пространство</strong><span>Trackt · MVP</span></div><span class="version">v0.1</span></div>
+    </div>
+  </aside>
+
+  <main class="main-content">
+    <header class="topbar"><div class="breadcrumb"><span>Workspace</span><Icon name="chevron" size={12} /><strong>Задачи</strong></div><div class="connection-indicator" title={connectionError || 'Автообновление каждые 2 секунды'}><span class:offline={!!connectionError || !info}></span>{connectionError ? 'Нет соединения' : info ? 'Локально · синхронизировано' : 'Подключаемся…'}</div></header>
+    <div class="workspace-content">
+      <section class="page-heading"><div><div class="eyebrow">МЕНЬШЕ РУТИНЫ. БОЛЬШЕ СДЕЛАННОГО.</div><h1>{scopeTitles[scope]}<span>{scope === 'all' ? tasks.length : filtered.length}</span></h1><p>Дайте агентам задачу. Остальное держите в поле зрения.</p></div><button class="button primary create-button" onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={17} />Новая задача</button></section>
+
+      {#if info?.mode === 'mock'}
+        <div class="mode-banner"><span class="mode-icon"><Icon name="spark" size={17} /></span><div><strong>Демонстрационный режим</strong><span>Запуски симулируются. Codex и Claude CLI не вызываются, файлы не изменяются.</span></div><span class="demo-badge">MOCK</span></div>
+      {:else if info?.mode === 'cli'}
+        <div class="live-banner"><Icon name="terminal" size={15} /><span>CLI-режим: агенты работают с файлами в указанной папке. Проверяйте инструкции перед запуском.</span></div>
+      {/if}
+      {#if connectionError}<div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{connectionError}</span><button onclick={() => { void loadInfo(); void refresh(); }}>Повторить</button></div>{/if}
+
+      <section class="overview" aria-label="Сводка задач"><div class="overview-intro"><span class="overview-symbol"><Icon name="spark" size={23} /></span><div><strong>Ваш фокус — на важном.</strong><span>Агенты позаботятся об остальном</span></div></div><div class="overview-stats"><button onclick={() => { setScope('all'); search = ''; provider = 'all'; }}><span class="stat-value">{runningCount}<span class="stat-dot running-dot"></span></span><span class="stat-label">в работе</span></button><button onclick={() => setScope('attention')}><span class="stat-value">{waitingCount}<span class="stat-dot waiting-dot"></span></span><span class="stat-label">ждут внимания</span></button><button onclick={() => setScope('completed')}><span class="stat-value">{completedCount}<span class="stat-dot completed-dot"></span></span><span class="stat-label">завершено</span></button></div></section>
+
+      <div class="toolbar"><div class="view-toggle" aria-label="Вид задач"><button class:selected={view === 'board'} aria-pressed={view === 'board'} onclick={() => view = 'board'}><Icon name="board" size={15} />Доска</button><button class:selected={view === 'list'} aria-pressed={view === 'list'} onclick={() => view = 'list'}><Icon name="list" size={16} />Список</button></div><div class="toolbar-filters"><label class="search-box"><Icon name="search" size={16} /><input bind:this={searchInput} bind:value={search} type="search" placeholder="Найти задачу…" aria-label="Поиск задач" /><span class="key-hint">⌘ K</span></label><label class="provider-filter"><Icon name="sliders" size={15} /><select bind:value={provider} aria-label="Фильтр по агенту"><option value="all">Все агенты</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select><Icon name="down" size={13} /></label></div></div>
+
+      {#if loading}
+        <div class="board-grid skeleton-grid" aria-label="Загружаем задачи" aria-busy="true">{#each [1, 2, 3, 4] as column}<div class="skeleton-column"><div class="skeleton skeleton-heading"></div><div class="skeleton skeleton-card"></div>{#if column < 3}<div class="skeleton skeleton-card short"></div>{/if}</div>{/each}</div>
+      {:else if filtered.length === 0 && tasks.length > 0}
+        <div class="no-results"><span class="empty-icon"><Icon name={scope === 'attention' ? 'circlecheck' : 'search'} size={28} /></span><h2>{scope === 'attention' && !search && provider === 'all' ? 'Всё под контролем' : 'Задачи не найдены'}</h2><p>{scope === 'attention' && !search && provider === 'all' ? 'Сейчас нет задач, которым нужно ваше внимание.' : 'Попробуйте другой запрос или измените фильтры.'}</p><button class="button secondary" onclick={resetFilters}>Показать все задачи</button></div>
+      {:else}
+        {#if tasks.length === 0 && !connectionError}
+          <section class="welcome-card"><div class="welcome-art" aria-hidden="true"><span class="art-orbit orbit-one"></span><span class="art-orbit orbit-two"></span><span class="art-mini art-code"><Icon name="code" size={19} /></span><span class="art-main"><Icon name="check" size={33} stroke={2.3} /></span><span class="art-mini art-star">✳</span><span class="art-spark">✦</span></div><div class="welcome-copy"><span class="welcome-kicker">С ЧЕГО НАЧНЁМ?</span><h2>Освободите время для своих идей</h2><p>Поручите агенту проверить проект, собрать сводку или помочь с кодом.<br class="desktop-break" /> Запустите один раз или настройте регулярную работу.</p><button class="button primary" onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={16} />Создать первую задачу<Icon name="arrow" size={16} /></button></div><div class="welcome-steps"><div><span>1</span>Опишите задачу</div><div><span>2</span>Выберите агента</div><div><span>3</span>Следите за результатом</div></div></section>
+        {/if}
+
+        {#if view === 'board'}
+          <div class="board-grid" class:empty-board={tasks.length === 0}>
+            {#each columnData as column}
+              {@const items = filtered.filter(task => task.status === column.status || (column.status === 'running' && task.status === 'cancelling'))}
+              <section class="board-column column-{column.status}" aria-label={column.title}>
+                <div class="column-heading"><span class="column-icon"><Icon name={column.icon} size={15} /></span><h2>{column.title}</h2><span class="column-count">{items.length}</span>{#if column.status === 'ready'}<button class="icon-button add-column" onclick={() => openEditor()} disabled={!info} aria-label="Добавить задачу"><Icon name="plus" size={16} /></button>{/if}</div>
+                <div class="column-cards">{#each items as task (task.id)}{@render taskCard(task)}{:else}<div class="column-empty"><Icon name={column.icon} size={21} /><p>{column.empty}</p>{#if column.status === 'ready'}<button onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={12} />Добавить задачу</button>{/if}</div>{/each}</div>
+              </section>
+            {/each}
+          </div>
+          {#if archived.length}
+            <section class="archive-section"><button class="archive-toggle" aria-expanded={showArchived} onclick={() => showArchived = !showArchived}><Icon name={showArchived ? 'down' : 'chevron'} size={15} /><Icon name="alert" size={15} /><strong>Другие статусы</strong><span>{archived.length}</span><small>Прерванные, отменённые и задачи с ошибками</small></button>{#if showArchived}<div class="archive-grid">{#each archived as task (task.id)}<div class="archive-card-wrapper">{@render statusBadge(task.status)}{@render taskCard(task)}</div>{/each}</div>{/if}</section>
+          {/if}
+        {:else}
+          <div class="task-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>ЗАПУСК</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{shortPath(task.cwd)}</small></span></button><div>{@render providerBadge(task.provider, true)}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{task.paused ? 'На паузе' : task.schedule === 'interval' ? intervalLabel(task.intervalMinutes) : 'Вручную'}</span><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>Новые задачи появятся здесь</span></div>{/each}</div>
+        {/if}
+      {/if}
+      <footer class="board-footer"><span><span class="tiny-dot"></span>Данные хранятся локально</span><span>{info?.mode === 'mock' ? 'Демо-запуски · без вызовов CLI' : 'Bun + Svelte 5 · Codex и Claude Code'}</span></footer>
+    </div>
+  </main>
+</div>
+
+<dialog class="task-drawer" bind:this={drawer} aria-labelledby="detail-title" oncancel={(event) => { event.preventDefault(); closeDrawer(); }} onclick={(event) => backdropClick(event, drawer, closeDrawer)}>
+  <div class="drawer-content">
+    <header class="drawer-topbar"><span><Icon name="terminal" size={16} />Задача <span class="detail-ref">{selectedId?.slice(0, 8).toUpperCase()}</span></span><button class="icon-button" aria-label="Закрыть задачу" onclick={closeDrawer}><Icon name="close" size={20} /></button></header>
+    {#if selectedTask}
+      <div class="drawer-heading"><div class="drawer-badges">{@render statusBadge(selectedTask.status)}{@render providerBadge(selectedTask.provider, true)}{#if selectedTask.latestRun?.mock}<span class="demo-badge">MOCK</span>{/if}</div><h2 id="detail-title">{selectedTask.title}</h2><p class="detail-created">Создано {dateTime(selectedTask.createdAt)}</p><div class="detail-actions">{#if !activeStatuses.includes(selectedTask.status)}<button class="button primary" disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'run')}><Icon name={taskBusy ? 'refresh' : 'play'} size={15} class={taskBusy ? 'spin' : ''} />{selectedTask.runCount ? 'Запустить снова' : 'Запустить'}</button>{:else if selectedTask.status === 'cancelling'}<button class="button secondary" disabled><Icon name="refresh" class="spin" size={15} />Останавливаем…</button>{:else if currentRun && ['running', 'waiting_input', 'interrupted'].includes(currentRun.status)}<button class="button secondary danger-hover" disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'cancel')}><Icon name="stop" size={14} />Отменить запуск</button>{/if}<button class="button secondary" disabled={taskBusy} onclick={() => selectedTask && openEditor(selectedTask)}><Icon name="edit" size={15} />Изменить</button>{#if selectedTask.schedule === 'interval'}<button class="icon-button schedule-pause" title={selectedTask.paused ? 'Возобновить расписание' : 'Приостановить расписание'} aria-label={selectedTask.paused ? 'Возобновить расписание' : 'Приостановить расписание'} disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'pause')}><Icon name={selectedTask.paused ? 'play' : 'pause'} size={17} /></button>{/if}</div></div>
+      {#if selectedTask.status === 'cancelling'}<div class="cancelling-note" role="status"><Icon name="refresh" size={16} class="spin" /><span>Ожидаем завершения процесса агента и его дочерних процессов. Новый запуск станет доступен после остановки. Уже выполненные действия не откатываются.</span></div>{/if}
+      {#if toast}<div class="drawer-notice {toast.type}" role={toast.type === 'error' ? 'alert' : 'status'}><Icon name={toast.type === 'error' ? 'alert' : 'circlecheck'} size={16} /><span>{toast.text}</span><button class="icon-button" aria-label="Закрыть уведомление" onclick={() => toast = null}><Icon name="close" size={14} /></button></div>{/if}
+      {#if detailError}<div class="detail-error" role="alert">{detailError}</div>{/if}
+      <div class="task-properties"><div><span><Icon name="folder" size={14} />Рабочая папка</span><code title={selectedTask.cwd}>{selectedTask.cwd}</code></div><div><span><Icon name="clock" size={14} />Расписание</span><strong>{selectedTask.schedule === 'interval' ? intervalLabel(selectedTask.intervalMinutes) : 'Ручной запуск'}{#if selectedTask.paused}<span class="paused-label">На паузе</span>{/if}</strong></div>{#if selectedTask.nextRunAt && !selectedTask.paused}<div><span><Icon name="arrow" size={14} />Следующий запуск</span><strong>{dateTime(selectedTask.nextRunAt)}</strong></div>{/if}<div><span><Icon name="history" size={14} />Всего запусков</span><strong>{selectedTask.runCount}</strong></div></div>
+      <section class="instruction-section"><h3>ИНСТРУКЦИЯ ДЛЯ АГЕНТА</h3><p>{selectedTask.instruction}</p></section>
+      {#if currentRun?.error}<div class="run-error"><Icon name="alert" size={17} /><div><strong>{labels[currentRun.status]}</strong><p>{currentRun.error}</p></div></div>{/if}
+      {#if runCanResume}
+        <form class="resume-panel" onsubmit={(event) => { event.preventDefault(); if (selectedTask && (answer.trim() || currentRun?.status === 'interrupted')) void act(selectedTask, 'resume', answer); }}><div class="resume-title"><Icon name={currentRun?.status === 'interrupted' ? 'alert' : 'message'} size={18} /><strong>{currentRun?.status === 'interrupted' ? 'Запуск был прерван' : 'Агенту нужен ваш ответ'}</strong></div><p>{currentRun?.status === 'interrupted' ? 'Прежний процесс CLI мог остаться запущенным после сбоя. Остановите его перед продолжением. Уже выполненные действия и изменения файлов не откатываются.' : 'Ответ будет передан агенту в ту же сессию, и работа продолжится.'}</p>{#if !currentRun?.sessionId && !currentRun?.mock}<div class="resume-warning">Идентификатор сессии не сохранён. Продолжение недоступно; отмените запуск, чтобы начать заново.</div>{:else}<label class="sr-only" for="resume-answer">Ответ агенту</label><textarea id="resume-answer" bind:value={answer} maxlength="8000" rows="3" placeholder={currentRun?.status === 'interrupted' ? 'Что учесть при продолжении? (необязательно)' : 'Напишите ответ или уточнение…'} required={currentRun?.status === 'waiting_input'} disabled={taskBusy}></textarea>{#if currentRun?.status === 'interrupted'}<label class="interruption-confirm"><input type="checkbox" bind:checked={acknowledgeInterruption} disabled={taskBusy} /><span>Я проверил(а), что предыдущий процесс CLI остановлен</span></label>{/if}<button class="button primary" type="submit" disabled={taskBusy || (currentRun?.status === 'waiting_input' && !answer.trim()) || (currentRun?.status === 'interrupted' && !acknowledgeInterruption)}><Icon name="arrow" size={15} />{taskBusy ? 'Отправляем…' : 'Продолжить работу'}</button>{/if}</form>
+      {/if}
+      <div class="detail-tabs" role="tablist" aria-label="История задачи"><button id="conversation-tab" role="tab" tabindex={detailTab === 'conversation' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'conversation'} aria-controls="conversation-panel" class:active={detailTab === 'conversation'} onclick={() => detailTab = 'conversation'}><Icon name="message" size={15} />Обсуждение<span>{detail?.comments.length ?? 0}</span></button><button id="history-tab" role="tab" tabindex={detailTab === 'history' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'history'} aria-controls="history-panel" class:active={detailTab === 'history'} onclick={() => detailTab = 'history'}><Icon name="history" size={15} />Запуски<span>{detail?.runs.length ?? selectedTask.runCount}</span></button></div>
+      {#if !detail}<div class="detail-loading"><Icon name="refresh" class="spin" size={19} />Загружаем историю…</div>{:else if detailTab === 'conversation'}
+        <div id="conversation-panel" tabindex="0" role="tabpanel" aria-labelledby="conversation-tab" class="conversation-panel">{#each detail.comments as entry (entry.id)}<article class="comment-entry comment-{entry.kind}"><span class="comment-avatar">{#if entry.kind === 'user'}Я{:else if entry.kind === 'system'}<Icon name="terminal" size={14} />{:else if entry.kind === 'question'}<Icon name="message" size={14} />{:else}<Icon name="spark" size={14} />{/if}</span><div class="comment-main"><div class="comment-meta"><strong>{entry.kind === 'user' ? 'Вы' : entry.kind === 'system' ? 'Trackt' : entry.kind === 'question' ? 'Вопрос агента' : entry.kind === 'result' ? 'Результат' : providerName(selectedTask.provider)}</strong><time datetime={new Date(entry.createdAt).toISOString()}>{dateTime(entry.createdAt)}</time></div><p>{entry.body}</p></div></article>{:else}<div class="conversation-empty"><Icon name="message" size={25} /><strong>У каждой задачи своя история</strong><p>Здесь появятся сообщения агента, вопросы и результат.<br />Можно оставить заметку уже сейчас.</p></div>{/each}</div>
+        <form class="comment-form" onsubmit={sendComment}><label for="task-comment">Заметка к задаче</label><div class="comment-input"><textarea id="task-comment" bind:value={comment} maxlength="8000" placeholder="Добавьте контекст или заметку…" rows="2" disabled={taskBusy}></textarea><button class="icon-button" type="submit" disabled={!comment.trim() || taskBusy} aria-label="Сохранить заметку"><Icon name="send" size={17} /></button></div><p>Заметки сохраняются в истории. Для ответа агенту используйте «Продолжить работу».</p></form>
+      {:else}
+        <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name="play" size={14} />Запуск {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{@render providerBadge(run.provider, true)}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'schedule' ? 'По расписанию' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}<div class="run-details">Ход {run.turn}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
+      {/if}
+    {:else}<div class="detail-loading"><Icon name="refresh" class="spin" />Загружаем задачу…</div>{/if}
+  </div>
+</dialog>
+
+<dialog class="editor-dialog" bind:this={editor} aria-labelledby="editor-title" oncancel={(event) => { event.preventDefault(); closeEditor(); }} onclick={(event) => backdropClick(event, editor, closeEditor)}>
+  {#if editorOpen}
+    <form onsubmit={saveTask} class="editor-form">
+      <header class="editor-header"><div><span class="editor-kicker">{editingId ? 'НАСТРОЙКИ ЗАДАЧИ' : 'ПОРУЧИТЕ ЭТО АГЕНТУ'}</span><h2 id="editor-title">{editingId ? 'Редактировать задачу' : 'Новая задача'}</h2></div><button class="icon-button" type="button" aria-label="Закрыть форму" disabled={submitting} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
+      <div class="editor-fields">
+        {#if formError}<div class="form-error" role="alert"><Icon name="alert" size={17} />{formError}</div>{/if}
+        {#if editingId && selectedTask && activeStatuses.includes(selectedTask.status)}<div class="form-note">Изменения применятся к следующему запуску. Текущий запуск сохраняет свою инструкцию и рабочую папку.</div>{/if}
+        <label class="form-field"><span>Название задачи <span class="required">*</span></span><input bind:value={formTitle} name="title" placeholder="Например, проверить новые изменения" required maxlength="140" disabled={submitting} /></label>
+        <label class="form-field"><span>Что нужно сделать? <span class="required">*</span></span><textarea bind:value={formInstruction} name="instruction" maxlength="16000" rows="4" placeholder="Опишите результат, важные детали и ограничения. Агент получит эту инструкцию при каждом запуске." required disabled={submitting}></textarea></label>
+        <fieldset class="provider-options"><legend>Агент</legend>{#each ['codex', 'claude'] as agent}<label class:selected={formProvider === agent}><input type="radio" bind:group={formProvider} value={agent} disabled={submitting} /><span class="agent-option-logo {agent}">{#if agent === 'codex'}<Icon name="code" size={20} />{:else}<span class="claude-mark">✳</span>{/if}</span><span><strong>{providerName(agent as Provider)}</strong><small>{info?.mode === 'mock' ? 'Демо-адаптер' : info?.providers.find(p => p.id === agent)?.available ? 'CLI доступен' : 'CLI не найден'}</small></span><span class="radio-indicator">{#if formProvider === agent}<span></span>{/if}</span></label>{/each}</fieldset>
+        {#if info?.mode === 'cli' && !providerAvailable}<p class="field-warning"><Icon name="alert" size={14} />CLI выбранного агента не найден. Задачу можно сохранить, но для запуска потребуется установить и авторизовать CLI.</p>{/if}
+        <label class="form-field"><span>Рабочая папка <span class="required">*</span></span><div class="input-with-icon"><Icon name="folder" size={16} /><input bind:value={formCwd} name="cwd" maxlength="4096" placeholder="/workspace/projects/my-project" required disabled={submitting} spellcheck="false" /></div><small>Абсолютный путь к папке, в которой будет работать агент.</small></label>
+        <div class="schedule-section"><div class="schedule-title"><span class="schedule-title-icon"><Icon name="clock" size={18} /></span><div><strong>Когда запускать</strong><span>Один раз вручную или регулярно</span></div></div><div class="schedule-switch"><button type="button" class:selected={formSchedule === 'manual'} aria-pressed={formSchedule === 'manual'} disabled={submitting} onclick={() => formSchedule = 'manual'}><Icon name="play" size={14} />Вручную</button><button type="button" class:selected={formSchedule === 'interval'} aria-pressed={formSchedule === 'interval'} disabled={submitting} onclick={() => formSchedule = 'interval'}><Icon name="clock" size={14} />По расписанию</button></div>{#if formSchedule === 'interval'}<div class="schedule-fields"><label class="form-field"><span>Повторять каждые</span><div class="input-suffix"><input type="number" bind:value={formInterval} name="intervalMinutes" min="1" max="525600" step="1" required disabled={submitting} /><span>минут</span></div></label><label class="form-field"><span>Первый запуск</span><input type="datetime-local" bind:value={formFirstRun} name="firstRunAt" disabled={submitting} /><small>Пусто: сразу после сохранения. Местное время.</small></label></div><label class="pause-option"><input type="checkbox" bind:checked={formPaused} disabled={submitting} /><span>Сохранить расписание на паузе</span></label><p class="schedule-note">Планировщик работает, пока запущен сервер Trackt. Активные запуски одной задачи не накладываются.</p>{/if}</div>
+        {#if info?.mode === 'mock'}<div class="editor-mode-note"><Icon name="spark" size={14} /><span>Демо-режим: реальные CLI не вызываются.</span></div>{:else}<div class="editor-mode-note"><Icon name="terminal" size={14} /><span>Агент может изменять файлы в рабочей папке согласно инструкции.</span></div>{/if}
+      </div>
+      <footer class="editor-footer"><button type="button" class="button secondary" onclick={closeEditor} disabled={submitting}>Отмена</button><button type="submit" class="button primary" disabled={submitting}>{#if submitting}<Icon name="refresh" class="spin" size={16} />{:else}<Icon name={editingId ? 'check' : 'plus'} size={16} />{/if}{submitting ? 'Сохраняем…' : editingId ? 'Сохранить изменения' : 'Создать задачу'}</button></footer>
+    </form>
+  {/if}
+</dialog>
+
+{#if toast && !selectedId}<div class="toast {toast.type}" role={toast.type === 'error' ? 'alert' : 'status'}><span><Icon name={toast.type === 'error' ? 'alert' : 'circlecheck'} size={18} /></span><p>{toast.text}</p><button class="icon-button" aria-label="Закрыть уведомление" onclick={() => toast = null}><Icon name="close" size={16} /></button></div>{/if}

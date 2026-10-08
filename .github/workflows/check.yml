@@ -1,0 +1,31 @@
+name: Check Trackt
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - run: bun install --frozen-lockfile
+      - run: bun run verify
+      - run: bun run test:smoke
+      - run: bunx playwright install --with-deps chromium
+      - run: bun run test:e2e
+      - name: Save browser screenshots and failure traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trackt-browser-check
+          path: |
+            test-results/**/*.png
+            test-results/**/*.zip
+            test-results/**/error-context.md
+          if-no-files-found: ignore
+          retention-days: 7

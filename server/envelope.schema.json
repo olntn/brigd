@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "questions"],
+  "properties": {
+    "status": { "type": "string", "enum": ["needs_input", "completed", "blocked"] },
+    "summary": { "type": "string" },
+    "questions": { "type": "array", "items": { "type": "string" } }
+  }
+}

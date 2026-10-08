@@ -1,0 +1,14 @@
+node_modules/
+dist/
+data/
+.env
+.env.*
+.codex/
+.claude/
+.claude.json
+projects/
+backup/
+*.log
+playwright-report/
+test-results/
+.DS_Store

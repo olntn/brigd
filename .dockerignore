@@ -1,0 +1,24 @@
+# Allow only build/runtime sources into the build context. In particular, never
+# send working projects, credentials, databases, host config or Git history.
+**
+!Dockerfile
+!package.json
+!bun.lock
+!index.html
+!vite.config.ts
+!svelte.config.js
+!tsconfig.json
+!tsconfig.server.json
+!src/
+!src/**
+!server/
+!server/**
+!scripts/
+!scripts/**
+**/.env*
+**/.codex/
+**/.claude/
+**/.claude.json
+**/*.sqlite*
+**/*.pem
+**/*.key

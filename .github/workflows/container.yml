@@ -1,0 +1,127 @@
+name: Container smoke
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare a disposable project
+        run: |
+          mkdir -p "$RUNNER_TEMP/trackt-projects/sample"
+          git -C "$RUNNER_TEMP/trackt-projects/sample" init
+          printf 'container smoke\n' > "$RUNNER_TEMP/trackt-projects/sample/README.md"
+          echo "TRACKT_UID=$(id -u)" >> "$GITHUB_ENV"
+          echo "TRACKT_GID=$(id -g)" >> "$GITHUB_ENV"
+          echo "TRACKT_PROJECTS_DIR=$RUNNER_TEMP/trackt-projects" >> "$GITHUB_ENV"
+          echo "TRACKT_MODE=mock" >> "$GITHUB_ENV"
+      - name: Build and start the Linux image
+        run: |
+          docker compose config --quiet
+          docker compose build --pull
+          docker compose up -d --wait --wait-timeout 90
+      - name: Verify installed tools, non-root user and writable project
+        run: |
+          docker compose exec -T trackt sh -eu -c '
+            test "$(id -u)" != 0
+            test "$(bun --version)" = "1.4.2"
+            test "$(codex --version)" = "codex-cli 0.162.0"
+            test "$(claude --version)" = "2.1.295 (Claude Code)"
+            test -x /usr/bin/tini
+            test -w "$HOME" && test -w "$CODEX_HOME"
+            test -w /var/lib/trackt
+            printf "ok\n" > /workspace/projects/sample/container-write.txt
+            printf "persist-home\n" > "$HOME/smoke-marker"
+          '
+          test "$(cat "$TRACKT_PROJECTS_DIR/sample/container-write.txt")" = ok
+          docker compose exec -T trackt bun run doctor | tee "$RUNNER_TEMP/trackt-doctor.txt"
+          grep -q '✓ codex:' "$RUNNER_TEMP/trackt-doctor.txt"
+          grep -q '✓ claude:' "$RUNNER_TEMP/trackt-doctor.txt"
+      - name: Exercise the API with the mock agent only
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+          base = 'http://127.0.0.1:4310'
+          def request(path, data=None, **headers):
+              if data is not None:
+                  data = json.dumps(data).encode()
+                  headers = {'Content-Type': 'application/json', 'Origin': base, **headers}
+              with urllib.request.urlopen(urllib.request.Request(base + path, data=data, headers=headers), timeout=10) as r:
+                  return json.load(r)
+          info = request('/api/info')
+          assert info['mode'] == 'mock' and info['scheduler'] == 'running', info
+          assert all(p['available'] for p in info['providers']), info
+          with urllib.request.urlopen(base, timeout=10) as r:
+              assert r.status == 200 and b'<html' in r.read()
+          try:
+              request('/api/info', Host='untrusted.example')
+              raise AssertionError('Host guard accepted an untrusted hostname')
+          except urllib.error.HTTPError as e:
+              assert e.code == 403, e.code
+          try:
+              request('/api/tasks', {}, Origin='https://untrusted.example')
+              raise AssertionError('Origin guard accepted another site')
+          except urllib.error.HTTPError as e:
+              assert e.code == 403, e.code
+          task = request('/api/tasks', {
+              'title': 'Persistent container smoke', 'instruction': 'Mock run; no models.',
+              'provider': 'codex', 'cwd': '/workspace/projects/sample',
+              'schedule': 'manual', 'paused': False,
+              'intervalMinutes': None, 'firstRunAt': None,
+          })
+          request('/api/tasks/' + task['id'] + '/run', {})
+          deadline = time.monotonic() + 30
+          while time.monotonic() < deadline:
+              detail = request('/api/tasks/' + task['id'])
+              if detail['runs'][0]['status'] == 'completed':
+                  break
+              time.sleep(.25)
+          else:
+              raise AssertionError(detail)
+          assert detail['runs'][0]['mock'] is True
+          assert detail['runs'][0]['sessionId'] and detail['comments']
+          with open(os.environ['RUNNER_TEMP'] + '/trackt-smoke-id', 'w') as f:
+              f.write(task['id'])
+          PY
+      - name: Recreate the container and verify database and CLI-home persistence
+        run: |
+          docker compose down
+          docker compose up -d --wait --wait-timeout 90
+          docker compose exec -T trackt sh -eu -c 'test "$(cat "$HOME/smoke-marker")" = persist-home'
+          python3 - <<'PY'
+          import json, os, urllib.request
+          with open(os.environ['RUNNER_TEMP'] + '/trackt-smoke-id') as f:
+              task_id = f.read()
+          with urllib.request.urlopen('http://127.0.0.1:4310/api/tasks/' + task_id, timeout=10) as r:
+              detail = json.load(r)
+          assert detail['task']['title'] == 'Persistent container smoke'
+          assert len(detail['runs']) == 1 and detail['runs'][0]['status'] == 'completed'
+          assert detail['runs'][0]['mock'] is True
+          assert detail['comments']
+          PY
+      - name: Recover the same database after an abrupt container kill
+        run: |
+          docker compose kill -s SIGKILL trackt
+          docker compose up -d --wait --wait-timeout 90
+          docker compose exec -T trackt sh -eu -c 'test "$(cat "$HOME/smoke-marker")" = persist-home'
+          python3 - <<'PYCODE'
+          import json, os, urllib.request
+          with open(os.environ['RUNNER_TEMP'] + '/trackt-smoke-id') as f:
+              task_id = f.read()
+          with urllib.request.urlopen('http://127.0.0.1:4310/api/tasks/' + task_id, timeout=10) as r:
+              detail = json.load(r)
+          assert len(detail['runs']) == 1 and detail['runs'][0]['status'] == 'completed'
+          assert detail['runs'][0]['mock'] is True and detail['comments']
+          PYCODE
+      - name: Diagnostics on failure
+        if: failure()
+        run: docker compose ps -a && docker compose logs --no-color --tail=120
+      - name: Clean up disposable CI containers and volumes
+        if: always()
+        run: docker compose down --volumes --remove-orphans

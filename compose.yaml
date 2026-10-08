@@ -1,0 +1,38 @@
+name: trackt
+services:
+  trackt:
+    image: trackt:local
+    build:
+      context: .
+      args:
+        TRACKT_UID: "${TRACKT_UID:-1000}"
+        TRACKT_GID: "${TRACKT_GID:-1000}"
+    environment:
+      TRACKT_MODE: "${TRACKT_MODE:-cli}"
+      TRACKT_DB: "/var/lib/trackt/${TRACKT_MODE:-cli}.sqlite"
+      TRACKT_HOST: "0.0.0.0"
+      TRACKT_ALLOWED_HOSTS: "127.0.0.1:4310,localhost:4310"
+      TRACKT_ALLOWED_ORIGINS: "http://127.0.0.1:4310,http://localhost:4310"
+      TRACKT_DEFAULT_CWD: "/workspace/projects"
+      PORT: "4310"
+    ports:
+      - "127.0.0.1:4310:4310"
+    volumes:
+      - trackt-data:/var/lib/trackt
+      # This is a dedicated container home, never the host user's home.
+      # Includes .codex, .claude and .claude.json (auth, settings, sessions).
+      - trackt-cli-home:/home/trackt
+      - type: bind
+        source: "${TRACKT_PROJECTS_DIR:-./projects}"
+        target: /workspace/projects
+        bind:
+          create_host_path: false
+    # Keep the standard Docker sandbox; never grant privileged/host access.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    restart: unless-stopped
+volumes:
+  trackt-data:
+  trackt-cli-home:
