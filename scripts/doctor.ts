@@ -19,6 +19,7 @@ for (const provider of ['codex', 'claude'] as Provider[]) {
       ? capabilitiesFromHelp(provider, await help(['exec', '--help']), await help(['exec', 'resume', '--help']))
       : capabilitiesFromHelp(provider, await help(['--help']));
     console.log(`✓ ${provider}: CLI найден, нужные флаги поддерживаются${capabilities.schema ? ', JSON Schema доступна' : ''}`);
+    console.log(`  Effort: ${capabilities.efforts?.length ? capabilities.efforts.join(', ') : 'только по умолчанию; обновите CLI для выбора effort'}`);
     available++;
   } catch (error) { console.log(`! ${provider}: ${error instanceof Error ? error.message : error}`); }
 }

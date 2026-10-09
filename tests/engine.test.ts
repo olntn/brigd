@@ -65,7 +65,7 @@ describe('agent lifecycle orchestration', () => {
     const run = engine.start(task.id);
     expect(run.status).toBe('running');
     expect(agent.calls).toHaveLength(1);
-    expect(agent.calls[0]!.input).toEqual({ provider: 'codex', cwd: folder, instruction: task.instruction, sessionId: undefined, answer: undefined, mock: true });
+    expect(agent.calls[0]!.input).toEqual({ provider: 'codex', cwd: folder, instruction: task.instruction, sessionId: undefined, answer: undefined, mock: true, effort: 'default', communicationStyle: '' });
     agent.calls[0]!.callbacks.onSession('session-exact');
     agent.calls[0]!.callbacks.onComment('Reading files');
     agent.calls[0]!.resolve(outcome());
@@ -101,6 +101,54 @@ describe('agent lifecycle orchestration', () => {
     store.updateTask(task.id, input('/var/tmp', { provider: 'claude', instruction: 'New instruction' }));
     engine.resume(run.id, 'Answer', false);
     expect(agent.calls[1]!.input).toMatchObject({ provider: 'codex', cwd: folder, instruction: task.instruction, sessionId: 'session-exact', mock: true });
+  });
+
+  test.each(['codex', 'claude'] as const)('%s launches and resumes frozen worker effort/style after profile edits and archiving', async provider => {
+    const worker = store.createWorker({ name: 'Reviewer', avatarUrl: null, provider, effort: 'high', communicationStyle: 'Be concise; "quotes" stay literal.' });
+    const task = store.createTask(input(folder, { provider, workerId: worker.id }));
+    const run = engine.start(task.id);
+    expect(run.worker).toMatchObject({ id: worker.id, provider, effort: 'high', communicationStyle: worker.communicationStyle });
+    expect(agent.calls[0]!.input).toEqual({ provider, cwd: folder, instruction: task.instruction, sessionId: undefined, answer: undefined, mock: true, effort: 'high', communicationStyle: worker.communicationStyle });
+    agent.calls[0]!.resolve(outcome('needs_input'));
+    await flush();
+    const nextProvider = provider === 'codex' ? 'claude' : 'codex';
+    store.updateWorker(worker.id, { name: 'Changed reviewer', avatarUrl: null, provider: nextProvider, effort: 'low', communicationStyle: 'A different style' });
+    store.archiveWorker(worker.id);
+    engine.resume(run.id, 'Continue with the original task.', false);
+    expect(agent.calls[1]!.input).toEqual({ ...agent.calls[0]!.input, sessionId: 'session-exact', answer: 'Continue with the original task.' });
+    expect(store.getRun(run.id).worker).toEqual(run.worker);
+    agent.calls[1]!.resolve(outcome());
+    await flush();
+    engine.start(task.id);
+    expect(agent.calls[2]!.input).toMatchObject({ provider: nextProvider, effort: 'low', communicationStyle: 'A different style', sessionId: undefined });
+  });
+
+  test('scheduled launch uses the same persisted worker settings as manual launch', () => {
+    const now = Date.now();
+    const worker = store.createWorker({ name: 'Scheduled reviewer', avatarUrl: null, provider: 'claude', effort: 'max', communicationStyle: 'Use bullet points.' });
+    const task = store.createTask(input(folder, { provider: 'claude', workerId: worker.id, schedule: 'interval', intervalMinutes: 5, firstRunAt: now }));
+    engine.tick(now);
+    expect(agent.calls).toHaveLength(1);
+    expect(agent.calls[0]!.input).toMatchObject({ provider: 'claude', effort: 'max', communicationStyle: worker.communicationStyle });
+    expect(store.detail(task.id).runs[0]!.worker).toMatchObject({ id: worker.id, effort: 'max' });
+  });
+
+  test('a waiting worker session resumes frozen settings after closing and reopening the database', async () => {
+    const worker = store.createWorker({ name: 'Persistent reviewer', avatarUrl: null, provider: 'codex', effort: 'xhigh', communicationStyle: 'Report only verified facts.' });
+    const task = store.createTask(input(folder, { workerId: worker.id }));
+    const run = engine.start(task.id);
+    agent.calls[0]!.resolve(outcome('needs_input'));
+    await flush();
+    await engine.shutdown();
+    store.close();
+    store = new Store(join(folder, 'trackt.sqlite'));
+    store.updateWorker(worker.id, { ...worker, provider: 'claude', effort: 'max', communicationStyle: 'Changed after restart.' });
+    engine = new Engine(store, true, agent.factory);
+    engine.startScheduler();
+    expect(agent.calls).toHaveLength(1);
+    engine.resume(run.id, 'Use src/main.ts.', false);
+    expect(agent.calls[1]!.input).toMatchObject({ provider: 'codex', effort: 'xhigh', communicationStyle: worker.communicationStyle, sessionId: 'session-exact', answer: 'Use src/main.ts.' });
+    expect(store.getRun(run.id).worker).toEqual(run.worker);
   });
 
   test('callbacks from an older turn cannot mutate the resumed turn', async () => {

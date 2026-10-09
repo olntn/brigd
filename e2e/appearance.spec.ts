@@ -11,13 +11,13 @@ const summary = token('Результат');
 const failure = token('Ошибка');
 const taskId = 'appearance-task';
 const run: Run = {
-  id: 'appearance-run', taskId, provider: 'codex', cwd: '/workspace/project', instruction,
+  id: 'appearance-run', taskId, workerId: null, worker: null, provider: 'codex', cwd: '/workspace/project', instruction,
   trigger: 'manual', scheduledFor: null, status: 'completed', sessionId: 'appearance-session',
   startedAt: timestamp, updatedAt: timestamp + 1_000, finishedAt: timestamp + 1_000,
   summary, error: null, turn: 1, mock: false,
 };
 const task: Task = {
-  id: taskId, title: `Адаптивная-${'Задача'.repeat(18)}`, instruction, provider: 'codex',
+  id: taskId, workerId: null, worker: null, title: `Адаптивная-${'Задача'.repeat(18)}`, instruction, provider: 'codex',
   cwd: `/workspace/${'длинный-путь-'.repeat(35)}`, schedule: 'manual', intervalMinutes: null,
   firstRunAt: null, paused: false, createdAt: timestamp, updatedAt: timestamp,
   nextRunAt: null, status: 'completed', latestRun: run, runCount: 2,
@@ -45,6 +45,8 @@ async function fixtureApi(page: Page, mode: AppInfo['mode'] = 'mock', populated 
       await route.fulfill({ status: 405, json: { error: 'Appearance fixtures are read-only' } });
     } else if (path === '/api/info') {
       await route.fulfill({ json: info });
+    } else if (path === '/api/workers') {
+      await route.fulfill({ json: [] });
     } else if (path === '/api/tasks') {
       await route.fulfill({ json: populated ? [task] : [] });
     } else if (path === `/api/tasks/${taskId}`) {

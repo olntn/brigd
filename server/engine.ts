@@ -40,6 +40,7 @@ export class Engine {
     let handle: AgentHandle;
     try {
       handle = this.factory({ provider: run.provider, cwd: run.cwd, instruction: run.instruction,
+        effort: run.worker?.effort ?? 'default', communicationStyle: run.worker?.communicationStyle ?? '',
         sessionId: run.sessionId ?? undefined, answer, mock: run.mock }, {
         onSession: id => { if (isCurrent()) this.store.setSession(run.id, id); },
         onComment: body => { if (isCurrent()) this.store.comment(run.taskId, run.id, 'agent', body.slice(0, 16_000)); }

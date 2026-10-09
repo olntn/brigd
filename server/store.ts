@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync } from 'node:fs';
-import type { Comment, Run, RunStatus, Task, TaskDetail, TaskInput } from '../src/lib/types';
+import { createHash } from 'node:crypto';
+import type { Comment, Run, RunStatus, Task, TaskDetail, TaskInput, Worker, WorkerInput, WorkerSnapshot } from '../src/lib/types';
 
 export class AppError extends Error {
   constructor(message: string, public status = 400) { super(message); }
@@ -29,6 +30,14 @@ export class Store {
   constructor(path = ':memory:') {
     this.db = new Database(path, { create: true });
     this.db.exec(`PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;
+      CREATE TABLE IF NOT EXISTS avatars (
+        id TEXT PRIMARY KEY, mime TEXT NOT NULL, data BLOB NOT NULL, created_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS workers (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, provider TEXT NOT NULL, effort TEXT NOT NULL,
+        communication_style TEXT NOT NULL DEFAULT '', avatar_url TEXT, archived INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY, title TEXT NOT NULL, instruction TEXT NOT NULL, provider TEXT NOT NULL,
         cwd TEXT NOT NULL, schedule TEXT NOT NULL, interval_minutes INTEGER, first_run_at INTEGER,
@@ -51,6 +60,18 @@ export class Store {
       CREATE TABLE IF NOT EXISTS service_lease (singleton INTEGER PRIMARY KEY CHECK(singleton=1), pid INTEGER NOT NULL, owner TEXT NOT NULL, identity TEXT);
     `);
     if (!(this.db.query('PRAGMA table_info(service_lease)').all() as Row[]).some(row => row.name === 'identity')) this.db.exec('ALTER TABLE service_lease ADD COLUMN identity TEXT');
+    // Additive migrations preserve existing task IDs, runs, comments, and CLI sessions.
+    this.db.transaction(() => {
+      for (const [table, column, definition] of [
+        ['tasks', 'worker_id', 'TEXT REFERENCES workers(id)'],
+        ['runs', 'worker_id', 'TEXT REFERENCES workers(id)'],
+        ['runs', 'worker_snapshot', 'TEXT'],
+      ]) {
+        if (!(this.db.query(`PRAGMA table_info(${table})`).all() as Row[]).some(row => row.name === column)) {
+          this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        }
+      }
+    }).immediate();
     // Upgrade the occupancy index without leaving an unguarded migration window.
     this.db.transaction(() => {
       this.db.exec(`DROP INDEX IF EXISTS one_open_run; CREATE UNIQUE INDEX one_open_run ON runs(task_id) WHERE status IN (${OPEN})`);
@@ -74,15 +95,70 @@ export class Store {
     }).immediate();
   }
   releaseLease(owner: string) { this.db.query('DELETE FROM service_lease WHERE singleton=1 AND owner=?').run(owner); }
+  private mapWorker(row: Row): Worker {
+    return { id: row.id, name: row.name, provider: row.provider, effort: row.effort,
+      communicationStyle: row.communication_style, avatarUrl: row.avatar_url, archived: !!row.archived,
+      createdAt: row.created_at, updatedAt: row.updated_at };
+  }
+  listWorkers(): Worker[] {
+    return (this.db.query('SELECT * FROM workers ORDER BY archived, created_at DESC, rowid DESC').all() as Row[]).map(row => this.mapWorker(row));
+  }
+  getWorker(id: string): Worker {
+    const row = this.db.query('SELECT * FROM workers WHERE id=?').get(id) as Row | null;
+    if (!row) throw new AppError('Работник не найден', 404);
+    return this.mapWorker(row);
+  }
+  private assertAvatar(avatarUrl: string | null) {
+    if (avatarUrl === null) return;
+    const match = avatarUrl.match(/^\/api\/avatars\/([a-f0-9]{64})$/);
+    if (!match || !this.db.query('SELECT id FROM avatars WHERE id=?').get(match[1]!)) throw new AppError('Выберите загруженный аватар');
+  }
+  createWorker(input: WorkerInput, now = Date.now()): Worker {
+    this.assertAvatar(input.avatarUrl);
+    const id = crypto.randomUUID();
+    this.db.query(`INSERT INTO workers (id,name,provider,effort,communication_style,avatar_url,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
+      .run(id, input.name, input.provider, input.effort, input.communicationStyle, input.avatarUrl, now, now);
+    return this.getWorker(id);
+  }
+  updateWorker(id: string, input: WorkerInput & { archived?: boolean }, now = Date.now()): Worker {
+    const current = this.getWorker(id);
+    this.assertAvatar(input.avatarUrl);
+    this.db.query('UPDATE workers SET name=?,provider=?,effort=?,communication_style=?,avatar_url=?,archived=?,updated_at=? WHERE id=?')
+      .run(input.name, input.provider, input.effort, input.communicationStyle, input.avatarUrl, +(input.archived ?? current.archived), now, id);
+    return this.getWorker(id);
+  }
+  archiveWorker(id: string, now = Date.now()): Worker {
+    this.getWorker(id);
+    // Keep references and immutable avatars so scheduled tasks and old sessions remain usable.
+    this.db.query('UPDATE workers SET archived=1,updated_at=? WHERE id=?').run(now, id);
+    return this.getWorker(id);
+  }
+  saveAvatar(data: Uint8Array, mime: string, now = Date.now()): string {
+    const id = createHash('sha256').update(data).digest('hex');
+    this.db.query('INSERT OR IGNORE INTO avatars (id,mime,data,created_at) VALUES (?,?,?,?)').run(id, mime, data, now);
+    return `/api/avatars/${id}`;
+  }
+  getAvatar(id: string): { mime: string; data: Uint8Array } {
+    const row = this.db.query('SELECT mime,data FROM avatars WHERE id=?').get(id) as { mime: string; data: Uint8Array } | null;
+    if (!row) throw new AppError('Аватар не найден', 404);
+    return row;
+  }
+  private assignedWorker(id: string | null | undefined, currentId?: string | null): Worker | null {
+    if (id == null) return null;
+    const worker = this.getWorker(id);
+    if (worker.archived && worker.id !== currentId) throw new AppError('Работник в архиве. Восстановите его или выберите другого.', 409);
+    return worker;
+  }
   private mapRun(row: Row): Run {
-    return { id: row.id, taskId: row.task_id, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
+    return { id: row.id, taskId: row.task_id, workerId: row.worker_id ?? null, worker: row.worker_snapshot ? JSON.parse(row.worker_snapshot) as WorkerSnapshot : null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
       trigger: row.trigger, scheduledFor: row.scheduled_for, status: row.status, sessionId: row.session_id,
       startedAt: row.started_at, updatedAt: row.updated_at, finishedAt: row.finished_at, summary: row.summary,
       error: row.error, turn: row.turn, mock: !!row.mock };
   }
   private mapTask(row: Row): Task {
     const latest = this.db.query('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1').get(row.id) as Row | null;
-    return { id: row.id, title: row.title, instruction: row.instruction, provider: row.provider, cwd: row.cwd,
+    const worker = row.worker_id ? this.getWorker(row.worker_id) : null;
+    return { id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd,
       schedule: row.schedule, intervalMinutes: row.interval_minutes, firstRunAt: row.first_run_at,
       nextRunAt: row.next_run_at, paused: !!row.paused, createdAt: row.created_at, updatedAt: row.updated_at,
       status: latest?.status ?? 'ready', latestRun: latest ? this.mapRun(latest) : null,
@@ -109,18 +185,20 @@ export class Store {
   }
   createTask(input: TaskInput, now = Date.now()): Task {
     const id = crypto.randomUUID();
-    this.db.query(`INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, input.provider,
+    const worker = this.assignedWorker(input.workerId);
+    this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, worker?.provider ?? input.provider,
       input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt,
-      input.schedule === 'interval' ? (input.firstRunAt ?? now) : null, +input.paused, now, now);
+      input.schedule === 'interval' ? (input.firstRunAt ?? now) : null, +input.paused, now, now, worker?.id ?? null);
     return this.getTask(id);
   }
   updateTask(id: string, input: TaskInput, now = Date.now()): Task {
     const task = this.getTask(id);
+    const worker = this.assignedWorker(input.workerId === undefined ? task.workerId : input.workerId, task.workerId);
     const changedSchedule = input.schedule !== task.schedule || input.intervalMinutes !== task.intervalMinutes || input.firstRunAt !== task.firstRunAt;
     let next = task.nextRunAt;
     if (changedSchedule) next = input.schedule === 'interval' ? (input.firstRunAt ?? now) : null;
-    this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=? WHERE id=?`)
-      .run(input.title, input.instruction, input.provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, id);
+    this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=? WHERE id=?`)
+      .run(input.title, input.instruction, worker?.provider ?? input.provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, id);
     return this.getTask(id);
   }
   comment(taskId: string, runId: string | null, kind: Comment['kind'], body: string, now = Date.now()): Comment {
@@ -132,8 +210,12 @@ export class Store {
   private insertRun(task: Task, trigger: Run['trigger'], scheduledFor: number | null, mock: boolean, now: number): Run {
     if (this.activeRun(task.id)) throw new AppError('У задачи уже есть активный запуск. Ответьте агенту или отмените запуск.', 409);
     const id = crypto.randomUUID();
-    this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,scheduled_for,status,started_at,updated_at,mock) VALUES (?,?,?,?,?,?,?,'running',?,?,?)`)
-      .run(id, task.id, task.provider, task.cwd, task.instruction, trigger, scheduledFor, now, now, +mock);
+    const worker: WorkerSnapshot | null = task.worker ? {
+      id: task.worker.id, name: task.worker.name, avatarUrl: task.worker.avatarUrl, provider: task.worker.provider,
+      effort: task.worker.effort, communicationStyle: task.worker.communicationStyle,
+    } : null;
+    this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,scheduled_for,status,started_at,updated_at,mock,worker_id,worker_snapshot) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?)`)
+      .run(id, task.id, task.provider, task.cwd, task.instruction, trigger, scheduledFor, now, now, +mock, worker?.id ?? null, worker ? JSON.stringify(worker) : null);
     this.comment(task.id, id, 'system', mock ? 'Демо-запуск: используется тестовый агент, реальные CLI не вызываются.' : `Запуск ${task.provider === 'codex' ? 'Codex' : 'Claude Code'} через CLI.`, now);
     return this.getRun(id);
   }

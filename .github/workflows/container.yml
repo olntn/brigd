@@ -43,6 +43,8 @@ jobs:
           docker compose exec -T trackt bun run doctor | tee "$RUNNER_TEMP/trackt-doctor.txt"
           grep -q '✓ codex:' "$RUNNER_TEMP/trackt-doctor.txt"
           grep -q '✓ claude:' "$RUNNER_TEMP/trackt-doctor.txt"
+      - name: Verify every worker effort against pinned native CLI parsers without model calls
+        run: docker compose exec -T trackt bun scripts/check-cli.ts
       - name: Exercise the API with the mock agent only
         run: |
           python3 - <<'PY'

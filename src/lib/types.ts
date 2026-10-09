@@ -1,7 +1,25 @@
 export type Provider = 'codex' | 'claude';
+export type Effort = 'default' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export interface WorkerInput {
+  name: string;
+  provider: Provider;
+  effort: Effort;
+  communicationStyle: string;
+  avatarUrl: string | null;
+}
+export interface Worker extends WorkerInput {
+  id: string;
+  archived: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+/** Immutable identity and execution settings captured when a run starts. */
+export interface WorkerSnapshot extends WorkerInput { id: string; }
+
 export type RunStatus = 'running' | 'cancelling' | 'waiting_input' | 'completed' | 'blocked' | 'failed' | 'interrupted' | 'cancelled';
 export type TaskStatus = 'ready' | RunStatus;
 export interface TaskInput {
+  workerId?: string | null;
   title: string;
   instruction: string;
   provider: Provider;
@@ -12,6 +30,8 @@ export interface TaskInput {
   paused: boolean;
 }
 export interface Task extends TaskInput {
+  workerId: string | null;
+  worker: Worker | null;
   id: string;
   createdAt: number;
   updatedAt: number;
@@ -21,6 +41,8 @@ export interface Task extends TaskInput {
   runCount: number;
 }
 export interface Run {
+  workerId: string | null;
+  worker: WorkerSnapshot | null;
   id: string;
   taskId: string;
   provider: Provider;

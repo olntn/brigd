@@ -1,7 +1,8 @@
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
-import type { TaskInput } from '../src/lib/types';
+import type { Effort, TaskInput, WorkerInput } from '../src/lib/types';
 import { AppError } from './store';
+import { effortOptions } from '../src/lib/workers';
 
 export function textField(value: unknown, label: string, max: number): string {
   if (typeof value !== 'string' || !value.trim() || value.length > max || value.includes('\0')) throw new AppError(`${label}: введите от 1 до ${max} символов`);
@@ -10,6 +11,8 @@ export function textField(value: unknown, label: string, max: number): string {
 export async function validateTask(value: unknown): Promise<TaskInput> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError('Ожидается JSON-объект');
   const v = value as Record<string, unknown>;
+  const workerId = v.workerId ?? null;
+  if (workerId !== null && (typeof workerId !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(workerId))) throw new AppError('Некорректный работник');
   const title = textField(v.title, 'Название', 140);
   const instruction = textField(v.instruction, 'Инструкция', 16_000);
   if (v.provider !== 'codex' && v.provider !== 'claude') throw new AppError('Выберите Codex или Claude Code');
@@ -32,5 +35,21 @@ export async function validateTask(value: unknown): Promise<TaskInput> {
       firstRunAt = v.firstRunAt;
     }
   }
-  return { title, instruction, provider: v.provider, cwd, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
+  return { workerId, title, instruction, provider: v.provider, cwd, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
+}
+
+export function validateWorker(value: unknown): WorkerInput & { archived?: boolean } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError('Ожидается JSON-объект');
+  const v = value as Record<string, unknown>;
+  const name = textField(v.name, 'Имя работника', 80);
+  if (v.provider !== 'codex' && v.provider !== 'claude') throw new AppError('Выберите Codex или Claude Code');
+  const effort = v.effort === undefined ? 'default' : v.effort;
+  if (typeof effort !== 'string' || !effortOptions[v.provider].includes(effort as Effort)) throw new AppError('Этот effort не поддерживается выбранной моделью');
+  const communicationStyle = v.communicationStyle === undefined ? '' : v.communicationStyle;
+  if (typeof communicationStyle !== 'string' || communicationStyle.length > 4_000 || communicationStyle.includes('\0')) throw new AppError('Стиль общения: не больше 4000 символов');
+  const avatarUrl = v.avatarUrl ?? null;
+  if (avatarUrl !== null && (typeof avatarUrl !== 'string' || !/^\/api\/avatars\/[a-f0-9]{64}$/.test(avatarUrl))) throw new AppError('Используйте загруженный аватар');
+  if ('archived' in v && typeof v.archived !== 'boolean') throw new AppError('archived должен быть boolean');
+  return { name, provider: v.provider, effort: effort as Effort, communicationStyle: communicationStyle.trim(), avatarUrl,
+    ...(typeof v.archived === 'boolean' ? { archived: v.archived } : {}) };
 }

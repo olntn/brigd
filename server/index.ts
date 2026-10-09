@@ -4,6 +4,7 @@ import { Store } from './store';
 import { Engine } from './engine';
 import { createHandler } from './http';
 import { readConfig } from './config';
+import { MAX_AVATAR_BYTES } from './avatars';
 
 const root = resolve(import.meta.dir, '..');
 const { mode, port, hostname, allowedHosts, allowedOrigins, dbPath, dev, defaultCwd } = readConfig(root);
@@ -13,7 +14,7 @@ if (process.platform !== 'win32') chmodSync(dbPath, 0o600);
 const lease = store.acquireLease();
 const engine = new Engine(store, mode === 'mock');
 const server = Bun.serve({
-  hostname, port, maxRequestBodySize: 32_768,
+  hostname, port, maxRequestBodySize: MAX_AVATAR_BYTES,
   fetch: createHandler(engine, { port, root, dev, allowedHosts, allowedOrigins, defaultCwd })
 });
 engine.startScheduler();

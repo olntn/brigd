@@ -2,7 +2,8 @@ import { resolve, sep } from 'node:path';
 import type { AppInfo } from '../src/lib/types';
 import { Engine } from './engine';
 import { AppError } from './store';
-import { textField, validateTask } from './validation';
+import { MAX_AVATAR_BYTES, validateAvatar } from './avatars';
+import { textField, validateTask, validateWorker } from './validation';
 
 export interface HttpOptions { port: number; dev?: boolean; root?: string; startedAt?: number; allowedHosts?: string[]; allowedOrigins?: string[]; defaultCwd?: string; }
 const JSON_LIMIT = 32_768;
@@ -10,12 +11,11 @@ const securityHeaders = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
   'Cache-Control': 'no-store',
-  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 };
 function json(data: unknown, status = 200) { return Response.json(data, { status, headers: securityHeaders }); }
-async function body(req: Request): Promise<Record<string, unknown>> {
-  if (req.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json') throw new AppError('Нужен Content-Type: application/json', 415);
-  if (Number(req.headers.get('content-length')) > JSON_LIMIT) throw new AppError('Слишком большой запрос', 413);
+async function readBody(req: Request, limit: number): Promise<Uint8Array> {
+  if (Number(req.headers.get('content-length')) > limit) throw new AppError('Слишком большой запрос', 413);
   const reader = req.body?.getReader();
   let count = 0;
   const chunks: Uint8Array[] = [];
@@ -23,11 +23,16 @@ async function body(req: Request): Promise<Record<string, unknown>> {
     const { value, done } = await reader.read();
     if (done) break;
     count += value.byteLength;
-    if (count > JSON_LIMIT) { await reader.cancel(); throw new AppError('Слишком большой запрос', 413); }
+    if (count > limit) { await reader.cancel(); throw new AppError('Слишком большой запрос', 413); }
     chunks.push(value);
   }
+  return Buffer.concat(chunks);
+}
+async function body(req: Request): Promise<Record<string, unknown>> {
+  if (req.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json') throw new AppError('Нужен Content-Type: application/json', 415);
+  const bytes = await readBody(req, JSON_LIMIT);
   let parsed: unknown;
-  try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new AppError('Некорректный JSON'); }
+  try { parsed = JSON.parse(Buffer.from(bytes).toString('utf8')); } catch { throw new AppError('Некорректный JSON'); }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new AppError('Ожидается JSON-объект');
   return parsed as Record<string, unknown>;
 }
@@ -52,6 +57,26 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         const info: AppInfo = { mode: engine.mock ? 'mock' : 'cli', cwd: options.defaultCwd ?? process.cwd(), scheduler: 'running', startedAt,
           providers: [{ id: 'codex', available: engine.mock || !!Bun.which('codex'), label: 'Codex' }, { id: 'claude', available: engine.mock || !!Bun.which('claude'), label: 'Claude Code' }] };
         return json(info);
+      }
+      if (path === '/api/avatars' && method === 'POST') {
+        const mime = req.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? '';
+        const data = await readBody(req, MAX_AVATAR_BYTES);
+        validateAvatar(data, mime);
+        return json({ avatarUrl: engine.store.saveAvatar(data, mime) }, 201);
+      }
+      const avatarMatch = path.match(/^\/api\/avatars\/([a-f0-9]{64})$/);
+      if (avatarMatch && (method === 'GET' || method === 'HEAD')) {
+        const avatar = engine.store.getAvatar(avatarMatch[1]!);
+        return new Response(method === 'HEAD' ? null : new Uint8Array(avatar.data), { headers: { ...securityHeaders, 'Content-Type': avatar.mime, 'Content-Length': String(avatar.data.byteLength), 'Content-Disposition': 'inline' } });
+      }
+      if (path === '/api/workers' && method === 'GET') return json(engine.store.listWorkers());
+      if (path === '/api/workers' && method === 'POST') return json(engine.store.createWorker(validateWorker(await body(req))), 201);
+      const workerMatch = path.match(/^\/api\/workers\/([a-zA-Z0-9-]+)$/);
+      if (workerMatch) {
+        const id = workerMatch[1]!;
+        if (method === 'GET') return json(engine.store.getWorker(id));
+        if (method === 'PATCH') return json(engine.store.updateWorker(id, validateWorker({ ...engine.store.getWorker(id), ...await body(req) })));
+        if (method === 'DELETE') return json(engine.store.archiveWorker(id));
       }
       if (path === '/api/tasks' && method === 'GET') return json(engine.store.listTasks());
       if (path === '/api/tasks' && method === 'POST') return json(engine.store.createTask(await validateTask(await body(req))), 201);

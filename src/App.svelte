@@ -1,13 +1,21 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import Icon from './lib/Icon.svelte';
+  import Workers from './lib/Workers.svelte';
+  import WorkerAvatar from './lib/WorkerAvatar.svelte';
+  import { effortLabel } from './lib/workers';
   import { applyTheme, readTheme, saveTheme, themeStorageKey, type Theme } from './lib/theme';
-  import type { AppInfo, Comment, Provider, Run, Task, TaskDetail, TaskInput, TaskStatus } from './lib/types';
+  import type { AppInfo, Comment, Provider, Run, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
 
   type Scope = 'all' | 'scheduled' | 'attention' | 'completed';
   type View = 'board' | 'list';
   let info = $state<AppInfo | null>(null);
   let tasks = $state<Task[]>([]);
+  let page = $state<'tasks' | 'workers'>('tasks');
+  let workers = $state<Worker[]>([]);
+  let workersLoading = $state(true);
+  let workersError = $state('');
+  let workerSequence = 0;
   let loading = $state(true);
   let connectionError = $state('');
   let search = $state('');
@@ -35,6 +43,8 @@
   let formTitle = $state('');
   let formInstruction = $state('');
   let formProvider = $state<Provider>('codex');
+  let formWorkerId = $state('');
+  let formOriginalWorker = $state<Worker | null>(null);
   let formCwd = $state('');
   let formSchedule = $state<'manual' | 'interval'>('manual');
   let formInterval = $state(60);
@@ -45,7 +55,7 @@
   let drawerSequence = 0;
   let taskSequence = 0;
   let toastTimer: ReturnType<typeof setTimeout>;
-  let searchInput: HTMLInputElement;
+  let searchInput = $state<HTMLInputElement>();
 
   const labels: Record<TaskStatus, string> = {
     ready: 'К запуску', running: 'В работе', cancelling: 'Останавливается', waiting_input: 'Нужен ответ', completed: 'Завершено',
@@ -63,9 +73,9 @@
   const archiveStatuses: TaskStatus[] = ['failed', 'blocked', 'cancelled', 'interrupted'];
   let filtered = $derived(tasks.filter(task => {
     const query = search.trim().toLocaleLowerCase();
-    return (provider === 'all' || task.provider === provider)
+    return (provider === 'all' || visibleProvider(task) === provider)
       && (scope === 'all' || (scope === 'scheduled' && task.schedule === 'interval') || (scope === 'attention' && attentionStatuses.includes(task.status)) || (scope === 'completed' && task.status === 'completed'))
-      && (!query || `${task.title} ${task.instruction} ${task.cwd}`.toLocaleLowerCase().includes(query));
+      && (!query || `${task.title} ${task.instruction} ${task.cwd} ${task.worker?.name ?? ''} ${task.latestRun?.worker?.name ?? ''}`.toLocaleLowerCase().includes(query));
   }));
   let archived = $derived(filtered.filter(task => archiveStatuses.includes(task.status)));
   let waitingCount = $derived(tasks.filter(task => attentionStatuses.includes(task.status)).length);
@@ -76,7 +86,8 @@
   let currentRun = $derived(selectedTask?.latestRun ?? null);
   let taskBusy = $derived(selectedId ? pending.includes(selectedId) : false);
   let runCanResume = $derived(currentRun && ['waiting_input', 'interrupted'].includes(currentRun.status));
-  let providerAvailable = $derived(info?.mode === 'mock' || info?.providers.find(p => p.id === formProvider)?.available);
+  let formWorker = $derived(workers.find(worker => worker.id === formWorkerId) ?? (formOriginalWorker?.id === formWorkerId ? formOriginalWorker : null));
+  let providerAvailable = $derived(info?.mode === 'mock' || info?.providers.find(p => p.id === (formWorker?.provider ?? formProvider))?.available);
 
   async function api<T>(path: string, options?: RequestInit): Promise<T> {
     const response = await fetch(path, { ...options, headers: options?.method ? { 'Content-Type': 'application/json', ...options.headers } : options?.headers });
@@ -104,6 +115,30 @@
     } finally { if (sequence === taskSequence) loading = false; }
   }
 
+  async function loadWorkers() {
+    const sequence = ++workerSequence;
+    try {
+      const result = await api<Worker[]>('/api/workers');
+      if (sequence !== workerSequence) return;
+      workers = result;
+      workersError = '';
+    } catch (error) {
+      if (sequence === workerSequence) workersError = error instanceof Error ? error.message : 'Не удалось загрузить работников';
+    } finally { if (sequence === workerSequence) workersLoading = false; }
+  }
+
+  function workerChanged(worker: Worker) {
+    workerSequence++;
+    workers = workers.some(item => item.id === worker.id) ? workers.map(item => item.id === worker.id ? worker : item) : [worker, ...workers];
+    workersError = '';
+    workersLoading = false;
+    taskSequence++;
+    drawerSequence++;
+    tasks = tasks.map(task => task.workerId === worker.id ? { ...task, worker, provider: worker.provider } : task);
+    if (detail?.task.workerId === worker.id) detail = { ...detail, task: { ...detail.task, worker, provider: worker.provider } };
+    void refresh();
+  }
+
   async function loadDetail(id = selectedId) {
     if (!id) return;
     const sequence = ++drawerSequence;
@@ -118,7 +153,7 @@
   }
 
   async function refresh() {
-    await Promise.all([loadTasks(), selectedId ? loadDetail() : Promise.resolve()]);
+    await Promise.all([loadTasks(), loadWorkers(), selectedId ? loadDetail() : Promise.resolve()]);
   }
 
   async function loadInfo() {
@@ -191,6 +226,9 @@
     formTitle = task?.title ?? '';
     formInstruction = task?.instruction ?? '';
     formProvider = task?.provider ?? 'codex';
+    formWorkerId = task?.workerId ?? '';
+    formOriginalWorker = task?.worker ?? null;
+    void loadWorkers();
     formCwd = task?.cwd ?? info?.cwd ?? '';
     formSchedule = task?.schedule ?? 'manual';
     formInterval = task?.intervalMinutes ?? 60;
@@ -221,8 +259,10 @@
     }
     const firstRunAt = formSchedule === 'interval' && formFirstRun ? new Date(formFirstRun).getTime() : null;
     if (firstRunAt !== null && !Number.isFinite(firstRunAt)) { formError = 'Проверьте время первого запуска.'; return; }
+    if (formWorkerId && !formWorker) { formError = 'Работник недоступен. Обновите список или выберите другого.'; return; }
+    if (formWorker?.archived && formWorker.id !== formOriginalWorker?.id) { formError = 'Этот работник в архиве. Выберите другого или восстановите профиль.'; return; }
     const payload: TaskInput = {
-      title: formTitle.trim(), instruction: formInstruction.trim(), provider: formProvider, cwd: formCwd.trim(),
+      title: formTitle.trim(), instruction: formInstruction.trim(), provider: formWorker?.provider ?? formProvider, workerId: formWorkerId || null, cwd: formCwd.trim(),
       schedule: formSchedule, intervalMinutes: formSchedule === 'interval' ? formInterval : null,
       firstRunAt, paused: formPaused,
     };
@@ -234,6 +274,7 @@
       submitting = false;
       closeEditor();
       taskSequence++;
+      drawerSequence++;
       tasks = savedEditingId ? tasks.map(task => task.id === saved.id ? saved : task) : [saved, ...tasks];
       if (detail?.task.id === saved.id) detail = { ...detail, task: saved };
       if (!savedEditingId) await openTask(saved);
@@ -291,6 +332,19 @@
     return `Каждые ${minutes} мин.`;
   }
 
+  function visibleWorker(task: Task) { return activeStatuses.includes(task.status) && task.latestRun ? task.latestRun.worker : task.worker; }
+  function visibleProvider(task: Task) { return activeStatuses.includes(task.status) && task.latestRun ? task.latestRun.provider : task.provider; }
+  function commentRun(entry: Comment) { return entry.runId ? detail?.runs.find(run => run.id === entry.runId) ?? null : null; }
+  function commentWorker(entry: Comment) { return ['agent', 'question', 'result'].includes(entry.kind) ? commentRun(entry)?.worker ?? null : null; }
+  function commentAuthor(entry: Comment) {
+    if (entry.kind === 'user') return 'Вы';
+    if (entry.kind === 'system') return 'brigd';
+    const identity = commentWorker(entry);
+    if (identity) return identity.name;
+    if (entry.kind === 'question') return 'Вопрос агента';
+    if (entry.kind === 'result') return 'Результат';
+    return providerName(commentRun(entry)?.provider ?? selectedTask?.provider ?? 'codex');
+  }
   function providerName(value: Provider) { return value === 'codex' ? 'Codex' : 'Claude Code'; }
   function shortPath(path: string) { const parts = path.replace(/\\/g, '/').split('/').filter(Boolean); return parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : path; }
   function elapsed(run: Run) {
@@ -298,9 +352,9 @@
     return seconds < 60 ? `${seconds} сек.` : `${Math.floor(seconds / 60)} мин. ${seconds % 60} сек.`;
   }
   function resetFilters() { search = ''; provider = 'all'; scope = 'all'; }
-  function setScope(value: Scope) { scope = value; showArchived = value === 'attention'; }
+  function setScope(value: Scope) { page = 'tasks'; scope = value; showArchived = value === 'attention'; }
   function globalKey(event: KeyboardEvent) {
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !editorOpen && !selectedId && !settingsOpen) {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && page === 'tasks' && !editorOpen && !selectedId && !settingsOpen) {
       event.preventDefault(); searchInput?.focus();
     }
   }
@@ -323,6 +377,10 @@
   <span class:compact class="provider-badge {value}"><span class="provider-mark">{#if value === 'codex'}<Icon name="code" size={compact ? 12 : 14} />{:else}<span class="claude-mark" aria-hidden="true">✳</span>{/if}</span>{providerName(value)}</span>
 {/snippet}
 
+{#snippet workerBadge(worker: Worker | WorkerSnapshot, compact = false)}
+  <span class="worker-identity" class:compact title={worker.name}><WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={compact ? 23 : 28} /><span>{worker.name}</span>{#if 'archived' in worker && worker.archived}<small>в архиве</small>{/if}</span>
+{/snippet}
+
 {#snippet statusBadge(status: TaskStatus)}
   <span class="status-badge status-{status}"><span class="status-dot"></span>{labels[status]}</span>
 {/snippet}
@@ -330,7 +388,7 @@
 {#snippet taskCard(task: Task)}
   <article class="task-card {task.status}" class:paused-card={task.paused}>
     <button class="card-main" onclick={() => openTask(task)} aria-label={'Открыть задачу: ' + task.title}>
-      <div class="card-top">{@render providerBadge(task.latestRun?.provider ?? task.provider, true)}<span class="task-ref">{task.id.slice(0, 6).toUpperCase()}</span></div>
+      <div class="card-top">{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}<span class="task-ref">{task.id.slice(0, 6).toUpperCase()}</span></div>
       <h3>{task.title}</h3>
       <p class="card-description">{task.latestRun?.summary || task.instruction}</p>
       {#if task.status === 'cancelling'}<div class="card-cancelling"><Icon name="refresh" size={13} class="spin" />Останавливается</div>{/if}
@@ -354,15 +412,16 @@
     <div class="workspace-label"><span class="workspace-icon"><Icon name="folder" size={16} /></span><div><strong>Моё пространство</strong><span>Локальный workspace</span></div><span class="local-light"></span></div>
     <div class="nav-label">РАБОЧЕЕ ПРОСТРАНСТВО</div>
     <nav class="main-nav" aria-label="Задачи">
-      <button class:active={scope === 'all'} aria-label="Все задачи" onclick={() => setScope('all')}><Icon name="board" /><span>Все задачи</span><span class="nav-count">{tasks.length}</span></button>
-      <button class:active={scope === 'attention'} aria-label="Требуют внимания" onclick={() => setScope('attention')}><Icon name="inbox" /><span>Требуют внимания</span>{#if waitingCount}<span class="nav-count attention-count">{waitingCount}</span>{/if}</button>
-      <button class:active={scope === 'scheduled'} aria-label="По расписанию" onclick={() => setScope('scheduled')}><Icon name="clock" /><span>По расписанию</span>{#if scheduledCount}<span class="nav-count">{scheduledCount}</span>{/if}</button>
-      <button class:active={scope === 'completed'} aria-label="Завершённые задачи" onclick={() => setScope('completed')}><Icon name="circlecheck" /><span>Завершённые</span></button>
+      <button class:active={page === 'tasks' && scope === 'all'} aria-label="Все задачи" onclick={() => setScope('all')}><Icon name="board" /><span>Все задачи</span><span class="nav-count">{tasks.length}</span></button>
+      <button class:active={page === 'tasks' && scope === 'attention'} aria-label="Требуют внимания" onclick={() => setScope('attention')}><Icon name="inbox" /><span>Требуют внимания</span>{#if waitingCount}<span class="nav-count attention-count">{waitingCount}</span>{/if}</button>
+      <button class:active={page === 'tasks' && scope === 'scheduled'} aria-label="По расписанию" onclick={() => setScope('scheduled')}><Icon name="clock" /><span>По расписанию</span>{#if scheduledCount}<span class="nav-count">{scheduledCount}</span>{/if}</button>
+      <button class:active={page === 'tasks' && scope === 'completed'} aria-label="Завершённые задачи" onclick={() => setScope('completed')}><Icon name="circlecheck" /><span>Завершённые</span></button>
+      <button class:active={page === 'workers'} aria-label="Работники" onclick={() => { page = 'workers'; void loadWorkers(); }}><Icon name="spark" /><span>Работники</span><span class="nav-count">{workers.filter(worker => !worker.archived).length}</span></button>
     </nav>
     <div class="nav-label agents-label">ВАШИ АГЕНТЫ <span>2</span></div>
     <div class="agent-nav">
       {#each ['codex', 'claude'] as agent}
-        <button class:chosen={provider === agent} onclick={() => { provider = provider === agent ? 'all' : agent as Provider; }} aria-pressed={provider === agent}>
+        <button class:chosen={provider === agent} onclick={() => { page = 'tasks'; provider = provider === agent ? 'all' : agent as Provider; }} aria-pressed={provider === agent}>
           <span class="agent-avatar {agent}">{#if agent === 'codex'}<Icon name="code" size={17} />{:else}<span class="claude-mark">✳</span>{/if}</span>
           <div><strong>{providerName(agent as Provider)}</strong><span>{info?.mode === 'mock' ? 'Демо-адаптер' : info?.providers.find(p => p.id === agent)?.available ? 'CLI доступен' : info ? 'CLI не найден' : 'Проверяем подключение'}</span></div>
           <span class="agent-light" class:online={info?.mode === 'cli' && info?.providers.find(p => p.id === agent)?.available}></span>
@@ -378,6 +437,9 @@
 
   <main class="main-content">
     <div class="workspace-content">
+      {#if page === 'workers'}
+        <Workers {workers} loading={workersLoading} error={workersError} retry={() => { void loadWorkers(); }} onchange={workerChanged} {notify} />
+      {:else}
       <section class="page-heading"><div><div class="eyebrow">МЕНЬШЕ РУТИНЫ. БОЛЬШЕ СДЕЛАННОГО.</div><h1>{scopeTitles[scope]}<span>{scope === 'all' ? tasks.length : filtered.length}</span></h1><p>Дайте агентам задачу. Остальное держите в поле зрения.</p></div><button class="button primary create-button" onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={17} />Новая задача</button></section>
 
       {#if info?.mode === 'mock'}
@@ -412,8 +474,9 @@
             <section class="archive-section"><button class="archive-toggle" aria-expanded={showArchived} onclick={() => showArchived = !showArchived}><Icon name={showArchived ? 'down' : 'chevron'} size={15} /><Icon name="alert" size={15} /><strong>Другие статусы</strong><span>{archived.length}</span><small>Прерванные, отменённые и задачи с ошибками</small></button>{#if showArchived}<div class="archive-grid">{#each archived as task (task.id)}<div class="archive-card-wrapper">{@render statusBadge(task.status)}{@render taskCard(task)}</div>{/each}</div>{/if}</section>
           {/if}
         {:else}
-          <div class="task-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>ЗАПУСК</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{shortPath(task.cwd)}</small></span></button><div>{@render providerBadge(task.provider, true)}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{task.paused ? 'На паузе' : task.schedule === 'interval' ? intervalLabel(task.intervalMinutes) : 'Вручную'}</span><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>Новые задачи появятся здесь</span></div>{/each}</div>
+          <div class="task-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>ЗАПУСК</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{shortPath(task.cwd)}</small></span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{task.paused ? 'На паузе' : task.schedule === 'interval' ? intervalLabel(task.intervalMinutes) : 'Вручную'}</span><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>Новые задачи появятся здесь</span></div>{/each}</div>
         {/if}
+      {/if}
       {/if}
     </div>
   </main>
@@ -423,11 +486,11 @@
   <div class="drawer-content">
     <header class="drawer-topbar"><span><Icon name="terminal" size={16} />Задача <span class="detail-ref">{selectedId?.slice(0, 8).toUpperCase()}</span></span><button class="icon-button" aria-label="Закрыть задачу" onclick={closeDrawer}><Icon name="close" size={20} /></button></header>
     {#if selectedTask}
-      <div class="drawer-heading"><div class="drawer-badges">{@render statusBadge(selectedTask.status)}{@render providerBadge(selectedTask.provider, true)}{#if selectedTask.latestRun?.mock}<span class="demo-badge">MOCK</span>{/if}</div><h2 id="detail-title">{selectedTask.title}</h2><p class="detail-created">Создано {dateTime(selectedTask.createdAt)}</p><div class="detail-actions">{#if !activeStatuses.includes(selectedTask.status)}<button class="button primary" disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'run')}><Icon name={taskBusy ? 'refresh' : 'play'} size={15} class={taskBusy ? 'spin' : ''} />{selectedTask.runCount ? 'Запустить снова' : 'Запустить'}</button>{:else if selectedTask.status === 'cancelling'}<button class="button secondary" disabled><Icon name="refresh" class="spin" size={15} />Останавливаем…</button>{:else if currentRun && ['running', 'waiting_input', 'interrupted'].includes(currentRun.status)}<button class="button secondary danger-hover" disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'cancel')}><Icon name="stop" size={14} />Отменить запуск</button>{/if}<button class="button secondary" disabled={taskBusy} onclick={() => selectedTask && openEditor(selectedTask)}><Icon name="edit" size={15} />Изменить</button>{#if selectedTask.schedule === 'interval'}<button class="icon-button schedule-pause" title={selectedTask.paused ? 'Возобновить расписание' : 'Приостановить расписание'} aria-label={selectedTask.paused ? 'Возобновить расписание' : 'Приостановить расписание'} disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'pause')}><Icon name={selectedTask.paused ? 'play' : 'pause'} size={17} /></button>{/if}</div></div>
+      <div class="drawer-heading"><div class="drawer-badges">{@render statusBadge(selectedTask.status)}{#if visibleWorker(selectedTask)}{@render workerBadge(visibleWorker(selectedTask)!)}{/if}{@render providerBadge(visibleProvider(selectedTask), true)}{#if selectedTask.latestRun?.mock}<span class="demo-badge">MOCK</span>{/if}</div><h2 id="detail-title">{selectedTask.title}</h2><p class="detail-created">Создано {dateTime(selectedTask.createdAt)}</p><div class="detail-actions">{#if !activeStatuses.includes(selectedTask.status)}<button class="button primary" disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'run')}><Icon name={taskBusy ? 'refresh' : 'play'} size={15} class={taskBusy ? 'spin' : ''} />{selectedTask.runCount ? 'Запустить снова' : 'Запустить'}</button>{:else if selectedTask.status === 'cancelling'}<button class="button secondary" disabled><Icon name="refresh" class="spin" size={15} />Останавливаем…</button>{:else if currentRun && ['running', 'waiting_input', 'interrupted'].includes(currentRun.status)}<button class="button secondary danger-hover" disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'cancel')}><Icon name="stop" size={14} />Отменить запуск</button>{/if}<button class="button secondary" disabled={taskBusy} onclick={() => selectedTask && openEditor(selectedTask)}><Icon name="edit" size={15} />Изменить</button>{#if selectedTask.schedule === 'interval'}<button class="icon-button schedule-pause" title={selectedTask.paused ? 'Возобновить расписание' : 'Приостановить расписание'} aria-label={selectedTask.paused ? 'Возобновить расписание' : 'Приостановить расписание'} disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'pause')}><Icon name={selectedTask.paused ? 'play' : 'pause'} size={17} /></button>{/if}</div></div>
       {#if selectedTask.status === 'cancelling'}<div class="cancelling-note" role="status"><Icon name="refresh" size={16} class="spin" /><span>Ожидаем завершения процесса агента и его дочерних процессов. Новый запуск станет доступен после остановки. Уже выполненные действия не откатываются.</span></div>{/if}
       {#if toast}<div class="drawer-notice {toast.type}" role={toast.type === 'error' ? 'alert' : 'status'}><Icon name={toast.type === 'error' ? 'alert' : 'circlecheck'} size={16} /><span>{toast.text}</span><button class="icon-button" aria-label="Закрыть уведомление" onclick={() => toast = null}><Icon name="close" size={14} /></button></div>{/if}
       {#if detailError}<div class="detail-error" role="alert">{detailError}</div>{/if}
-      <div class="task-properties"><div><span><Icon name="folder" size={14} />Рабочая папка</span><code title={selectedTask.cwd}>{selectedTask.cwd}</code></div><div><span><Icon name="clock" size={14} />Расписание</span><strong>{selectedTask.schedule === 'interval' ? intervalLabel(selectedTask.intervalMinutes) : 'Ручной запуск'}{#if selectedTask.paused}<span class="paused-label">На паузе</span>{/if}</strong></div>{#if selectedTask.nextRunAt && !selectedTask.paused}<div><span><Icon name="arrow" size={14} />Следующий запуск</span><strong>{dateTime(selectedTask.nextRunAt)}</strong></div>{/if}<div><span><Icon name="history" size={14} />Всего запусков</span><strong>{selectedTask.runCount}</strong></div></div>
+      <div class="task-properties">{#if selectedTask.worker || activeStatuses.includes(selectedTask.status)}<div><span><Icon name="spark" size={14} />{activeStatuses.includes(selectedTask.status) ? 'Следующий запуск' : 'Работник'}</span><div>{#if selectedTask.worker}{@render workerBadge(selectedTask.worker, true)}{:else}<strong>Без работника · {providerName(selectedTask.provider)}</strong>{/if}</div></div>{/if}<div><span><Icon name="folder" size={14} />Рабочая папка</span><code title={selectedTask.cwd}>{selectedTask.cwd}</code></div><div><span><Icon name="clock" size={14} />Расписание</span><strong>{selectedTask.schedule === 'interval' ? intervalLabel(selectedTask.intervalMinutes) : 'Ручной запуск'}{#if selectedTask.paused}<span class="paused-label">На паузе</span>{/if}</strong></div>{#if selectedTask.nextRunAt && !selectedTask.paused}<div><span><Icon name="arrow" size={14} />Следующий запуск</span><strong>{dateTime(selectedTask.nextRunAt)}</strong></div>{/if}<div><span><Icon name="history" size={14} />Всего запусков</span><strong>{selectedTask.runCount}</strong></div></div>
       <section class="instruction-section"><h3>ИНСТРУКЦИЯ ДЛЯ АГЕНТА</h3><p>{selectedTask.instruction}</p></section>
       {#if currentRun?.error}<div class="run-error"><Icon name="alert" size={17} /><div><strong>{labels[currentRun.status]}</strong><p>{currentRun.error}</p></div></div>{/if}
       {#if runCanResume}
@@ -435,10 +498,10 @@
       {/if}
       <div class="detail-tabs" role="tablist" aria-label="История задачи"><button id="conversation-tab" role="tab" tabindex={detailTab === 'conversation' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'conversation'} aria-controls="conversation-panel" class:active={detailTab === 'conversation'} onclick={() => detailTab = 'conversation'}><Icon name="message" size={15} />Обсуждение<span>{detail?.comments.length ?? 0}</span></button><button id="history-tab" role="tab" tabindex={detailTab === 'history' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'history'} aria-controls="history-panel" class:active={detailTab === 'history'} onclick={() => detailTab = 'history'}><Icon name="history" size={15} />Запуски<span>{detail?.runs.length ?? selectedTask.runCount}</span></button></div>
       {#if !detail}<div class="detail-loading"><Icon name="refresh" class="spin" size={19} />Загружаем историю…</div>{:else if detailTab === 'conversation'}
-        <div id="conversation-panel" tabindex="0" role="tabpanel" aria-labelledby="conversation-tab" class="conversation-panel">{#each detail.comments as entry (entry.id)}<article class="comment-entry comment-{entry.kind}"><span class="comment-avatar">{#if entry.kind === 'user'}Я{:else if entry.kind === 'system'}<Icon name="terminal" size={14} />{:else if entry.kind === 'question'}<Icon name="message" size={14} />{:else}<Icon name="spark" size={14} />{/if}</span><div class="comment-main"><div class="comment-meta"><strong>{entry.kind === 'user' ? 'Вы' : entry.kind === 'system' ? 'brigd' : entry.kind === 'question' ? 'Вопрос агента' : entry.kind === 'result' ? 'Результат' : providerName(selectedTask.provider)}</strong><time datetime={new Date(entry.createdAt).toISOString()}>{dateTime(entry.createdAt)}</time></div><p>{entry.body}</p></div></article>{:else}<div class="conversation-empty"><Icon name="message" size={25} /><strong>У каждой задачи своя история</strong><p>Здесь появятся сообщения агента, вопросы и результат.<br />Можно оставить заметку уже сейчас.</p></div>{/each}</div>
+        <div id="conversation-panel" tabindex="0" role="tabpanel" aria-labelledby="conversation-tab" class="conversation-panel">{#each detail.comments as entry (entry.id)}<article class="comment-entry comment-{entry.kind}">{#if commentWorker(entry)}<WorkerAvatar name={commentWorker(entry)!.name} avatarUrl={commentWorker(entry)!.avatarUrl} />{:else}<span class="comment-avatar">{#if entry.kind === 'user'}Я{:else if entry.kind === 'system'}<Icon name="terminal" size={14} />{:else if entry.kind === 'question'}<Icon name="message" size={14} />{:else}<Icon name="spark" size={14} />{/if}</span>{/if}<div class="comment-main"><div class="comment-meta"><strong>{commentAuthor(entry)}</strong><time datetime={new Date(entry.createdAt).toISOString()}>{dateTime(entry.createdAt)}</time></div><p>{entry.body}</p></div></article>{:else}<div class="conversation-empty"><Icon name="message" size={25} /><strong>У каждой задачи своя история</strong><p>Здесь появятся сообщения агента, вопросы и результат.<br />Можно оставить заметку уже сейчас.</p></div>{/each}</div>
         <form class="comment-form" onsubmit={sendComment}><label for="task-comment">Заметка к задаче</label><div class="comment-input"><textarea id="task-comment" bind:value={comment} maxlength="8000" placeholder="Добавьте контекст или заметку…" rows="2" disabled={taskBusy}></textarea><button class="icon-button" type="submit" disabled={!comment.trim() || taskBusy} aria-label="Сохранить заметку"><Icon name="send" size={17} /></button></div><p>Заметки сохраняются в истории. Для ответа агенту используйте «Продолжить работу».</p></form>
       {:else}
-        <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name="play" size={14} />Запуск {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{@render providerBadge(run.provider, true)}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'schedule' ? 'По расписанию' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}<div class="run-details">Ход {run.turn}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
+        <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name="play" size={14} />Запуск {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{#if run.worker}{@render workerBadge(run.worker, true)}{/if}{@render providerBadge(run.provider, true)}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'schedule' ? 'По расписанию' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}<div class="run-details">Ход {run.turn}{#if run.worker}<span> · Усилия: {effortLabel(run.worker.effort)}</span>{/if}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
       {/if}
     {:else}<div class="detail-loading"><Icon name="refresh" class="spin" />Загружаем задачу…</div>{/if}
   </div>
@@ -458,10 +521,17 @@
       <header class="editor-header"><div><span class="editor-kicker">{editingId ? 'НАСТРОЙКИ ЗАДАЧИ' : 'ПОРУЧИТЕ ЭТО АГЕНТУ'}</span><h2 id="editor-title">{editingId ? 'Редактировать задачу' : 'Новая задача'}</h2></div><button class="icon-button" type="button" aria-label="Закрыть форму" disabled={submitting} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
       <div class="editor-fields">
         {#if formError}<div class="form-error" role="alert"><Icon name="alert" size={17} />{formError}</div>{/if}
-        {#if editingId && selectedTask && activeStatuses.includes(selectedTask.status)}<div class="form-note">Изменения применятся к следующему запуску. Текущий запуск сохраняет свою инструкцию и рабочую папку.</div>{/if}
+        {#if editingId && selectedTask && activeStatuses.includes(selectedTask.status)}<div class="form-note">Изменения применятся к следующему запуску. Текущий запуск сохраняет работника, настройки, инструкцию и рабочую папку.</div>{/if}
         <label class="form-field"><span>Название задачи <span class="required">*</span></span><input bind:value={formTitle} name="title" placeholder="Например, проверить новые изменения" required maxlength="140" disabled={submitting} /></label>
         <label class="form-field"><span>Что нужно сделать? <span class="required">*</span></span><textarea bind:value={formInstruction} name="instruction" maxlength="16000" rows="4" placeholder="Опишите результат, важные детали и ограничения. Агент получит эту инструкцию при каждом запуске." required disabled={submitting}></textarea></label>
+        <label class="form-field"><span>Работник</span><select name="workerId" aria-label="Работник" bind:value={formWorkerId} disabled={submitting || workersLoading}><option value="">Без работника — выбрать модель вручную</option>{#each workers.filter(worker => !worker.archived || worker.id === formOriginalWorker?.id) as worker (worker.id)}<option value={worker.id}>{worker.name} · {providerName(worker.provider)}{worker.archived ? ' (в архиве)' : ''}</option>{/each}{#if formOriginalWorker && !workers.some(worker => worker.id === formOriginalWorker?.id)}<option value={formOriginalWorker.id}>{formOriginalWorker.name}{formOriginalWorker.archived ? ' (в архиве)' : ''}</option>{/if}</select><small>Профили можно создать и настроить в разделе «Работники».</small></label>
+        {#if workersError}<div class="field-warning"><span>Не удалось обновить список работников.{formOriginalWorker ? ' Существующее назначение сохранено.' : ' Можно выбрать модель вручную.'}</span><button type="button" onclick={() => { void loadWorkers(); }}>Повторить</button></div>{/if}
+        {#if formWorker}
+          <div class="worker-assignment">{@render workerBadge(formWorker)}<div class="worker-assignment-meta">{@render providerBadge(formWorker.provider, true)}<span>Усилия: {effortLabel(formWorker.effort)}</span></div>{#if formWorker.communicationStyle}<p>{formWorker.communicationStyle}</p>{/if}</div>
+          {#if formWorker.archived}<p class="field-warning"><Icon name="inbox" size={15} />Работник в архиве. Можно сохранить это назначение, выбрать другого или убрать работника. Для новых назначений сначала восстановите профиль.</p>{/if}
+        {:else}
         <fieldset class="provider-options"><legend>Агент</legend>{#each ['codex', 'claude'] as agent}<label class:selected={formProvider === agent}><input type="radio" bind:group={formProvider} value={agent} disabled={submitting} /><span class="agent-option-logo {agent}">{#if agent === 'codex'}<Icon name="code" size={20} />{:else}<span class="claude-mark">✳</span>{/if}</span><span><strong>{providerName(agent as Provider)}</strong><small>{info?.mode === 'mock' ? 'Демо-адаптер' : info?.providers.find(p => p.id === agent)?.available ? 'CLI доступен' : 'CLI не найден'}</small></span><span class="radio-indicator">{#if formProvider === agent}<span></span>{/if}</span></label>{/each}</fieldset>
+        {/if}
         {#if info?.mode === 'cli' && !providerAvailable}<p class="field-warning"><Icon name="alert" size={14} />CLI выбранного агента не найден. Задачу можно сохранить, но для запуска потребуется установить и авторизовать CLI.</p>{/if}
         <label class="form-field"><span>Рабочая папка <span class="required">*</span></span><div class="input-with-icon"><Icon name="folder" size={16} /><input bind:value={formCwd} name="cwd" maxlength="4096" placeholder="/workspace/projects/my-project" required disabled={submitting} spellcheck="false" /></div><small>Абсолютный путь к папке, в которой будет работать агент.</small></label>
         <div class="schedule-section"><div class="schedule-title"><span class="schedule-title-icon"><Icon name="clock" size={18} /></span><div><strong>Когда запускать</strong><span>Один раз вручную или регулярно</span></div></div><div class="schedule-switch"><button type="button" class:selected={formSchedule === 'manual'} aria-pressed={formSchedule === 'manual'} disabled={submitting} onclick={() => formSchedule = 'manual'}><Icon name="play" size={14} />Вручную</button><button type="button" class:selected={formSchedule === 'interval'} aria-pressed={formSchedule === 'interval'} disabled={submitting} onclick={() => formSchedule = 'interval'}><Icon name="clock" size={14} />По расписанию</button></div>{#if formSchedule === 'interval'}<div class="schedule-fields"><label class="form-field"><span>Повторять каждые</span><div class="input-suffix"><input type="number" bind:value={formInterval} name="intervalMinutes" min="1" max="525600" step="1" required disabled={submitting} /><span>минут</span></div></label><label class="form-field"><span>Первый запуск</span><input type="datetime-local" bind:value={formFirstRun} name="firstRunAt" disabled={submitting} /><small>Пусто: сразу после сохранения. Местное время.</small></label></div><label class="pause-option"><input type="checkbox" bind:checked={formPaused} disabled={submitting} /><span>Сохранить расписание на паузе</span></label><p class="schedule-note">Планировщик работает, пока запущен сервер brigd. Активные запуски одной задачи не накладываются.</p>{/if}</div>
