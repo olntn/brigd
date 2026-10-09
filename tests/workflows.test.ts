@@ -283,7 +283,8 @@ describe('durable sequential execution and frozen inputs', () => {
     await settle(3, 'Implementation complete');
     expect(calls[4]!.input.model).toBe(frozenModels[2]);
     await settle(4, 'Review complete');
-    const next = engine.start(task.id);
+    const freshTask = store.createTask({ ...store.getTask(task.id), attachmentIds: [] });
+    const next = engine.start(freshTask.id);
     expect(calls[5]!.input.model).toBe('changed-model-0');
     expect(next.steps.map(step => step.worker.model)).toEqual(['changed-model-0', 'changed-model-1', 'changed-model-2']);
     expect(store.getRun(run.id).steps.map(step => step.worker.model)).toEqual(frozenModels);
@@ -869,7 +870,8 @@ describe('additive workflow migration', () => {
     expect(store.getRun(waiting.id).steps.map(step => step.worker.model)).toEqual([null, null, null]);
     expect(store.getRun(waiting.id).steps.map(step => step.worker.description)).toEqual(['', '', '']);
     await settle(1);
-    const fresh = engine.start(task.id);
+    const freshTask = store.createTask({ ...store.getTask(task.id), attachmentIds: [] });
+    const fresh = engine.start(freshTask.id);
     expect(fresh.steps.map(step => step.worker.model)).toEqual(crew.map(() => 'profile-after-migration'));
     expect(fresh.steps.map(step => step.worker.description)).toEqual(crew.map(() => 'DISPLAY_ONLY_CURRENT_ROLE'));
   });

@@ -1,4 +1,4 @@
-import type { Run } from '../src/lib/types';
+import type { FollowupInput, Run } from '../src/lib/types';
 import { startAgent, buildPrompt, type AgentHandle, type AgentInput, type AgentCallbacks } from './adapter';
 import { AppError, Store, runFence, type RunFence } from './store';
 import { validateEnvelope, validateSessionId } from './protocol';
@@ -7,7 +7,7 @@ import { createTaskBridge } from './task-mcp';
 
 export type AgentFactory = (input: AgentInput, callbacks: AgentCallbacks) => AgentHandle;
 export type TaskBridgeFactory = (store: Store, run: Run, fence: RunFence) => ReturnType<typeof createTaskBridge>;
-interface Launch { handle: AgentHandle | null; fence: RunFence; cancelRequested: boolean; bridge?: ReturnType<typeof createTaskBridge>; settled?: Promise<void>; }
+interface Launch { taskId: string; handle: AgentHandle | null; fence: RunFence; cancelRequested: boolean; bridge?: ReturnType<typeof createTaskBridge>; settled?: Promise<void>; }
 export class Engine {
   private handles = new Map<string, Launch>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -21,12 +21,27 @@ export class Engine {
   }
   tick(now = Date.now()) {
     if (this.closing) return;
-    for (const run of this.store.claimDue(this.mock, now)) this.launch(run);
+    for (const run of this.store.claimDue(this.mock, now, [...this.handles.values()].map(launch => launch.taskId))) this.launch(run);
+  }
+  private assertTaskSettled(taskId: string) {
+    if ([...this.handles.values()].some(launch => launch.taskId === taskId)) throw new AppError('Предыдущий CLI-процесс этой задачи ещё завершается', 409);
   }
   start(taskId: string): Run {
     if (this.closing) throw new AppError('Сервис останавливается', 503);
+    this.assertTaskSettled(taskId);
     const run = this.store.startManual(taskId, this.mock);
     this.launch(run);
+    return this.store.getRun(run.id);
+  }
+  followup(taskId: string, input: FollowupInput): Run {
+    // A lost HTTP response is safe to retry even while that run is active or
+    // after restart. Only the transaction that created it may launch a process.
+    const prior = this.store.getFollowupRequest(taskId, input);
+    if (prior) return prior;
+    if (this.closing) throw new AppError('Сервис останавливается', 503);
+    this.assertTaskSettled(taskId);
+    const { run, created } = this.store.startFollowup(taskId, input);
+    if (created) this.launch(run);
     return this.store.getRun(run.id);
   }
   resume(runId: string, answer: string, acknowledgement: boolean, attachmentIds: string[] = []): Run {
@@ -58,7 +73,7 @@ export class Engine {
     if (this.closing || this.handles.has(run.id) || !this.store.isCurrent(run.id, fence)) return;
     // Reserve before invoking a factory: even synchronous callback/cancel paths
     // cannot launch another worker or lose a cancellation before the handle exists.
-    const launch: Launch = { handle: null, fence, cancelRequested: false };
+    const launch: Launch = { taskId: run.taskId, handle: null, fence, cancelRequested: false };
     this.handles.set(run.id, launch);
     const isCurrent = () => this.store.isCurrent(run.id, fence);
     const release = () => {
@@ -67,7 +82,7 @@ export class Engine {
     };
     let handle: AgentHandle;
     try {
-      const workflow = workflowContext(run);
+      const workflow = workflowContext(run.followup?.workflow ?? run);
       // Mock and injected factories need no transport or filesystem authority.
       // An explicit bridge factory lets integration tests exercise the lifecycle.
       if (!run.mock && (this.factory === startAgent || this.bridgeFactory)) {
@@ -76,7 +91,8 @@ export class Engine {
       const input: AgentInput = { provider: run.provider, cwd: run.cwd, instruction: run.instruction, instructions: run.instructions,
         ...(run.inputAttachments?.length ? { attachments: run.inputAttachments } : {}), ...(launch.bridge ? { taskBridge: launch.bridge.agentConfig } : {}),
         model: run.worker?.model ?? null, effort: run.worker?.effort ?? 'default', communicationStyle: run.worker?.communicationStyle ?? '',
-        sessionId: run.sessionId ?? undefined, answer, mock: run.mock, ...(workflow ? { workflow } : {}) };
+        sessionId: run.sessionId ?? undefined, answer, mock: run.mock, ...(workflow ? { workflow } : {}),
+        ...(run.followup ? { followup: { sourceRunId: run.followup.sourceRunId, sourceStepIndex: run.followup.sourceStepIndex, request: run.followup.request } } : {}) };
       buildPrompt(input); // Enforce the complete UTF-8 bound before even a custom factory.
       if (!isCurrent() || launch.cancelRequested || this.closing) {
         this.store.completeCancellation(run.id, Date.now(), fence);
@@ -84,7 +100,17 @@ export class Engine {
         return;
       }
       handle = this.factory(input, {
-        onSession: id => { if (isCurrent()) this.store.setSession(run.id, id, fence); },
+        onSession: id => {
+          if (!isCurrent()) return;
+          try { this.store.setSession(run.id, id, fence); }
+          catch (error) {
+            this.fail(run, fence, error);
+            launch.cancelRequested = true;
+            launch.bridge?.close();
+            launch.handle?.cancel();
+            throw error;
+          }
+        },
         onComment: body => {
           this.store.db.transaction(() => {
             if (isCurrent()) this.store.comment(run.taskId, run.id, 'agent', body.slice(0, 16_000), Date.now(), run.currentStepIndex);

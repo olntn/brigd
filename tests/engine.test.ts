@@ -119,7 +119,10 @@ describe('agent lifecycle orchestration', () => {
     expect(store.getRun(run.id).worker).toEqual(run.worker);
     agent.calls[1]!.resolve(outcome());
     await flush();
-    const next = engine.start(task.id);
+    const due = Date.now();
+    store.updateTask(task.id, { ...store.getTask(task.id), schedule: 'interval', intervalMinutes: 1, firstRunAt: due });
+    engine.tick(due);
+    const next = store.activeRun(task.id)!;
     expect(next.worker?.description).toBe('DISPLAY_ONLY_UPDATED_ROLE: implementation.');
     expect(agent.calls[2]!.input).toMatchObject({ provider: nextProvider, model: 'updated-model', effort: 'low', communicationStyle: 'A different style', sessionId: undefined });
     for (const call of agent.calls) {

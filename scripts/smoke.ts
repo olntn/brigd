@@ -98,6 +98,22 @@ try {
   assert(done.runs[0].worker.effort === 'high' && done.runs[0].worker.avatarUrl === avatarUrl, 'Resume lost worker snapshot');
   assert(JSON.stringify(done.runs[0].instructions) === JSON.stringify(frozenInstructions), 'Resume lost immutable instruction snapshot');
   assert(done.runs[0].inputAttachments.length === 3 && done.runs[0].inputAttachments.some((file: any) => file.id === clarificationFile.id) && !done.runs[0].inputAttachments.some((file: any) => file.id === lateFile.id), 'Resume did not preserve immutable attachment inputs and explicit clarification');
+  const savedCompleted = JSON.stringify(done.runs[0]);
+  const extraFile = await uploadFile('additional-request.txt', Buffer.from('Make the additional change.'), 'text/plain');
+  const followupIntent = { sourceRunId: done.runs[0].id, sourceStepIndex: null, body: '[ask] Additional mock request.', attachmentIds: [extraFile.id], requestId: crypto.randomUUID() };
+  const additional = await request(`/api/tasks/${task.id}/followups`, followupIntent);
+  assert((await request(`/api/tasks/${task.id}/followups`, followupIntent)).id === additional.id, 'Double submission created another follow-up');
+  const additionalWaiting = await poll(() => request(`/api/tasks/${task.id}`), value => value.task.status === 'waiting_input');
+  assert(additionalWaiting.runs.length === 2 && additionalWaiting.runs[0].sessionId === session, 'Additional request did not retain the original session');
+  assert(additionalWaiting.runs[0].provider === 'codex' && additionalWaiting.runs[0].worker.name === 'Smoke reviewer', 'Follow-up used the edited worker provider/profile');
+  assert(JSON.stringify(additionalWaiting.runs[0].instructions) === JSON.stringify(frozenInstructions), 'Follow-up used current rather than original guidance');
+  assert(additionalWaiting.runs[0].inputAttachments.length === 4 && !additionalWaiting.runs[0].inputAttachments.some((file: any) => file.id === lateFile.id), 'Follow-up input files are not correctly scoped');
+  await stop(); await start();
+  assert((await request(`/api/tasks/${task.id}/followups`, followupIntent)).id === additional.id, 'Restart lost follow-up idempotency');
+  await request(`/api/runs/${additional.id}/resume`, { answer: 'Keep the same original outcome and apply only the extra request.' });
+  const additionalDone = await poll(() => request(`/api/tasks/${task.id}`), value => value.task.status === 'completed');
+  assert(additionalDone.runs[0].sessionId === session && additionalDone.runs[0].turn === 2, 'Follow-up clarification lost its session');
+  assert(JSON.stringify(additionalDone.runs.find((run: any) => run.id === done.runs[0].id)) === savedCompleted, 'Follow-up rewrote completed source history');
   const workflowCrew = await Promise.all([
     request('/api/workers', { name: 'Workflow planner', description: 'Plans the work.', provider: 'codex', effort: 'high', communicationStyle: 'Plan precisely.' }),
     request('/api/workers', { name: 'Workflow builder', description: 'Builds the change.', provider: 'claude', effort: 'max', communicationStyle: 'Show changes.' }),
@@ -130,6 +146,13 @@ try {
   assert(workflowDone.runs[0].steps[2].worker.description === 'Checks the result.' && workflowDone.runs[0].steps[2].worker.communicationStyle === 'Verify tests.', 'Future step lost its independent frozen description or personal instructions');
   assert(workflowDone.runs[0].steps[2].worker.name === 'Workflow reviewer' && workflowDone.runs[0].steps[2].worker.provider === 'codex' && workflowDone.runs[0].steps[2].worker.effort === 'xhigh', 'Future worker settings were not frozen at workflow start');
   assert(JSON.stringify(workflowDone.runs[0].steps[0]) === savedFirstStep, 'Workflow replayed or rewrote its completed predecessor');
+  const completedWorkflow = JSON.stringify(workflowDone.runs[0]);
+  const stageAdditional = await request(`/api/tasks/${complex.id}/followups`, { sourceRunId: workflowRun.id, sourceStepIndex: 0, body: 'An additional planning request only.', attachmentIds: [], requestId: crypto.randomUUID() });
+  const stageDone = await poll(() => request(`/api/tasks/${complex.id}`), value => value.task.status === 'completed');
+  assert(stageDone.runs.length === 2 && stageDone.runs[0].id === stageAdditional.id && stageDone.runs[0].steps.length === 0, 'Workflow follow-up replayed the stage chain');
+  assert(stageDone.runs[0].sessionId === workflowDone.runs[0].steps[0].sessionId && stageDone.runs[0].worker.id === workflowCrew[0].id, 'Additional request targeted the wrong workflow worker/session');
+  assert(stageDone.runs[0].followup.workflow.currentStepIndex === 0 && stageDone.runs[0].followup.workflow.steps.every((step: any) => step.status === 'completed'), 'Follow-up did not retain completed workflow context');
+  assert(JSON.stringify(stageDone.runs.find((run: any) => run.id === workflowRun.id)) === completedWorkflow, 'Workflow follow-up rewrote original results/checkmarks');
   const scheduled = await request('/api/tasks', { title: 'Scheduled instruction snapshot', instruction: 'Mock smoke only.', provider: 'codex', cwd: directory, schedule: 'interval', intervalMinutes: 1, firstRunAt: Date.now() + 50, paused: false });
   const scheduledDone = await poll(() => request(`/api/tasks/${scheduled.id}`), value => value.task.status === 'completed');
   assert(scheduledDone.runs[0].trigger === 'schedule' && scheduledDone.runs[0].worker === null, 'No-worker schedule did not run');
@@ -147,7 +170,7 @@ try {
   await request(`/api/runs/${active.id}/resume`, { answer: 'Mock process is stopped; continue.', acknowledgeInterruption: true });
   const recovered = await poll(() => request(`/api/tasks/${crashed.id}`), value => value.task.status === 'completed');
   assert(recovered.runs[0].sessionId === interrupted.runs[0].sessionId, 'Crash recovery changed session');
-  console.log('PASS: production HTTP, legacy TRACKT_ → BRIGD_ restart, mock clarification, exact session resume, worker/avatar persistence and separate frozen descriptions/personal instructions, instruction CRUD and frozen snapshots, ordered multi-worker workflow and later-step restart/resume with frozen future worker, scheduled no-worker instructions, graceful restart, SIGKILL recovery, no replay.');
+  console.log('PASS: production HTTP, legacy TRACKT_ → BRIGD_ restart, mock clarification, exact session resume, worker/avatar persistence and frozen descriptions/instructions, ordered workflow, additional comment requests with exact source session/settings and immutable history, idempotency across restart, selected-stage continuation without chain replay, scheduled instructions, graceful restart, SIGKILL recovery.');
 } finally {
   await stop();
   rmSync(directory, { recursive: true, force: true });

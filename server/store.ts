@@ -1,7 +1,8 @@
 import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import type { Attachment, Comment, Instruction, InstructionInput, InstructionSnapshot, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunStatus, RunStep, StepAttempt, Task, TaskDetail, TaskInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot } from '../src/lib/types';
+import { isAbsolute } from 'node:path';
+import type { Attachment, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunStatus, RunStep, StepAttempt, Task, TaskDetail, TaskInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot } from '../src/lib/types';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { validateInstruction, validateInstructionPatch, validateInstructionSnapshots } from './instructions';
 import { AppError } from './errors';
@@ -9,6 +10,7 @@ import { validateWorkflowSteps } from './workflows';
 import { validateSessionId } from './protocol';
 import { effortOptions, MODEL_CATALOG_PROVIDER_LIMIT, modelPresets, normalizeModel, normalizeWorkerDescription } from '../src/lib/workers';
 import { validateModel, validateModelPatch } from './models';
+import { followupRequestText, validateFollowup } from './followups';
 import { attachmentIds, preparedAttachmentPayload, type PreparedAttachment } from './attachments';
 import { ATTACHMENT_MAX_COUNT, ATTACHMENT_TASK_MAX_COUNT, ATTACHMENT_TASK_MAX_BYTES, ATTACHMENT_STAGING_MAX_COUNT, ATTACHMENT_STAGING_MAX_BYTES, ATTACHMENT_TOTAL_MAX_BYTES, ATTACHMENT_STAGING_TTL_MS } from '../src/lib/attachments';
 export { AppError } from './errors';
@@ -60,6 +62,61 @@ function validWorkerSnapshot(value: unknown): value is WorkerSnapshot {
 }
 function sameWorker(left: WorkerSnapshot, right: WorkerSnapshot): boolean {
   return left.id === right.id && left.name === right.name && left.description === right.description && left.provider === right.provider && left.model === right.model && left.effort === right.effort && left.communicationStyle === right.communicationStyle && left.avatarUrl === right.avatarUrl;
+}
+function invalidSnapshot(): never {
+  throw new AppError('Повреждён снимок запуска. Запуск остановлен; восстановите базу из резервной копии.', 409);
+}
+function completedWorkflowSnapshot(value: unknown): asserts value is NonNullable<RunFollowup['workflow']> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) invalidSnapshot();
+  const context = value as NonNullable<RunFollowup['workflow']>;
+  if (Object.keys(context).sort().join(',') !== 'currentStepIndex,steps' || !Array.isArray(context.steps) ||
+      context.steps.length < 2 || context.steps.length > 20 || !Number.isInteger(context.currentStepIndex) ||
+      context.currentStepIndex < 0 || context.currentStepIndex >= context.steps.length) invalidSnapshot();
+  validateWorkflowSteps(context.steps.map(({ workerId, title, instruction }) => ({ workerId, title, instruction })));
+  const nullableText = (text: unknown) => text === null || (typeof text === 'string' && text.length <= 16_000);
+  const time = (timestamp: unknown) => Number.isSafeInteger(timestamp) && (timestamp as number) >= 0;
+  for (const step of context.steps) {
+    if (!validWorkerSnapshot(step.worker) || step.workerId !== step.worker.id || step.status !== 'completed' ||
+        !Array.isArray(step.attempts) || !step.attempts.length || !nullableText(step.summary) || !nullableText(step.error) ||
+        !time(step.startedAt) || !time(step.updatedAt) || !time(step.finishedAt)) invalidSnapshot();
+    if (step.sessionId !== null) validateSessionId(step.sessionId);
+    for (const [index, attempt] of step.attempts.entries()) {
+      if (!attempt || typeof attempt.id !== 'string' || !attempt.id || attempt.number !== index + 1 ||
+          !Number.isSafeInteger(attempt.turn) || attempt.turn < 1 || !nullableText(attempt.summary) || !nullableText(attempt.error) ||
+          !time(attempt.startedAt) || !time(attempt.updatedAt) || (attempt.finishedAt !== null && !time(attempt.finishedAt)) ||
+          (index === step.attempts.length - 1 ? attempt.status !== 'completed' : !['failed', 'blocked', 'interrupted'].includes(attempt.status))) invalidSnapshot();
+      if (attempt.sessionId !== null) validateSessionId(attempt.sessionId);
+    }
+    const latest = step.attempts.at(-1)!;
+    if (latest.sessionId !== step.sessionId || latest.summary !== step.summary || latest.error !== step.error ||
+        latest.updatedAt !== step.updatedAt || latest.finishedAt !== step.finishedAt) invalidSnapshot();
+  }
+}
+function followupSnapshot(row: Row, worker: WorkerSnapshot | null): RunFollowup | null {
+  if (row.followup_snapshot == null) {
+    if (row.trigger === 'followup') invalidSnapshot();
+    return null;
+  }
+  if (row.trigger !== 'followup' || row.workflow_version !== 0 || row.steps_snapshot !== '[]' || row.current_step_index !== null || row.scheduled_for !== null) invalidSnapshot();
+  const value = JSON.parse(row.followup_snapshot) as RunFollowup;
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).sort().join(',') !== 'request,sourceRunId,sourceStepIndex,workflow' ||
+      typeof value.sourceRunId !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(value.sourceRunId) || value.sourceRunId === row.id ||
+      (value.sourceStepIndex !== null && (!Number.isInteger(value.sourceStepIndex) || value.sourceStepIndex < 0)) ||
+      typeof value.request !== 'string' || !value.request.trim() || value.request.length > 8_000 || value.request.includes('\0')) invalidSnapshot();
+  validateSessionId(row.session_id);
+  validateInstructionSnapshots(JSON.parse(row.instructions_snapshot));
+  if (worker ? worker.id !== row.worker_id || worker.provider !== row.provider : row.worker_id !== null) invalidSnapshot();
+  if (!['codex', 'claude'].includes(row.provider) || typeof row.cwd !== 'string' || !isAbsolute(row.cwd) || row.cwd.length > 4_096 || row.cwd.includes('\0') ||
+      !Number.isSafeInteger(row.turn) || row.turn < 1 ||
+      typeof row.instruction !== 'string' || !row.instruction.trim() || row.instruction.length > 16_000 || row.instruction.includes('\0')) invalidSnapshot();
+  if (value.workflow !== null) {
+    completedWorkflowSnapshot(value.workflow);
+    if (value.sourceStepIndex !== null && value.sourceStepIndex !== value.workflow.currentStepIndex) invalidSnapshot();
+    const selected = value.workflow.steps[value.workflow.currentStepIndex]!;
+    if (!worker || !sameWorker(worker, selected.worker) || row.session_id !== selected.sessionId) invalidSnapshot();
+  } else if (value.sourceStepIndex !== null) invalidSnapshot();
+  return value;
 }
 function beginAttempt(step: RunStep, turn: number, now: number) {
   const attempt: StepAttempt = { id: crypto.randomUUID(), number: step.attempts.length + 1, status: 'running', sessionId: null,
@@ -145,6 +202,7 @@ export class Store {
         ['runs', 'current_step_index', 'INTEGER'],
         ['runs', 'workflow_version', 'INTEGER NOT NULL DEFAULT 0'],
         ['runs', 'cancel_requested', 'INTEGER NOT NULL DEFAULT 0'],
+        ['runs', 'followup_snapshot', 'TEXT'],
         ['comments', 'step_index', 'INTEGER'],
       ]) {
         if (!(this.db.query(`PRAGMA table_info(${table})`).all() as Row[]).some(row => row.name === column)) {
@@ -152,6 +210,11 @@ export class Store {
         }
       }
     }).immediate();
+    this.db.exec(`CREATE TABLE IF NOT EXISTS followup_requests (
+      task_id TEXT NOT NULL REFERENCES tasks(id), request_id TEXT NOT NULL,
+      fingerprint TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+      PRIMARY KEY(task_id,request_id)
+    )`);
     // The explicit marker makes even an intentionally empty catalog persistent.
     // Creation, seeding and the marker commit together, including concurrent opens.
     this.db.transaction(() => {
@@ -557,6 +620,10 @@ export class Store {
     return worker;
   }
   private mapRun(row: Row): Run {
+    try { return this.mapRunSnapshot(row); }
+    catch { return invalidSnapshot(); }
+  }
+  private mapRunSnapshot(row: Row): Run {
     const steps = JSON.parse(row.steps_snapshot ?? '[]') as RunStep[];
     const invalid = (): never => { throw new AppError('Повреждён снимок этапов. Запуск остановлен; восстановите базу из резервной копии.', 409); };
     const worker = row.worker_snapshot ? JSON.parse(row.worker_snapshot) as unknown : null;
@@ -592,7 +659,8 @@ export class Store {
         }
       }
     } else invalid();
-    return { inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
+    const followup = followupSnapshot(row, worker as WorkerSnapshot | null);
+    return { followup, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
       trigger: row.trigger, scheduledFor: row.scheduled_for, status: row.status, sessionId: row.session_id,
       startedAt: row.started_at, updatedAt: row.updated_at, finishedAt: row.finished_at, summary: row.summary,
       error: row.error, turn: row.turn, mock: !!row.mock };
@@ -600,7 +668,8 @@ export class Store {
   private mapTask(row: Row): Task {
     const latest = this.db.query('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1').get(row.id) as Row | null;
     const worker = row.worker_id ? this.getWorker(row.worker_id) : null;
-    return { attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd,
+    const hasCompletedRun = !!this.db.query("SELECT 1 FROM runs WHERE task_id=? AND status='completed' LIMIT 1").get(row.id);
+    return { hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd,
       schedule: row.schedule, intervalMinutes: row.interval_minutes, firstRunAt: row.first_run_at,
       nextRunAt: row.next_run_at, paused: !!row.paused, createdAt: row.created_at, updatedAt: row.updated_at,
       status: latest?.status ?? 'ready', latestRun: latest ? this.mapRun(latest) : null,
@@ -693,9 +762,70 @@ export class Store {
     return this.getRun(id);
   }
   startManual(taskId: string, mock: boolean, now = Date.now()): Run {
-    return this.db.transaction(() => this.insertRun(this.getTask(taskId), 'manual', null, mock, now)).immediate();
+    return this.db.transaction(() => {
+      const task = this.getTask(taskId);
+      if (task.hasCompletedRun) throw new AppError('Задача уже выполнялась успешно. Отправьте продолжение в сохранённую сессию завершённого запуска.', 409);
+      return this.insertRun(task, 'manual', null, mock, now);
+    }).immediate();
   }
-  claimDue(mock: boolean, now = Date.now()): Run[] {
+  /** A replay lookup must precede attachment binding, occupancy, and process checks. */
+  getFollowupRequest(taskId: string, value: FollowupInput): Run | null {
+    const input = validateFollowup(value);
+    const prior = this.db.query('SELECT fingerprint,run_id FROM followup_requests WHERE task_id=? AND request_id=?').get(taskId, input.requestId) as Row | null;
+    if (!prior) return null;
+    if (prior.fingerprint !== this.followupFingerprint(input)) throw new AppError('Этот ID запроса уже использован с другим содержимым', 409);
+    const run = this.getRun(prior.run_id);
+    if (run.taskId !== taskId || !run.followup || run.followup.sourceRunId !== input.sourceRunId ||
+        run.followup.sourceStepIndex !== input.sourceStepIndex || run.followup.request !== followupRequestText(input.body)) invalidSnapshot();
+    return run;
+  }
+  private followupFingerprint(input: FollowupInput): string {
+    return createHash('sha256').update(JSON.stringify([input.sourceRunId, input.sourceStepIndex, input.body, input.attachmentIds])).digest('hex');
+  }
+  startFollowup(taskId: string, value: FollowupInput, now = Date.now()): { run: Run; created: boolean } {
+    const input = validateFollowup(value);
+    return this.db.transaction(() => {
+      const prior = this.getFollowupRequest(taskId, input);
+      if (prior) return { run: prior, created: false };
+      const source = this.getRun(input.sourceRunId);
+      if (source.taskId !== taskId) throw new AppError('Исходный запуск относится к другой задаче', 409);
+      if (source.status !== 'completed') throw new AppError('Продолжить можно только завершённый запуск', 409);
+      if (source.workerId !== (source.worker?.id ?? null) || (source.worker && source.worker.provider !== source.provider)) invalidSnapshot();
+      if (this.activeRun(taskId)) throw new AppError('У задачи уже есть активный запуск. Сначала завершите или отмените его.', 409);
+      let selected: RunStep | null = null;
+      if (source.steps.length) {
+        if (input.sourceStepIndex === null || input.sourceStepIndex >= source.steps.length) throw new AppError('Выберите завершённый этап исходного запуска', 409);
+        selected = source.steps[input.sourceStepIndex]!;
+        if (selected.status !== 'completed') throw new AppError('Исходный этап не завершён', 409);
+      } else if (input.sourceStepIndex !== null) throw new AppError('У этого запуска нет отдельных этапов; укажите null', 409);
+      const sessionId = selected ? selected.sessionId : source.sessionId;
+      if (!sessionId) throw new AppError('В исходном запуске нет сохранённого ID сессии. Продолжение в прежнем контексте невозможно.', 409);
+      try { validateSessionId(sessionId); validateInstructionSnapshots(source.instructions); }
+      catch { invalidSnapshot(); }
+      const worker = selected ? selected.worker : source.worker;
+      const followup: RunFollowup = { sourceRunId: source.id, sourceStepIndex: input.sourceStepIndex, request: followupRequestText(input.body),
+        workflow: selected ? { steps: source.steps, currentStepIndex: input.sourceStepIndex! } : source.followup?.workflow ?? null };
+      if (followup.workflow) completedWorkflowSnapshot(followup.workflow);
+      const id = crypto.randomUUID();
+      this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,status,session_id,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,followup_snapshot)
+        VALUES (?,?,?,?,?,'followup','running',?,?,?,?,?,?,?,?)`)
+        .run(id, taskId, worker?.provider ?? source.provider, source.cwd, source.instruction, sessionId, now, now, +source.mock,
+          worker?.id ?? null, worker ? JSON.stringify(worker) : null, JSON.stringify(source.instructions), JSON.stringify(followup));
+      // Freeze only the selected saved turn's inputs. No current task edits or
+      // later workflow stages may leak into an earlier stage's continuation.
+      const sourceTurn = selected ? selected.attempts.at(-1)!.turn : source.turn;
+      this.db.query(`INSERT INTO run_attachment_inputs(run_id,turn,attachment_id)
+        SELECT ?,1,attachment_id FROM run_attachment_inputs WHERE run_id=? AND turn=?`).run(id, source.id, sourceTurn);
+      this.db.query(`INSERT OR IGNORE INTO run_attachment_inputs(run_id,turn,attachment_id)
+        SELECT ?,1,id FROM attachments WHERE task_id=? AND run_id=? AND created_turn<=? AND (step_index IS ? OR ? IS NULL)`)
+        .run(id, taskId, source.id, sourceTurn, input.sourceStepIndex, input.sourceStepIndex);
+      this.comment(taskId, id, 'user', followup.request, now, null, input.attachmentIds);
+      for (const attachmentId of input.attachmentIds) this.db.query('INSERT OR IGNORE INTO run_attachment_inputs(run_id,turn,attachment_id) VALUES (?,1,?)').run(id, attachmentId);
+      this.db.query('INSERT INTO followup_requests(task_id,request_id,fingerprint,run_id) VALUES (?,?,?,?)').run(taskId, input.requestId, this.followupFingerprint(input), id);
+      return { run: this.getRun(id), created: true };
+    }).immediate();
+  }
+  claimDue(mock: boolean, now = Date.now(), settlingTaskIds: readonly string[] = []): Run[] {
     return this.db.transaction(() => {
       const due = this.db.query("SELECT * FROM tasks WHERE paused=0 AND schedule='interval' AND next_run_at<=?").all(now) as Row[];
       const claimed: Run[] = [];
@@ -704,7 +834,7 @@ export class Store {
         const occurrence = nextOccurrence(task.nextRunAt!, task.intervalMinutes!, now);
         // Consume this occurrence even while waiting. Never accumulate a missed backlog.
         this.db.query('UPDATE tasks SET next_run_at=? WHERE id=?').run(occurrence.next, task.id);
-        if (this.activeRun(task.id)) continue;
+        if (this.activeRun(task.id) || settlingTaskIds.includes(task.id)) continue;
         if (this.db.query('SELECT id FROM runs WHERE task_id=? AND scheduled_for=?').get(task.id, occurrence.latest)) continue;
         claimed.push(this.insertRun(task, 'schedule', occurrence.latest, mock, now));
       }
@@ -797,7 +927,7 @@ export class Store {
   cancel(id: string, now = Date.now(), pending = false, acknowledgeInterruption = false): Run {
     return this.db.transaction(() => {
       const run = this.getRun(id);
-      if (run.steps.length && run.status === 'interrupted' && !acknowledgeInterruption) throw new AppError('Сначала подтвердите, что предыдущий CLI-процесс остановлен. Отмена освобождает задачу для новых запусков.', 409);
+      if ((run.steps.length || run.followup) && run.status === 'interrupted' && !acknowledgeInterruption) throw new AppError('Сначала подтвердите, что предыдущий CLI-процесс остановлен. Отмена освобождает задачу для новых запусков.', 409);
       const cancellable = ['running', 'waiting_input', 'interrupted', ...(run.steps.length ? ['failed', 'blocked'] : [])];
       if (!cancellable.includes(run.status)) throw new AppError('Запуск уже завершён', 409);
       this.db.query('UPDATE runs SET status=?,updated_at=?,finished_at=?,cancel_requested=1 WHERE id=?').run(pending ? 'cancelling' : 'cancelled', now, pending ? null : now, id);

@@ -278,7 +278,8 @@ describe('instruction snapshots and migration', () => {
     const fresh = store.createInstruction(input(), BASE + 6);
     expect(store.resume(waiting.id, 'main').instructions).toEqual([]);
     expect(store.getRun(completed.id).instructions).toEqual([]);
-    const next = store.startManual(finishedTask.id, true, BASE + 7);
+    const freshTask = store.createTask(taskInput(), BASE + 7);
+    const next = store.startManual(freshTask.id, true, BASE + 7);
     expect(next.instructions).toEqual([snapshot(fresh)]);
     await reopen();
     expect(store.getRun(waiting.id)).toMatchObject({ instructions: [], worker: waiting.worker, sessionId: 'legacy-session' });

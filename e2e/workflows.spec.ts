@@ -175,7 +175,7 @@ test('complex editor orders named workers, resumes exact middle session and free
   await drawer.getByRole('button', { name: 'Продолжить работу', exact: true }).click();
   await expect(drawer.locator('.drawer-badges').getByText('Завершено', { exact: true })).toBeVisible();
   await expect(checklist.locator('[data-status="completed"]')).toHaveCount(3);
-  await expect(drawer.getByRole('button', { name: 'Начать всю задачу заново', exact: true })).toBeEnabled();
+  await expect(drawer.getByRole('button', { name: 'Начать всю задачу заново', exact: true })).toHaveCount(0);
   const final = await (await request.get(`/api/tasks/${saved.id}`)).json() as TaskDetail;
   expect(final.runs[0].id).toBe(original.id);
   expect(final.runs[0].steps[1].sessionId).toBe(originalSession);
@@ -395,8 +395,8 @@ for (const theme of ['light', 'dark']) {
       await noPrivateInstructions(editor);
       for (const avatar of await editor.locator('.workflow-assignment .worker-avatar').all()) {
         const box = await avatar.boundingBox();
-        expect(box?.width).toBe(24);
-        expect(box?.height).toBe(24);
+        expect(box?.width).toBe(36);
+        expect(box?.height).toBe(36);
       }
       await noOverflow(page, editor);
       await editor.getByRole('button', { name: 'Поднять этап 2', exact: true }).scrollIntoViewIfNeeded();

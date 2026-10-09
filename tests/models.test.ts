@@ -366,7 +366,8 @@ describe('catalog edits do not alter execution settings', () => {
     expect(store.getRun(active.id).status).toBe('completed');
     await reopen();
     expect(store.getWorker(worker.id)).toEqual(worker);
-    expect(store.startManual(simple.id, true).worker?.model).toBe('original-model');
+    const futureTask = store.createTask(taskInput({ workerId: worker.id }));
+    expect(store.startManual(futureTask.id, true).worker?.model).toBe('original-model');
     expect(store.getRun(oldRun.id).worker?.model).toBe('original-model');
     expect(store.getRun(active.id).steps.map(step => step.worker.model)).toEqual(['original-model', 'original-model']);
   });
@@ -387,11 +388,13 @@ describe('catalog edits do not alter execution settings', () => {
     expect(store.getWorker(worker.id)).toMatchObject({ provider: 'codex', model: model.modelId });
     store.updateModel(model.id, { modelId: 'edited-catalog-id' });
     store.deleteModel(model.id);
-    const second = store.startManual(task.id, true);
+    const secondTask = store.createTask(taskInput({ workerId: worker.id }));
+    const second = store.startManual(secondTask.id, true);
     expect(second.worker).toMatchObject({ provider: 'codex', model: 'catalog-model' });
     store.finish(second.id, 'completed', 'Done again', null);
     expect((await request(`/api/workers/${worker.id}`, 'PATCH', { model: null })).status).toBe(200);
-    expect(store.startManual(task.id, true).worker?.model).toBeNull();
+    const defaultTask = store.createTask(taskInput({ workerId: worker.id }));
+    expect(store.startManual(defaultTask.id, true).worker?.model).toBeNull();
     expect(store.getRun(first.id).worker?.model).toBe('uncataloged-id');
     expect(store.getRun(second.id).worker?.model).toBe('catalog-model');
     expect(store.listModels()).toEqual([]);

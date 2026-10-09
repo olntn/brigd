@@ -385,7 +385,8 @@ describe('worker assignment and immutable run snapshots', () => {
     const resumed = store.resume(run.id, 'main', false, BASE + 8);
     expect(resumed).toMatchObject({ id: run.id, workerId: original.id, worker: frozen, provider: 'codex', sessionId: 'original-persistent-session', turn: 2 });
     store.finish(run.id, 'completed', 'Finished original work', null, BASE + 9);
-    const next = store.startManual(task.id, true, BASE + 10);
+    store.updateTask(task.id, { ...store.getTask(task.id), schedule: 'interval', intervalMinutes: 1, firstRunAt: BASE + 10 }, BASE + 10);
+    const next = store.claimDue(true, BASE + 10)[0]!;
     expect(next).toMatchObject({ workerId: other.id, worker: snapshot(other), provider: 'claude', instruction: 'Replacement task instruction' });
     store.finish(next.id, 'completed', 'Finished new work', null, BASE + 11);
     await reopen();
@@ -405,7 +406,8 @@ describe('worker assignment and immutable run snapshots', () => {
     store.finish(run.id, 'waiting_input', 'Continue?', null);
     expect(store.resume(run.id, 'Yes').worker?.model).toBeNull();
     store.finish(run.id, 'completed', 'Done', null);
-    expect(store.startManual(task.id, true).worker?.model).toBe('new-explicit-model');
+    const freshTask = store.createTask(taskInput({ workerId: worker.id }));
+    expect(store.startManual(freshTask.id, true).worker?.model).toBe('new-explicit-model');
   });
 
   test('malicious model data in a persisted simple snapshot cannot launch a resumed process', async () => {
@@ -571,7 +573,8 @@ describe('display-only worker descriptions', () => {
     expect(resumed.worker).toMatchObject({ description: '', communicationStyle: worker.communicationStyle });
     expect(store.db.query('SELECT worker_snapshot FROM runs WHERE id=?').get(run.id)).toEqual({ worker_snapshot: workerJSON });
     store.finish(run.id, 'completed', 'Done', null);
-    expect(store.startManual(task.id, true).worker).toMatchObject({ description: 'Current role', communicationStyle: 'Current personal instructions' });
+    const freshTask = store.createTask(taskInput({ workerId: worker.id }));
+    expect(store.startManual(freshTask.id, true).worker).toMatchObject({ description: 'Current role', communicationStyle: 'Current personal instructions' });
     expect(store.db.query('PRAGMA foreign_key_check').all()).toEqual([]);
   });
 

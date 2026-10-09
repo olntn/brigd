@@ -570,11 +570,15 @@ test('catalog rename, model ID edit and deletion preserve worker and live/histor
   await drawer.locator('.run-entry').screenshot({ path: testInfo.outputPath('brigd-model-catalog-frozen-run.png') });
   const resumed = await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail;
   expect(resumed.runs[0]).toMatchObject({ id: originalRun.id, sessionId: originalRun.sessionId, turn: 2 });
-  await drawer.getByRole('button', { name: 'Запустить снова', exact: true }).click();
+  await expect(drawer.getByRole('button', { name: 'Запустить снова', exact: true })).toHaveCount(0);
+  await drawer.getByRole('tab', { name: /Обсуждение/ }).click();
+  await drawer.getByLabel('Заметка к задаче', { exact: true }).fill('[ask] Уточни результат с прежней моделью.');
+  await drawer.getByRole('button', { name: 'Отправить агенту', exact: true }).click();
   await expect(drawer.getByText('Агенту нужен ваш ответ', { exact: true })).toBeVisible();
   const rerun = await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail;
   expect(rerun.runs.map(run => run.worker?.model)).toEqual([worker.model, worker.model]);
   expect(rerun.runs[1].worker).toEqual(originalRun.worker);
+  expect(rerun.runs[0]).toMatchObject({ trigger: 'followup', sessionId: originalRun.sessionId, worker: originalRun.worker });
   await drawer.getByRole('button', { name: 'Отменить запуск', exact: true }).click();
   await expect(drawer.locator('.drawer-badges').getByText('Отменено', { exact: true })).toBeVisible();
 });

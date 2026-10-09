@@ -160,7 +160,9 @@ describe('run lifecycle and persistence', () => {
     expect(store.getTask(task.id)).toMatchObject(changed);
     expect(store.getRun(run.id)).toMatchObject({ provider: 'codex', cwd: '/tmp', instruction: task.instruction, mock: false });
     store.finish(run.id, 'completed', 'Done', null);
-    expect(store.startManual(task.id, false, BASE + 2)).toMatchObject({ provider: 'claude', cwd: '/var/tmp', instruction: 'New instructions' });
+    expectAppError(() => store.startManual(task.id, false, BASE + 2), 409);
+    const fresh = store.createTask(changed, BASE + 2);
+    expect(store.startManual(fresh.id, false, BASE + 3)).toMatchObject({ provider: 'claude', cwd: '/var/tmp', instruction: 'New instructions' });
   });
 
   test('non-schedule edits preserve next time; changing or removing schedule recalculates it', () => {
@@ -172,12 +174,17 @@ describe('run lifecycle and persistence', () => {
     expect(store.updateTask(task.id, input(), BASE).nextRunAt).toBeNull();
   });
 
-  test.each(['completed', 'blocked', 'failed', 'cancelled'] as const)('%s releases the task for a new run', (status: Exclude<RunStatus, 'running'>) => {
+  test.each(['completed', 'blocked', 'failed', 'cancelled'] as const)('%s releases occupancy; completed tasks continue only through follow-ups or their schedule', (status: Exclude<RunStatus, 'running'>) => {
     const task = store.createTask(input(), BASE);
     const first = store.startManual(task.id, true, BASE);
     store.finish(first.id, status, 'Outcome', null, BASE + 1);
     expect(store.activeRun(task.id)).toBeNull();
-    const second = store.startManual(task.id, true, BASE + 2);
+    let second: ReturnType<Store['startManual']>;
+    if (status === 'completed') {
+      expectAppError(() => store.startManual(task.id, true, BASE + 2), 409);
+      store.updateTask(task.id, input({ ...task, schedule: 'interval', intervalMinutes: 1, firstRunAt: BASE + 2 }), BASE + 2);
+      second = store.claimDue(true, BASE + 2)[0]!;
+    } else second = store.startManual(task.id, true, BASE + 2);
     expect(second.id).not.toBe(first.id);
     expect(store.getTask(task.id).runCount).toBe(2);
   });

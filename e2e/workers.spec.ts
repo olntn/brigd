@@ -205,26 +205,33 @@ test('profile avatar, task assignment and immutable identity through edit and re
   let detail = await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail;
   expect(detail.runs[0].sessionId).toBe(sessionId);
   expect(detail.runs[0].worker).toMatchObject({ name, provider: 'codex', model: codexModel, effort: 'xhigh', avatarUrl: worker.avatarUrl, communicationStyle: privateInstructions, description: publicDescription });
-  await drawer.getByRole('button', { name: 'Запустить снова', exact: true }).click();
-  await expect(drawer.getByText('Агенту нужен ваш ответ', { exact: true })).toBeVisible();
-  detail = await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail;
+  await expect(drawer.getByRole('button', { name: 'Запустить снова', exact: true })).toHaveCount(0);
+  const originalHistory = detail.runs;
+  await drawer.getByRole('button', { name: 'Закрыть задачу', exact: true }).click();
+  // A separate task uses the updated profile; the completed task keeps its original context.
+  const freshResponse = await request.post('/api/tasks', { headers: origin, data: {
+    title: unique('Новая задача обновлённого работника'), instruction: '[ask] Подготовь новый обзор проекта.',
+    workerId: worker.id, provider: 'claude', cwd: task.cwd, schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false,
+  } });
+  expect(freshResponse.status()).toBe(201);
+  const freshTask = await freshResponse.json() as Task;
+  await page.reload();
+  await page.getByRole('button', { name: `Открыть задачу: ${freshTask.title}`, exact: true }).click();
+  const freshDrawer = page.getByRole('dialog', { name: freshTask.title, exact: true });
+  await freshDrawer.getByRole('button', { name: 'Запустить', exact: true }).click();
+  await expect(freshDrawer.getByText('Агенту нужен ваш ответ', { exact: true })).toBeVisible();
+  detail = await (await request.get(`/api/tasks/${freshTask.id}`)).json() as TaskDetail;
   expect(detail.runs[0].worker).toMatchObject({ name: renamed, provider: 'claude', model: claudeModel, effort: 'max', avatarUrl: null, communicationStyle: changedPrivateInstructions, description: changedDescription });
-  expect(detail.runs[1].worker).toMatchObject({ name, description: publicDescription, communicationStyle: privateInstructions });
-  await expect(drawer.locator('.drawer-badges .worker-description')).toHaveText(changedDescription);
-  await drawer.getByRole('tab', { name: /Запуски/ }).click();
-  const latestEntry = drawer.locator('.run-entry').nth(0);
-  const historicalEntry = drawer.locator('.run-entry').nth(1);
+  expect((await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail).runs).toEqual(originalHistory);
+  await expect(freshDrawer.locator('.drawer-badges .worker-description')).toHaveText(changedDescription);
+  await freshDrawer.getByRole('tab', { name: /Запуски/ }).click();
+  const latestEntry = freshDrawer.locator('.run-entry');
   await expect(latestEntry.locator('.run-meta .worker-description')).toHaveText(changedDescription);
-  await expect(historicalEntry.locator('.run-meta .worker-description')).toHaveText(publicDescription);
-  for (const entry of [latestEntry, historicalEntry]) {
-    const snapshot = entry.locator('.run-instruction-snapshot');
-    if (!await snapshot.evaluate(element => (element as HTMLDetailsElement).open)) await snapshot.locator('summary').click();
-  }
+  await latestEntry.locator('.run-instruction-snapshot summary').click();
   await expect(latestEntry.locator('.worker-run-settings .worker-description')).toHaveText(changedDescription);
-  await expect(historicalEntry.locator('.worker-run-settings .worker-description')).toHaveText(publicDescription);
-  await noPrivateInstructions(drawer);
-  await drawer.getByRole('button', { name: 'Отменить запуск', exact: true }).click();
-  await expect(drawer.locator('.drawer-badges').getByText('Отменено', { exact: true })).toBeVisible();
+  await noPrivateInstructions(freshDrawer);
+  await freshDrawer.getByRole('button', { name: 'Отменить запуск', exact: true }).click();
+  await expect(freshDrawer.locator('.drawer-badges').getByText('Отменено', { exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 

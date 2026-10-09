@@ -107,6 +107,8 @@ export interface TaskInput {
   paused: boolean;
 }
 export interface Task extends TaskInput {
+  /** Once completed, new work continues a saved session instead of rerunning. */
+  hasCompletedRun?: boolean;
   attachments?: Attachment[];
   steps: TaskStepInput[];
   workerId: string | null;
@@ -119,7 +121,23 @@ export interface Task extends TaskInput {
   latestRun: Run | null;
   runCount: number;
 }
+/** A deliberately requested new turn in a completed run's exact saved session. */
+export interface FollowupInput {
+  sourceRunId: string;
+  sourceStepIndex: number | null;
+  body: string;
+  attachmentIds: string[];
+  requestId: string;
+}
+export interface RunFollowup {
+  sourceRunId: string;
+  sourceStepIndex: number | null;
+  request: string;
+  /** Historical context only. These stages are never scheduled again. */
+  workflow: { steps: RunStep[]; currentStepIndex: number } | null;
+}
 export interface Run {
+  followup?: RunFollowup | null;
   inputAttachments?: Attachment[];
   steps: RunStep[];
   currentStepIndex: number | null;
@@ -131,7 +149,7 @@ export interface Run {
   provider: Provider;
   cwd: string;
   instruction: string;
-  trigger: 'manual' | 'schedule';
+  trigger: 'manual' | 'schedule' | 'followup';
   scheduledFor: number | null;
   status: RunStatus;
   sessionId: string | null;

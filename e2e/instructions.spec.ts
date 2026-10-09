@@ -189,13 +189,25 @@ test('frozen instructions survive edit, disable, delete and resuming the same ru
   await expect(drawer.locator('.run-entry')).not.toContainText('Обновлённая версия');
   await drawer.locator('.run-entry').screenshot({ path: testInfo.outputPath('brigd-instructions-frozen-run-after-resume.png') });
 
-  await drawer.getByRole('button', { name: 'Запустить снова', exact: true }).click();
-  await expect(drawer.getByText('Агенту нужен ваш ответ', { exact: true })).toBeVisible();
-  const rerun = await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail;
-  expect(rerun.runs[0].instructions).toEqual([{ id: second.id, title: second.title, body: second.body }]);
-  expect(rerun.runs[1].instructions).toEqual(before.runs[0].instructions);
-  await drawer.getByRole('button', { name: 'Отменить запуск', exact: true }).click();
-  await expect(drawer.locator('.drawer-badges').getByText('Отменено', { exact: true })).toBeVisible();
+  await expect(drawer.getByRole('button', { name: 'Запустить снова', exact: true })).toHaveCount(0);
+  await drawer.getByRole('button', { name: 'Закрыть задачу', exact: true }).click();
+  // Changed global guidance applies to a separate new task; the completed task cannot restart.
+  const freshResponse = await request.post('/api/tasks', { headers: origin, data: {
+    title: unique('Новая задача с обновлёнными правилами'), instruction: '[ask] Подготовь новый обзор проекта.',
+    provider: 'codex', cwd: info.cwd, schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false,
+  } });
+  expect(freshResponse.status()).toBe(201);
+  const freshTask = await freshResponse.json() as Task;
+  await page.reload();
+  await page.getByRole('button', { name: `Открыть задачу: ${freshTask.title}`, exact: true }).click();
+  const freshDrawer = page.getByRole('dialog', { name: freshTask.title, exact: true });
+  await freshDrawer.getByRole('button', { name: 'Запустить', exact: true }).click();
+  await expect(freshDrawer.getByText('Агенту нужен ваш ответ', { exact: true })).toBeVisible();
+  const freshDetail = await (await request.get(`/api/tasks/${freshTask.id}`)).json() as TaskDetail;
+  expect(freshDetail.runs[0].instructions).toEqual([{ id: second.id, title: second.title, body: second.body }]);
+  expect((await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail).runs).toEqual(resumed.runs);
+  await freshDrawer.getByRole('button', { name: 'Отменить запуск', exact: true }).click();
+  await expect(freshDrawer.locator('.drawer-badges').getByText('Отменено', { exact: true })).toBeVisible();
 });
 
 test('loading, failed read and retry do not masquerade as an empty collection', async ({ page }) => {

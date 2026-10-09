@@ -5,8 +5,8 @@
   import { ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_COUNT } from './attachments';
 
   type DraftFile = { key: string; file?: File; attachment?: Attachment; error: string; uploading: boolean; preview?: string; previewFailed?: boolean };
-  let { initial = [], label = 'Файлы', disabled = false, count = $bindable(0), uploading = $bindable(false), invalid = $bindable(false) }: {
-    initial?: Attachment[]; label?: string; disabled?: boolean; count?: number; uploading?: boolean; invalid?: boolean;
+  let { initial = [], label = 'Файлы', disabled = false, count = $bindable(0), uploading = $bindable(false), invalid = $bindable(false), attachmentIds = $bindable<string[]>([]) }: {
+    initial?: Attachment[]; label?: string; disabled?: boolean; count?: number; uploading?: boolean; invalid?: boolean; attachmentIds?: string[];
   } = $props();
   // Each mounted composer owns its staging, even if an earlier request finishes after navigation.
   let rows = $state<DraftFile[]>(untrack(() => initial.map(attachment => ({ key: attachment.id, attachment, error: '', uploading: false }))));
@@ -18,7 +18,7 @@
   let queueRunning = false;
   const safeLocalImages = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif']);
   const helpId = `attachment-help-${crypto.randomUUID()}`;
-  $effect(() => { count = rows.length; uploading = rows.some(row => row.uploading || (!row.attachment && !row.error)); invalid = rows.some(row => !!row.error); });
+  $effect(() => { count = rows.length; attachmentIds = rows.flatMap(row => row.attachment ? [row.attachment.id] : []); uploading = rows.some(row => row.uploading || (!row.attachment && !row.error)); invalid = rows.some(row => !!row.error); });
 
   function sizeLabel(size: number) { return size < 1024 ? `${size} Б` : size < 1024 * 1024 ? `${(size / 1024).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} КБ` : `${(size / (1024 * 1024)).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} МБ`; }
   async function discard(attachment: Attachment) {

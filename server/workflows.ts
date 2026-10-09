@@ -34,7 +34,7 @@ export interface WorkflowContext {
   predecessors: { stepIndex: number; title: string; workerName: string; summary: string }[];
 }
 /** Carry the immediate predecessor's full validated result; never silently drop it. */
-export function workflowContext(run: Run): WorkflowContext | undefined {
+export function workflowContext(run: Pick<Run, 'steps' | 'currentStepIndex'>): WorkflowContext | undefined {
   if (!run.steps.length || run.currentStepIndex === null) return undefined;
   const index = run.currentStepIndex;
   const current = run.steps[index]!;
