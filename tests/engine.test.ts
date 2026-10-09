@@ -76,6 +76,85 @@ describe('agent lifecycle orchestration', () => {
     expect(store.detail(task.id).comments[1]?.body).toBe('Reading files');
   });
 
+  test.each(['completed', 'needs_input', 'blocked'] as const)('%s reuses a published answer while preserving distinct comments and questions', async status => {
+    const task = store.createTask(input(folder));
+    const run = engine.start(task.id);
+    const final = outcome(status);
+    agent.calls[0]!.callbacks.onComment(`\n${final.envelope.summary}\n`);
+    const published = store.detail(task.id).comments.at(-1)!;
+    agent.calls[0]!.callbacks.onComment('A separate answer with additional details.');
+    const separate = store.detail(task.id).comments.at(-1)!;
+    const user = store.comment(task.id, run.id, 'user', final.envelope.summary);
+    agent.calls[0]!.resolve(final);
+    await flush();
+    const comments = store.detail(task.id).comments.filter(comment => comment.kind !== 'system');
+    expect(comments.map(comment => comment.id).slice(0, 3)).toEqual([published.id, separate.id, user.id]);
+    expect(comments[0]).toEqual({ ...published, kind: status === 'completed' ? 'result' : 'agent' });
+    expect(comments[1]?.body).toBe('A separate answer with additional details.');
+    expect(comments.filter(comment => comment.kind !== 'user' && comment.body.trim() === final.envelope.summary)).toHaveLength(1);
+    expect(comments.filter(comment => comment.kind === 'question').map(comment => comment.body)).toEqual(final.envelope.questions);
+  });
+
+  test('captures synchronously published comments before a factory returns', async () => {
+    engine = new Engine(store, true, (input, callbacks) => {
+      callbacks.onComment('Checked repository');
+      return agent.factory(input, callbacks);
+    });
+    const task = store.createTask(input(folder));
+    engine.start(task.id);
+    const published = store.detail(task.id).comments.at(-1)!;
+    agent.calls[0]!.resolve(outcome());
+    await flush();
+    expect(store.detail(task.id).comments.filter(comment => comment.kind !== 'system')).toEqual([{ ...published, kind: 'result' }]);
+  });
+
+  test('identical summaries from previous turns and runs remain separate', async () => {
+    const task = store.createTask(input(folder));
+    const run = engine.start(task.id);
+    const waiting = outcome('needs_input');
+    agent.calls[0]!.callbacks.onComment(waiting.envelope.summary);
+    agent.calls[0]!.resolve(waiting);
+    await flush();
+    const prior = store.detail(task.id).comments.find(comment => comment.kind === 'agent')!;
+    const sameResult: AgentOutcome = { sessionId: 'session-exact', envelope: { status: 'completed', summary: waiting.envelope.summary, questions: [] } };
+    engine.resume(run.id, waiting.envelope.summary, false);
+    agent.calls[1]!.resolve(sameResult);
+    await flush();
+    const due = Date.now();
+    store.updateTask(task.id, { ...task, schedule: 'interval', intervalMinutes: 1, firstRunAt: due });
+    engine.tick(due);
+    const next = store.activeRun(task.id)!;
+    agent.calls[2]!.resolve(sameResult);
+    await flush();
+    const identical = store.detail(task.id).comments.filter(comment => comment.body === waiting.envelope.summary);
+    expect(identical.map(comment => comment.kind)).toEqual(['agent', 'user', 'result', 'result']);
+    expect(identical[0]).toEqual(prior);
+    expect(identical.map(comment => comment.runId)).toEqual([run.id, run.id, run.id, next.id]);
+  });
+
+  test('identical summaries from previous attempts and workflow steps remain separate', async () => {
+    const worker = store.createWorker({ name: 'Reviewer', provider: 'codex', avatarUrl: null, effort: 'default', communicationStyle: '' });
+    const task = store.createTask(input(folder, { steps: [
+      { workerId: worker.id, title: 'First', instruction: 'Review first.' },
+      { workerId: worker.id, title: 'Second', instruction: 'Review second.' },
+    ] }));
+    const run = engine.start(task.id);
+    agent.calls[0]!.callbacks.onComment('Checked repository');
+    const prior = store.detail(task.id).comments.at(-1)!;
+    agent.calls[0]!.reject(new Error('Attempt failed after publishing'));
+    await flush();
+    engine.retry(run.id);
+    agent.calls[1]!.resolve(outcome());
+    await flush();
+    agent.calls[2]!.resolve(outcome('completed', 'second-step-session'));
+    await flush();
+    const identical = store.detail(task.id).comments.filter(comment => comment.body === 'Checked repository');
+    expect(identical[0]).toEqual(prior);
+    expect(identical.map(comment => ({ kind: comment.kind, stepIndex: comment.stepIndex }))).toEqual([
+      { kind: 'agent', stepIndex: 0 }, { kind: 'result', stepIndex: 0 }, { kind: 'result', stepIndex: 1 },
+    ]);
+  });
+
   test('action logs persist separately from agent answers and late logs cannot cross a run fence', async () => {
     const task = store.createTask(input(folder));
     const run = engine.start(task.id);

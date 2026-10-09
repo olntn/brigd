@@ -81,7 +81,9 @@ export class Engine {
       if (this.handles.get(run.id) === launch) this.handles.delete(run.id);
     };
     let handle: AgentHandle;
+    let commentCursor: number;
     try {
+      commentCursor = this.store.commentCursor(run.taskId);
       const workflow = workflowContext(run.followup?.workflow ?? run);
       // Mock and injected factories need no transport or filesystem authority.
       // An explicit bridge factory lets integration tests exercise the lifecycle.
@@ -148,7 +150,7 @@ export class Engine {
             ...(envelope.questions.length ? [`Вопросов пользователю: ${envelope.questions.length}.`] : []),
             result.status === 'running' ? 'Результат сохранён. Начинается следующий этап.' : 'Ответ работника сохранён в комментариях.'],
         }, Date.now(), run.currentStepIndex);
-        this.store.comment(run.taskId, run.id, status === 'completed' ? 'result' : 'agent', envelope.summary, Date.now(), run.currentStepIndex);
+        this.store.recordAgentSummary(run.taskId, run.id, status === 'completed' ? 'result' : 'agent', envelope.summary, commentCursor, Date.now(), run.currentStepIndex);
         for (const question of envelope.questions) this.store.comment(run.taskId, run.id, 'question', question, Date.now(), run.currentStepIndex);
         if (result.status === 'running' && result.turn !== run.turn) next = result;
       }).immediate();

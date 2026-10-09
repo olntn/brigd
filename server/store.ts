@@ -743,6 +743,22 @@ export class Store {
       return this.getTask(id);
     }).immediate();
   }
+  commentCursor(taskId: string): number {
+    return (this.db.query('SELECT COALESCE(MAX(seq),0) AS seq FROM comments WHERE task_id=?').get(taskId) as Row).seq;
+  }
+  recordAgentSummary(taskId: string, runId: string, kind: 'agent' | 'result', body: string, afterSequence: number, now = Date.now(), stepIndex: number | null = null): Comment {
+    return this.db.transaction(() => {
+      // The CLI may publish its answer through MCP or a callback before returning
+      // the same summary. Only reuse this invocation's answer; an earlier turn or
+      // attempt can legitimately return identical text. Preserve publication IDs
+      // and attachment links by promoting the existing row in place.
+      const existing = (this.db.query("SELECT * FROM comments WHERE task_id=? AND run_id=? AND step_index IS ? AND seq>? AND kind='agent' ORDER BY seq DESC")
+        .all(taskId, runId, stepIndex, afterSequence) as Row[]).find(row => row.body.trim() === body.trim());
+      if (!existing) return this.comment(taskId, runId, kind, body, now, stepIndex);
+      this.db.query('UPDATE comments SET kind=? WHERE id=?').run(kind, existing.id);
+      return this.mapComment({ ...existing, kind });
+    }).immediate();
+  }
   comment(taskId: string, runId: string | null, kind: Comment['kind'], body: string, now = Date.now(), stepIndex?: number | null, ids?: string[]): Comment {
     return this.db.transaction(() => {
       this.getTask(taskId);

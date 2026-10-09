@@ -16,12 +16,31 @@ export function isActionComment(entry: Comment): boolean {
     (legacyActions.has(entry.body) || legacyStartup.test(entry.body));
 }
 
+/** Older runs may have published an answer before saving the same final summary. */
+export function conversationComments(entries: Comment[]): Comment[] {
+  const comments: Comment[] = [];
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index]!;
+    if (isActionComment(entry)) continue;
+    const previous = entries[index - 1];
+    // Inspect the original sequence so a hidden system event cannot join turns.
+    if (entry.kind === 'result' && previous?.kind === 'agent' && !isActionComment(previous) &&
+        entry.runId !== null && entry.runId === previous.runId && entry.taskId === previous.taskId &&
+        entry.stepIndex === previous.stepIndex && entry.body.trim() && entry.body.trim() === previous.body.trim()) {
+      const attachments = [...new Map([...(previous.attachments ?? []), ...(entry.attachments ?? [])]
+        .map(file => [file.id, file])).values()];
+      comments[comments.length - 1] = { ...entry, attachments };
+    } else comments.push(entry);
+  }
+  return comments;
+}
+
 export function taskActivity(detail: TaskDetail | null): { comments: Comment[]; logs: ActivityLog[] } {
   if (!detail) return { comments: [], logs: [] };
-  const comments: Comment[] = [];
+  const comments = conversationComments(detail.comments);
   const logs: ActivityLog[] = [...(detail.logs ?? [])];
   for (const entry of detail.comments) {
-    if (!isActionComment(entry)) { comments.push(entry); continue; }
+    if (!isActionComment(entry)) continue;
     logs.push({
       id: `comment-${entry.id}`, taskId: entry.taskId, runId: entry.runId,
       stepIndex: entry.stepIndex, kind: entry.kind === 'system' ? 'system' : 'legacy',

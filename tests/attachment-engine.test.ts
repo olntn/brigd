@@ -81,6 +81,34 @@ test('engine freezes attachment inputs, hands off outputs across providers, and 
   for (const broker of brokers) expect((await invoke(broker, 'list_attachments')).isError).toBe(true);
 });
 
+test.each(['comment', 'caption'] as const)('final summary reuses an MCP %s with stable publication IDs and attachments', async publication => {
+  const task = store.createTask(taskInput());
+  const run = engine.start(task.id), broker = brokers[0]!;
+  const final = outcome('published-session');
+  writeFileSync(join(broker.agentConfig.context.outputDirectory, 'result.txt'), 'Verified output');
+  const attachmentArgs = { path: 'result.txt', mime: 'text/plain',
+    caption: publication === 'caption' ? final.envelope.summary : 'Supporting evidence', idempotency_key: 'verified_output' };
+  const attachment = text(await invoke(broker, 'add_attachment', attachmentArgs)).attachment;
+  expect(text(await invoke(broker, 'add_attachment', attachmentArgs)).attachment.id).toBe(attachment.id);
+  let publishedId = store.getAttachment(task.id, attachment.id).commentId;
+  if (publication === 'comment') {
+    const args = { body: final.envelope.summary, attachment_ids: [attachment.id], idempotency_key: 'final_answer' };
+    publishedId = text(await invoke(broker, 'add_comment', args)).comment_id;
+    expect(text(await invoke(broker, 'add_comment', args)).comment_id).toBe(publishedId);
+  }
+  const before = store.detail(task.id).comments;
+  const answer = before.find(comment => comment.id === publishedId)!;
+  expect(answer.attachments?.map(file => file.id)).toEqual([attachment.id]);
+  const publications = store.db.query('SELECT * FROM attachment_publications WHERE run_id=? ORDER BY key').all(run.id);
+  calls[0]!.resolve(final);
+  await flush();
+  expect(store.getRun(run.id).status).toBe('completed');
+  const comments = store.detail(task.id).comments;
+  expect(comments).toEqual(before.map(comment => comment.id === publishedId ? { ...comment, kind: 'result' } : comment));
+  expect(comments.filter(comment => comment.body === final.envelope.summary)).toHaveLength(1);
+  expect(store.db.query('SELECT * FROM attachment_publications WHERE run_id=? ORDER BY key').all(run.id)).toEqual(publications);
+});
+
 test('cancellation revokes a bridge during image preparation before its atomic publication', async () => {
   const task = store.createTask(taskInput());
   const run = engine.start(task.id), broker = brokers[0]!;

@@ -154,6 +154,29 @@ test('comments contain conversation while worker actions have separate expandabl
   await page.screenshot({ path: testInfo.outputPath('task-detail-desktop-logs.png') });
 });
 
+test('a saved agent answer and its matching result appear as one final comment after reload', async ({ page }) => {
+  const fixture = fixtureDetail();
+  const answer = 'Привет! Я Codex, ИИ-помощник. Помогаю писать код и решать задачи.';
+  fixture.comments = [
+    { id: 'final-answer', taskId, runId, stepIndex: null, kind: 'agent', body: answer, createdAt: timestamp + 4_000 },
+    { id: 'final-result', taskId, runId, stepIndex: null, kind: 'result', body: answer, createdAt: timestamp + 5_000 },
+  ];
+  const dialog = await openTask(page, fixture);
+  const comments = dialog.getByRole('tabpanel', { name: /Комментарии/ });
+
+  for (const reload of [false, true]) {
+    if (reload) {
+      await page.reload();
+      await page.getByRole('button', { name: `Открыть задачу: ${fixture.task.title}`, exact: true }).click();
+      await expect(dialog).toBeVisible();
+    }
+    await expect(comments.locator('.comment-entry')).toHaveCount(1);
+    await expect(comments.getByText(answer, { exact: true })).toHaveCount(1);
+    await expect(comments.locator('.comment-result').getByText(answer, { exact: true })).toBeVisible();
+    await expect(dialog.getByRole('tab', { name: /Комментарии/ }).locator('span')).toHaveText('1');
+  }
+});
+
 test('all three activity tabs support keyboard selection and wraparound', async ({ page }) => {
   const dialog = await openTask(page, fixtureDetail());
   const comments = dialog.getByRole('tab', { name: /Комментарии/ });
