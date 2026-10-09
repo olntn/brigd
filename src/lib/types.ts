@@ -16,6 +16,19 @@ export interface Worker extends WorkerInput {
 /** Immutable identity and execution settings captured when a run starts. */
 export interface WorkerSnapshot extends WorkerInput { id: string; }
 
+export interface InstructionInput {
+  title: string;
+  body: string;
+  enabled: boolean;
+}
+export interface Instruction extends InstructionInput {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+}
+/** Reusable guidance frozen when a run is created, never reloaded on resume. */
+export interface InstructionSnapshot { id: string; title: string; body: string; }
+
 export type RunStatus = 'running' | 'cancelling' | 'waiting_input' | 'completed' | 'blocked' | 'failed' | 'interrupted' | 'cancelled';
 export type TaskStatus = 'ready' | RunStatus;
 export interface TaskInput {
@@ -41,6 +54,7 @@ export interface Task extends TaskInput {
   runCount: number;
 }
 export interface Run {
+  instructions: InstructionSnapshot[];
   workerId: string | null;
   worker: WorkerSnapshot | null;
   id: string;

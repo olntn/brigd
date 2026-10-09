@@ -36,6 +36,12 @@ const create = (title: string, workerId: string | null = null) => request('/api/
 try {
   await start('TRACKT');
   assert((await fetch(origin)).status === 200, 'Production UI must be built');
+  const favicon = await fetch(origin + '/brig.svg');
+  assert(favicon.ok && favicon.headers.get('content-type')?.includes('image/svg+xml') && (await favicon.text()).includes('<svg'), 'Brig favicon was not included in the production build');
+  const guidance = await request('/api/instructions', { title: 'Проверки', body: 'Перечисляй только действительно выполненные проверки.', enabled: true });
+  const laterGuidance = await request('/api/instructions', { title: 'Следующий запуск', body: 'Сначала краткий вывод, затем детали.', enabled: false });
+  const frozenInstructions = [{ id: guidance.id, title: guidance.title, body: guidance.body }];
+  assert((await request('/api/instructions')).length === 2, 'Instruction library was not saved');
   const avatarBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGO8k2LEwMDAxMDAwMDAAAASLAF2NoNKPAAAAABJRU5ErkJggg==', 'base64');
   const upload = await fetch(origin + '/api/avatars', { method: 'POST', headers: { Origin: origin, 'Content-Type': 'image/png' }, body: avatarBytes });
   assert(upload.status === 201, 'Avatar upload failed');
@@ -45,6 +51,10 @@ try {
   await request(`/api/tasks/${task.id}/run`, {});
   const waiting = await poll(() => request(`/api/tasks/${task.id}`), value => value.task.status === 'waiting_input');
   const session = waiting.runs[0].sessionId;
+  assert(JSON.stringify(waiting.runs[0].instructions) === JSON.stringify(frozenInstructions), 'Enabled instruction snapshot was not captured');
+  await request(`/api/instructions/${guidance.id}`, { body: 'Этот текст не должен попасть в старую сессию.', enabled: false }, 'PATCH');
+  await request(`/api/instructions/${laterGuidance.id}`, { enabled: true }, 'PATCH');
+  await request(`/api/instructions/${guidance.id}`, {}, 'DELETE');
   assert(waiting.runs[0].worker?.effort === 'high' && waiting.runs[0].worker?.avatarUrl === avatarUrl, 'Worker snapshot was not captured');
   await request(`/api/workers/${worker.id}`, { name: 'Edited reviewer', provider: 'claude', effort: 'max', communicationStyle: 'Новый стиль', avatarUrl: null }, 'PATCH');
   await request(`/api/workers/${worker.id}`, {}, 'DELETE');
@@ -52,6 +62,9 @@ try {
   await start();
   const restored = await request(`/api/tasks/${task.id}`);
   assert(restored.task.status === 'waiting_input' && restored.runs.length === 1 && restored.runs[0].sessionId === session, 'Waiting/session persistence failed');
+  const library = await request('/api/instructions');
+  assert(library.length === 1 && library[0].id === laterGuidance.id && library[0].enabled, 'Instruction edit/toggle/delete did not persist');
+  assert(JSON.stringify(restored.runs[0].instructions) === JSON.stringify(frozenInstructions), 'Library changes changed the saved run snapshot after restart');
   assert(restored.task.worker.archived && restored.task.provider === 'claude', 'Archived worker assignment did not persist');
   assert(restored.runs[0].provider === 'codex' && restored.runs[0].worker.name === 'Smoke reviewer' && restored.runs[0].worker.communicationStyle === 'Кратко и по-русски.', 'Editing profile changed an existing session');
   const persistedAvatar = await fetch(origin + avatarUrl);
@@ -60,6 +73,12 @@ try {
   const done = await poll(() => request(`/api/tasks/${task.id}`), value => value.task.status === 'completed');
   assert(done.runs[0].sessionId === session && done.runs[0].turn === 2, 'Resume did not use exact session');
   assert(done.runs[0].worker.effort === 'high' && done.runs[0].worker.avatarUrl === avatarUrl, 'Resume lost worker snapshot');
+  assert(JSON.stringify(done.runs[0].instructions) === JSON.stringify(frozenInstructions), 'Resume lost immutable instruction snapshot');
+  const scheduled = await request('/api/tasks', { title: 'Scheduled instruction snapshot', instruction: 'Mock smoke only.', provider: 'codex', cwd: directory, schedule: 'interval', intervalMinutes: 1, firstRunAt: Date.now() + 50, paused: false });
+  const scheduledDone = await poll(() => request(`/api/tasks/${scheduled.id}`), value => value.task.status === 'completed');
+  assert(scheduledDone.runs[0].trigger === 'schedule' && scheduledDone.runs[0].worker === null, 'No-worker schedule did not run');
+  assert(scheduledDone.runs[0].instructions.length === 1 && scheduledDone.runs[0].instructions[0].id === laterGuidance.id, 'Schedule did not pick up current enabled instructions');
+  await request(`/api/tasks/${scheduled.id}`, { paused: true }, 'PATCH');
   const crashed = await create('Crash does not replay work');
   const active = await request(`/api/tasks/${crashed.id}/run`, {});
   await poll(() => request(`/api/tasks/${crashed.id}`), value => !!value.runs[0].sessionId && value.task.status === 'running');
@@ -72,7 +91,7 @@ try {
   await request(`/api/runs/${active.id}/resume`, { answer: 'Mock process is stopped; continue.', acknowledgeInterruption: true });
   const recovered = await poll(() => request(`/api/tasks/${crashed.id}`), value => value.task.status === 'completed');
   assert(recovered.runs[0].sessionId === interrupted.runs[0].sessionId, 'Crash recovery changed session');
-  console.log('PASS: production HTTP, legacy TRACKT_ → BRIGD_ restart, mock clarification, exact session resume, worker/avatar persistence and frozen profiles, graceful restart, SIGKILL recovery, no replay.');
+  console.log('PASS: production HTTP, legacy TRACKT_ → BRIGD_ restart, mock clarification, exact session resume, worker/avatar persistence and frozen profiles, instruction CRUD and frozen snapshots, scheduled no-worker instructions, graceful restart, SIGKILL recovery, no replay.');
 } finally {
   await stop();
   rmSync(directory, { recursive: true, force: true });

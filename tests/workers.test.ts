@@ -176,8 +176,8 @@ describe('additive worker migration and legacy compatibility', () => {
         const tasks = (migrated.db.query('SELECT * FROM tasks').all() as Record<string, unknown>[])
           .map(({ worker_id, ...row }) => { expect(worker_id).toBeNull(); return row; });
         const runs = (migrated.db.query('SELECT * FROM runs ORDER BY id').all() as Record<string, unknown>[])
-          .map(({ worker_id, worker_snapshot, ...row }) => {
-            expect(worker_id).toBeNull(); expect(worker_snapshot).toBeNull(); return row;
+          .map(({ worker_id, worker_snapshot, instructions_snapshot, ...row }) => {
+            expect(worker_id).toBeNull(); expect(worker_snapshot).toBeNull(); expect(instructions_snapshot).toBe('[]'); return row;
           });
         expect(tasks).toEqual(originalTasks);
         expect(runs).toEqual(originalRuns);

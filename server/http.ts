@@ -4,6 +4,7 @@ import { Engine } from './engine';
 import { AppError } from './store';
 import { MAX_AVATAR_BYTES, validateAvatar } from './avatars';
 import { textField, validateTask, validateWorker } from './validation';
+import { INSTRUCTION_JSON_LIMIT, validateInstruction, validateInstructionPatch } from './instructions';
 
 export interface HttpOptions { port: number; dev?: boolean; root?: string; startedAt?: number; allowedHosts?: string[]; allowedOrigins?: string[]; defaultCwd?: string; }
 const JSON_LIMIT = 32_768;
@@ -28,9 +29,9 @@ async function readBody(req: Request, limit: number): Promise<Uint8Array> {
   }
   return Buffer.concat(chunks);
 }
-async function body(req: Request): Promise<Record<string, unknown>> {
+async function body(req: Request, limit = JSON_LIMIT): Promise<Record<string, unknown>> {
   if (req.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json') throw new AppError('Нужен Content-Type: application/json', 415);
-  const bytes = await readBody(req, JSON_LIMIT);
+  const bytes = await readBody(req, limit);
   let parsed: unknown;
   try { parsed = JSON.parse(Buffer.from(bytes).toString('utf8')); } catch { throw new AppError('Некорректный JSON'); }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new AppError('Ожидается JSON-объект');
@@ -77,6 +78,15 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         if (method === 'GET') return json(engine.store.getWorker(id));
         if (method === 'PATCH') return json(engine.store.updateWorker(id, validateWorker({ ...engine.store.getWorker(id), ...await body(req) })));
         if (method === 'DELETE') return json(engine.store.archiveWorker(id));
+      }
+      if (path === '/api/instructions' && method === 'GET') return json(engine.store.listInstructions());
+      if (path === '/api/instructions' && method === 'POST') return json(engine.store.createInstruction(validateInstruction(await body(req, INSTRUCTION_JSON_LIMIT))), 201);
+      const instructionMatch = path.match(/^\/api\/instructions\/([a-zA-Z0-9-]+)$/);
+      if (instructionMatch) {
+        const id = instructionMatch[1]!;
+        if (method === 'GET') return json(engine.store.getInstruction(id));
+        if (method === 'PATCH') return json(engine.store.updateInstruction(id, validateInstructionPatch(await body(req, INSTRUCTION_JSON_LIMIT))));
+        if (method === 'DELETE') { engine.store.deleteInstruction(id); return json({ ok: true }); }
       }
       if (path === '/api/tasks' && method === 'GET') return json(engine.store.listTasks());
       if (path === '/api/tasks' && method === 'POST') return json(engine.store.createTask(await validateTask(await body(req))), 201);

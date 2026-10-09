@@ -65,7 +65,7 @@ describe('agent lifecycle orchestration', () => {
     const run = engine.start(task.id);
     expect(run.status).toBe('running');
     expect(agent.calls).toHaveLength(1);
-    expect(agent.calls[0]!.input).toEqual({ provider: 'codex', cwd: folder, instruction: task.instruction, sessionId: undefined, answer: undefined, mock: true, effort: 'default', communicationStyle: '' });
+    expect(agent.calls[0]!.input).toEqual({ provider: 'codex', cwd: folder, instruction: task.instruction, instructions: [], sessionId: undefined, answer: undefined, mock: true, effort: 'default', communicationStyle: '' });
     agent.calls[0]!.callbacks.onSession('session-exact');
     agent.calls[0]!.callbacks.onComment('Reading files');
     agent.calls[0]!.resolve(outcome());
@@ -108,7 +108,7 @@ describe('agent lifecycle orchestration', () => {
     const task = store.createTask(input(folder, { provider, workerId: worker.id }));
     const run = engine.start(task.id);
     expect(run.worker).toMatchObject({ id: worker.id, provider, effort: 'high', communicationStyle: worker.communicationStyle });
-    expect(agent.calls[0]!.input).toEqual({ provider, cwd: folder, instruction: task.instruction, sessionId: undefined, answer: undefined, mock: true, effort: 'high', communicationStyle: worker.communicationStyle });
+    expect(agent.calls[0]!.input).toEqual({ provider, cwd: folder, instruction: task.instruction, instructions: [], sessionId: undefined, answer: undefined, mock: true, effort: 'high', communicationStyle: worker.communicationStyle });
     agent.calls[0]!.resolve(outcome('needs_input'));
     await flush();
     const nextProvider = provider === 'codex' ? 'claude' : 'codex';

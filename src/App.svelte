@@ -2,6 +2,8 @@
   import { onMount, tick } from 'svelte';
   import Icon from './lib/Icon.svelte';
   import Workers from './lib/Workers.svelte';
+  import Instructions from './lib/Instructions.svelte';
+  import BrigLogo from './lib/BrigLogo.svelte';
   import WorkerAvatar from './lib/WorkerAvatar.svelte';
   import { effortLabel } from './lib/workers';
   import { applyTheme, readTheme, saveTheme, themeStorageKey, type Theme } from './lib/theme';
@@ -11,7 +13,7 @@
   type View = 'board' | 'list';
   let info = $state<AppInfo | null>(null);
   let tasks = $state<Task[]>([]);
-  let page = $state<'tasks' | 'workers'>('tasks');
+  let page = $state<'tasks' | 'workers' | 'instructions'>('tasks');
   let workers = $state<Worker[]>([]);
   let workersLoading = $state(true);
   let workersError = $state('');
@@ -385,6 +387,16 @@
   <span class="status-badge status-{status}"><span class="status-dot"></span>{labels[status]}</span>
 {/snippet}
 
+{#snippet instructionSnapshot(run: Run)}
+  <details class="run-instruction-snapshot">
+    <summary>Общие инструкции запуска <span>{run.instructions?.length ?? 0}</span></summary>
+    <p class="snapshot-help">Копия на момент старта. При продолжении этого запуска используются те же правила.</p>
+    {#each run.instructions ?? [] as instruction (instruction.id)}
+      <section class="snapshot-instruction"><h4>{instruction.title}</h4><p>{instruction.body}</p></section>
+    {:else}<p class="snapshot-empty">В этом запуске нет общих инструкций.</p>{/each}
+  </details>
+{/snippet}
+
 {#snippet taskCard(task: Task)}
   <article class="task-card {task.status}" class:paused-card={task.paused}>
     <button class="card-main" onclick={() => openTask(task)} aria-label={'Открыть задачу: ' + task.title}>
@@ -408,7 +420,7 @@
 
 <div class="app-shell">
   <aside class="sidebar" aria-label="Основная навигация">
-    <a class="brand" href="/" aria-label="brigd — главная"><span class="brand-symbol"><Icon name="check" size={24} stroke={2.6} /></span><span>brigd<span class="brand-dot">.</span></span></a>
+    <a class="brand" href="/" aria-label="brigd — главная"><span class="brand-symbol"><BrigLogo size={28} /></span><span>brigd<span class="brand-dot">.</span></span></a>
     <div class="workspace-label"><span class="workspace-icon"><Icon name="folder" size={16} /></span><div><strong>Моё пространство</strong><span>Локальный workspace</span></div><span class="local-light"></span></div>
     <div class="nav-label">РАБОЧЕЕ ПРОСТРАНСТВО</div>
     <nav class="main-nav" aria-label="Задачи">
@@ -417,6 +429,7 @@
       <button class:active={page === 'tasks' && scope === 'scheduled'} aria-label="По расписанию" onclick={() => setScope('scheduled')}><Icon name="clock" /><span>По расписанию</span>{#if scheduledCount}<span class="nav-count">{scheduledCount}</span>{/if}</button>
       <button class:active={page === 'tasks' && scope === 'completed'} aria-label="Завершённые задачи" onclick={() => setScope('completed')}><Icon name="circlecheck" /><span>Завершённые</span></button>
       <button class:active={page === 'workers'} aria-label="Работники" onclick={() => { page = 'workers'; void loadWorkers(); }}><Icon name="spark" /><span>Работники</span><span class="nav-count">{workers.filter(worker => !worker.archived).length}</span></button>
+      <button class:active={page === 'instructions'} aria-label="Инструкции" onclick={() => { page = 'instructions'; }}><Icon name="list" /><span>Инструкции</span></button>
     </nav>
     <div class="nav-label agents-label">ВАШИ АГЕНТЫ <span>2</span></div>
     <div class="agent-nav">
@@ -437,7 +450,9 @@
 
   <main class="main-content">
     <div class="workspace-content">
-      {#if page === 'workers'}
+      {#if page === 'instructions'}
+        <Instructions {notify} />
+      {:else if page === 'workers'}
         <Workers {workers} loading={workersLoading} error={workersError} retry={() => { void loadWorkers(); }} onchange={workerChanged} {notify} />
       {:else}
       <section class="page-heading"><div><div class="eyebrow">МЕНЬШЕ РУТИНЫ. БОЛЬШЕ СДЕЛАННОГО.</div><h1>{scopeTitles[scope]}<span>{scope === 'all' ? tasks.length : filtered.length}</span></h1><p>Дайте агентам задачу. Остальное держите в поле зрения.</p></div><button class="button primary create-button" onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={17} />Новая задача</button></section>
@@ -457,7 +472,7 @@
         <div class="no-results"><span class="empty-icon"><Icon name={scope === 'attention' ? 'circlecheck' : 'search'} size={28} /></span><h2>{scope === 'attention' && !search && provider === 'all' ? 'Всё под контролем' : 'Задачи не найдены'}</h2><p>{scope === 'attention' && !search && provider === 'all' ? 'Сейчас нет задач, которым нужно ваше внимание.' : 'Попробуйте другой запрос или измените фильтры.'}</p><button class="button secondary" onclick={resetFilters}>Показать все задачи</button></div>
       {:else}
         {#if tasks.length === 0 && !connectionError}
-          <section class="welcome-card"><div class="welcome-art" aria-hidden="true"><span class="art-orbit orbit-one"></span><span class="art-orbit orbit-two"></span><span class="art-mini art-code"><Icon name="code" size={19} /></span><span class="art-main"><Icon name="check" size={33} stroke={2.3} /></span><span class="art-mini art-star">✳</span><span class="art-spark">✦</span></div><div class="welcome-copy"><span class="welcome-kicker">С ЧЕГО НАЧНЁМ?</span><h2>Освободите время для своих идей</h2><p>Поручите агенту проверить проект, собрать сводку или помочь с кодом.<br class="desktop-break" /> Запустите один раз или настройте регулярную работу.</p><button class="button primary" onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={16} />Создать первую задачу<Icon name="arrow" size={16} /></button></div><div class="welcome-steps"><div><span>1</span>Опишите задачу</div><div><span>2</span>Выберите агента</div><div><span>3</span>Следите за результатом</div></div></section>
+          <section class="welcome-card"><div class="welcome-art" aria-hidden="true"><span class="art-orbit orbit-one"></span><span class="art-orbit orbit-two"></span><span class="art-mini art-code"><Icon name="code" size={19} /></span><span class="art-main"><BrigLogo size={39} /></span><span class="art-mini art-star">✳</span><span class="art-spark">✦</span></div><div class="welcome-copy"><span class="welcome-kicker">С ЧЕГО НАЧНЁМ?</span><h2>Освободите время для своих идей</h2><p>Поручите агенту проверить проект, собрать сводку или помочь с кодом.<br class="desktop-break" /> Запустите один раз или настройте регулярную работу.</p><button class="button primary" onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={16} />Создать первую задачу<Icon name="arrow" size={16} /></button></div><div class="welcome-steps"><div><span>1</span>Опишите задачу</div><div><span>2</span>Выберите агента</div><div><span>3</span>Следите за результатом</div></div></section>
         {/if}
 
         {#if view === 'board'}
@@ -491,7 +506,8 @@
       {#if toast}<div class="drawer-notice {toast.type}" role={toast.type === 'error' ? 'alert' : 'status'}><Icon name={toast.type === 'error' ? 'alert' : 'circlecheck'} size={16} /><span>{toast.text}</span><button class="icon-button" aria-label="Закрыть уведомление" onclick={() => toast = null}><Icon name="close" size={14} /></button></div>{/if}
       {#if detailError}<div class="detail-error" role="alert">{detailError}</div>{/if}
       <div class="task-properties">{#if selectedTask.worker || activeStatuses.includes(selectedTask.status)}<div><span><Icon name="spark" size={14} />{activeStatuses.includes(selectedTask.status) ? 'Следующий запуск' : 'Работник'}</span><div>{#if selectedTask.worker}{@render workerBadge(selectedTask.worker, true)}{:else}<strong>Без работника · {providerName(selectedTask.provider)}</strong>{/if}</div></div>{/if}<div><span><Icon name="folder" size={14} />Рабочая папка</span><code title={selectedTask.cwd}>{selectedTask.cwd}</code></div><div><span><Icon name="clock" size={14} />Расписание</span><strong>{selectedTask.schedule === 'interval' ? intervalLabel(selectedTask.intervalMinutes) : 'Ручной запуск'}{#if selectedTask.paused}<span class="paused-label">На паузе</span>{/if}</strong></div>{#if selectedTask.nextRunAt && !selectedTask.paused}<div><span><Icon name="arrow" size={14} />Следующий запуск</span><strong>{dateTime(selectedTask.nextRunAt)}</strong></div>{/if}<div><span><Icon name="history" size={14} />Всего запусков</span><strong>{selectedTask.runCount}</strong></div></div>
-      <section class="instruction-section"><h3>ИНСТРУКЦИЯ ДЛЯ АГЕНТА</h3><p>{selectedTask.instruction}</p></section>
+      <section class="instruction-section"><h3>ЗАДАНИЕ ДЛЯ АГЕНТА</h3><p>{selectedTask.instruction}</p></section>
+      {#if currentRun}<div class="current-run-instructions">{@render instructionSnapshot(currentRun)}</div>{/if}
       {#if currentRun?.error}<div class="run-error"><Icon name="alert" size={17} /><div><strong>{labels[currentRun.status]}</strong><p>{currentRun.error}</p></div></div>{/if}
       {#if runCanResume}
         <form class="resume-panel" onsubmit={(event) => { event.preventDefault(); if (selectedTask && (answer.trim() || currentRun?.status === 'interrupted')) void act(selectedTask, 'resume', answer); }}><div class="resume-title"><Icon name={currentRun?.status === 'interrupted' ? 'alert' : 'message'} size={18} /><strong>{currentRun?.status === 'interrupted' ? 'Запуск был прерван' : 'Агенту нужен ваш ответ'}</strong></div><p>{currentRun?.status === 'interrupted' ? 'Прежний процесс CLI мог остаться запущенным после сбоя. Остановите его перед продолжением. Уже выполненные действия и изменения файлов не откатываются.' : 'Ответ будет передан агенту в ту же сессию, и работа продолжится.'}</p>{#if !currentRun?.sessionId && !currentRun?.mock}<div class="resume-warning">Идентификатор сессии не сохранён. Продолжение недоступно; отмените запуск, чтобы начать заново.</div>{:else}<label class="sr-only" for="resume-answer">Ответ агенту</label><textarea id="resume-answer" bind:value={answer} maxlength="8000" rows="3" placeholder={currentRun?.status === 'interrupted' ? 'Что учесть при продолжении? (необязательно)' : 'Напишите ответ или уточнение…'} required={currentRun?.status === 'waiting_input'} disabled={taskBusy}></textarea>{#if currentRun?.status === 'interrupted'}<label class="interruption-confirm"><input type="checkbox" bind:checked={acknowledgeInterruption} disabled={taskBusy} /><span>Я проверил(а), что предыдущий процесс CLI остановлен</span></label>{/if}<button class="button primary" type="submit" disabled={taskBusy || (currentRun?.status === 'waiting_input' && !answer.trim()) || (currentRun?.status === 'interrupted' && !acknowledgeInterruption)}><Icon name="arrow" size={15} />{taskBusy ? 'Отправляем…' : 'Продолжить работу'}</button>{/if}</form>
@@ -501,7 +517,7 @@
         <div id="conversation-panel" tabindex="0" role="tabpanel" aria-labelledby="conversation-tab" class="conversation-panel">{#each detail.comments as entry (entry.id)}<article class="comment-entry comment-{entry.kind}">{#if commentWorker(entry)}<WorkerAvatar name={commentWorker(entry)!.name} avatarUrl={commentWorker(entry)!.avatarUrl} />{:else}<span class="comment-avatar">{#if entry.kind === 'user'}Я{:else if entry.kind === 'system'}<Icon name="terminal" size={14} />{:else if entry.kind === 'question'}<Icon name="message" size={14} />{:else}<Icon name="spark" size={14} />{/if}</span>{/if}<div class="comment-main"><div class="comment-meta"><strong>{commentAuthor(entry)}</strong><time datetime={new Date(entry.createdAt).toISOString()}>{dateTime(entry.createdAt)}</time></div><p>{entry.body}</p></div></article>{:else}<div class="conversation-empty"><Icon name="message" size={25} /><strong>У каждой задачи своя история</strong><p>Здесь появятся сообщения агента, вопросы и результат.<br />Можно оставить заметку уже сейчас.</p></div>{/each}</div>
         <form class="comment-form" onsubmit={sendComment}><label for="task-comment">Заметка к задаче</label><div class="comment-input"><textarea id="task-comment" bind:value={comment} maxlength="8000" placeholder="Добавьте контекст или заметку…" rows="2" disabled={taskBusy}></textarea><button class="icon-button" type="submit" disabled={!comment.trim() || taskBusy} aria-label="Сохранить заметку"><Icon name="send" size={17} /></button></div><p>Заметки сохраняются в истории. Для ответа агенту используйте «Продолжить работу».</p></form>
       {:else}
-        <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name="play" size={14} />Запуск {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{#if run.worker}{@render workerBadge(run.worker, true)}{/if}{@render providerBadge(run.provider, true)}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'schedule' ? 'По расписанию' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}<div class="run-details">Ход {run.turn}{#if run.worker}<span> · Усилия: {effortLabel(run.worker.effort)}</span>{/if}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
+        <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name="play" size={14} />Запуск {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{#if run.worker}{@render workerBadge(run.worker, true)}{/if}{@render providerBadge(run.provider, true)}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'schedule' ? 'По расписанию' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}{@render instructionSnapshot(run)}<div class="run-details">Ход {run.turn}{#if run.worker}<span> · Усилия: {effortLabel(run.worker.effort)}</span>{/if}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
       {/if}
     {:else}<div class="detail-loading"><Icon name="refresh" class="spin" />Загружаем задачу…</div>{/if}
   </div>

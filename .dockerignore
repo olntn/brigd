@@ -11,6 +11,8 @@
 !tsconfig.server.json
 !src/
 !src/**
+!public/
+!public/brig.svg
 !server/
 !server/**
 !scripts/

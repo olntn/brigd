@@ -61,6 +61,9 @@ jobs:
           assert all(p['available'] for p in info['providers']), info
           with urllib.request.urlopen(base, timeout=10) as r:
               assert r.status == 200 and b'<html' in r.read()
+          with urllib.request.urlopen(base + '/brig.svg', timeout=10) as r:
+              assert r.status == 200 and r.headers.get_content_type() == 'image/svg+xml'
+              assert b'<svg' in r.read()
           try:
               request('/api/info', Host='untrusted.example')
               raise AssertionError('Host guard accepted an untrusted hostname')
@@ -71,6 +74,9 @@ jobs:
               raise AssertionError('Origin guard accepted another site')
           except urllib.error.HTTPError as e:
               assert e.code == 403, e.code
+          instruction = request('/api/instructions', {
+              'title': 'Container smoke guidance', 'body': 'Report only verified checks.', 'enabled': True,
+          })
           task = request('/api/tasks', {
               'title': 'Persistent container smoke', 'instruction': 'Mock run; no models.',
               'provider': 'codex', 'cwd': '/workspace/projects/sample',
@@ -88,6 +94,7 @@ jobs:
               raise AssertionError(detail)
           assert detail['runs'][0]['mock'] is True
           assert detail['runs'][0]['sessionId'] and detail['comments']
+          assert detail['runs'][0]['instructions'] == [{key: instruction[key] for key in ('id', 'title', 'body')}]
           with open(os.environ['RUNNER_TEMP'] + '/trackt-smoke-id', 'w') as f:
               f.write(task['id'])
           PY
@@ -106,6 +113,11 @@ jobs:
           assert len(detail['runs']) == 1 and detail['runs'][0]['status'] == 'completed'
           assert detail['runs'][0]['mock'] is True
           assert detail['comments']
+          snapshot = detail['runs'][0]['instructions']
+          assert len(snapshot) == 1 and snapshot[0]['body'] == 'Report only verified checks.'
+          with urllib.request.urlopen('http://127.0.0.1:4310/api/instructions', timeout=10) as r:
+              instructions = json.load(r)
+          assert len(instructions) == 1 and instructions[0]['id'] == snapshot[0]['id'] and instructions[0]['enabled']
           PY
       - name: Recover the same database after an abrupt container kill
         run: |
@@ -120,6 +132,7 @@ jobs:
               detail = json.load(r)
           assert len(detail['runs']) == 1 and detail['runs'][0]['status'] == 'completed'
           assert detail['runs'][0]['mock'] is True and detail['comments']
+          assert detail['runs'][0]['instructions'][0]['body'] == 'Report only verified checks.'
           PYCODE
       - name: Diagnostics on failure
         if: failure()

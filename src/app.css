@@ -89,8 +89,8 @@ input[type='checkbox'], input[type='radio'] { flex-shrink: 0; }
 .sidebar { position: fixed; inset: 0 auto 0 0; width: var(--sidebar-width); background: var(--sidebar); border-right: 1px solid var(--line); padding: 30px 18px 0; display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; z-index: 10; }
 .sidebar > * { flex-shrink: 0; min-width: 0; }
 .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 750; letter-spacing: -1.4px; font-size: 2.38rem; width: fit-content; max-width: 100%; margin-left: 12px; }
-.brand-symbol { width: 34px; height: 34px; flex-shrink: 0; background: var(--accent); border-radius: 11px; display: grid; place-items: center; color: #fff; transform: rotate(-5deg); }
-.brand-symbol svg { transform: rotate(5deg); }
+.brand-symbol { width: 36px; height: 36px; flex-shrink: 0; background: var(--accent); border-radius: 11px; display: grid; place-items: center; color: var(--on-accent); }
+.brand-symbol svg { max-width: calc(100% - 4px); height: auto; }
 .brand-dot { color: var(--accent); }
 .brand > span:last-child, .workspace-label > div, .workspace-footer > div { min-width: 0; overflow-wrap: anywhere; }
 .workspace-label { display: flex; align-items: center; gap: 10px; margin: 28px 5px; padding: 12px 8px; border-bottom: 1px solid var(--line); }
@@ -317,3 +317,41 @@ dialog::backdrop { background: var(--overlay); backdrop-filter: blur(2px); }
 .worker-assignment { display: grid; gap: 12px; border: 1px solid var(--line); padding: 14px; border-radius: 8px; background: var(--subtle); }.worker-assignment-meta { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; color: var(--muted); font-size: .77rem; }.worker-assignment p { margin: 0; color: var(--secondary); font-size: .85rem; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 10rem; overflow-y: auto; }.field-warning button { text-decoration: underline; flex-shrink: 0; }
 @media (max-width: 700px) { .form-field select { font-size: max(16px, .92rem); } }
 @media (max-width: 400px) { .worker-card { padding: 16px; }.worker-card-actions .button { flex: 1 1 100%; }.worker-identity { flex-wrap: wrap; }.worker-identity > span:not(.worker-avatar) { flex: 1; } }
+
+/* Shared instructions and frozen per-run copies use the same theme tokens. */
+.instructions-note { margin-bottom: 16px; }
+.instructions-capacity { margin: 0 0 22px; color: var(--muted); font-size: .77rem; line-height: 1.8; overflow-wrap: anywhere; }
+.instructions-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 28rem), 1fr)); gap: 18px; align-items: start; }
+.instruction-card { min-width: 0; padding: 20px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
+.instruction-disabled { background: var(--subtle); }
+.instruction-card-heading { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; justify-content: space-between; }
+.instruction-card h2 { margin: 0; min-width: 0; flex: 1 1 14rem; font-size: 1.15rem; line-height: 1.6; font-weight: 550; overflow-wrap: anywhere; }
+.instruction-switch { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; min-height: 36px; max-width: 100%; padding: 4px 0; border-radius: 4px; color: var(--muted); font-size: .77rem; }
+.instruction-switch > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.switch-track { width: 36px; height: 22px; border-radius: 14px; border: 2px solid var(--muted); background: var(--muted); display: inline-flex; align-items: center; padding: 1px; flex-shrink: 0; }
+.switch-track > span { display: block; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .16s; }
+.instruction-switch[aria-checked='true'] { color: var(--accent-text); }
+.instruction-switch[aria-checked='true'] .switch-track { background: var(--accent); border-color: var(--accent); }
+.instruction-switch[aria-checked='true'] .switch-track > span { transform: translateX(12px); }
+.instruction-preview { margin: 16px 0 20px; font-size: .92rem; line-height: 1.8; color: var(--secondary); white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
+.instruction-card-actions { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--line); padding-top: 15px; }
+.instruction-enabled-option { display: flex; align-items: flex-start; gap: 10px; color: var(--secondary); cursor: pointer; font-size: .92rem; }
+.instruction-enabled-option input { margin: 4px 0 0; width: 17px; height: 17px; }
+.instruction-enabled-option span, .instruction-editor .form-error > span, .instruction-delete-dialog .form-error > span { min-width: 0; overflow-wrap: anywhere; }
+.instruction-editor .form-note { margin: 0; }
+.instruction-delete-dialog { width: 38rem; }
+.instruction-delete-dialog .editor-fields > p { margin: 0; line-height: 1.8; color: var(--secondary); overflow-wrap: anywhere; }
+.button.danger { border-color: var(--error-line); background: var(--error-bg); color: var(--error); }
+.button.danger:hover:not(:disabled) { border-color: var(--error); }
+.current-run-instructions { margin: 0 26px 22px; }
+.run-instruction-snapshot { min-width: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.run-instruction-snapshot summary { cursor: pointer; padding: 12px; color: var(--secondary); font-size: .85rem; line-height: 1.7; overflow-wrap: anywhere; }
+.run-instruction-snapshot summary:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 5px; }
+.run-instruction-snapshot summary > span { margin-left: 5px; font-size: .77rem; border-radius: 4px; background: var(--soft); color: var(--accent-text); padding: 2px 5px; }
+.snapshot-help, .snapshot-empty { margin: 0; padding: 0 12px 12px; font-size: .77rem; color: var(--muted); line-height: 1.8; overflow-wrap: anywhere; }
+.snapshot-instruction { padding: 12px; border-top: 1px solid var(--line); min-width: 0; }
+.snapshot-instruction h4 { margin: 0 0 8px; color: var(--text); font-size: .85rem; font-weight: 550; overflow-wrap: anywhere; }
+.snapshot-instruction p { margin: 0; color: var(--secondary); white-space: pre-wrap; font-size: .85rem; line-height: 1.85; overflow-wrap: anywhere; }
+.run-entry .run-instruction-snapshot { margin-top: 12px; }
+@media (max-width: 700px) { .current-run-instructions { margin-inline: 20px; } }
+@media (max-width: 400px) { .instruction-card { padding: 16px; }.instruction-card-actions .button { flex: 1 1 100%; }.instruction-editor .editor-footer .button, .instruction-delete-dialog .editor-footer .button { flex: 1 1 100%; } }

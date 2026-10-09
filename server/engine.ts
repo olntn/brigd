@@ -39,7 +39,7 @@ export class Engine {
     const isCurrent = () => this.store.getRun(run.id).status === 'running' && this.store.getRun(run.id).turn === run.turn;
     let handle: AgentHandle;
     try {
-      handle = this.factory({ provider: run.provider, cwd: run.cwd, instruction: run.instruction,
+      handle = this.factory({ provider: run.provider, cwd: run.cwd, instruction: run.instruction, instructions: run.instructions,
         effort: run.worker?.effort ?? 'default', communicationStyle: run.worker?.communicationStyle ?? '',
         sessionId: run.sessionId ?? undefined, answer, mock: run.mock }, {
         onSession: id => { if (isCurrent()) this.store.setSession(run.id, id); },

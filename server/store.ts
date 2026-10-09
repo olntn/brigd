@@ -1,11 +1,11 @@
 import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import type { Comment, Run, RunStatus, Task, TaskDetail, TaskInput, Worker, WorkerInput, WorkerSnapshot } from '../src/lib/types';
-
-export class AppError extends Error {
-  constructor(message: string, public status = 400) { super(message); }
-}
+import type { Comment, Instruction, InstructionInput, InstructionSnapshot, Run, RunStatus, Task, TaskDetail, TaskInput, Worker, WorkerInput, WorkerSnapshot } from '../src/lib/types';
+import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
+import { validateInstruction, validateInstructionPatch, validateInstructionSnapshots } from './instructions';
+import { AppError } from './errors';
+export { AppError } from './errors';
 type Row = Record<string, any>;
 const OPEN = "'running','cancelling','waiting_input','interrupted'";
 // PID alone is not an identity: containers routinely reuse it after a restart.
@@ -38,6 +38,11 @@ export class Store {
         communication_style TEXT NOT NULL DEFAULT '', avatar_url TEXT, archived INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS instructions (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+        title TEXT NOT NULL, body TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY, title TEXT NOT NULL, instruction TEXT NOT NULL, provider TEXT NOT NULL,
         cwd TEXT NOT NULL, schedule TEXT NOT NULL, interval_minutes INTEGER, first_run_at INTEGER,
@@ -66,6 +71,7 @@ export class Store {
         ['tasks', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_snapshot', 'TEXT'],
+        ['runs', 'instructions_snapshot', "TEXT NOT NULL DEFAULT '[]'"],
       ]) {
         if (!(this.db.query(`PRAGMA table_info(${table})`).all() as Row[]).some(row => row.name === column)) {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
@@ -95,6 +101,50 @@ export class Store {
     }).immediate();
   }
   releaseLease(owner: string) { this.db.query('DELETE FROM service_lease WHERE singleton=1 AND owner=?').run(owner); }
+  private mapInstruction(row: Row): Instruction {
+    return { id: row.id, title: row.title, body: row.body, enabled: !!row.enabled,
+      createdAt: row.created_at, updatedAt: row.updated_at };
+  }
+  listInstructions(): Instruction[] {
+    return (this.db.query('SELECT * FROM instructions ORDER BY created_at, seq').all() as Row[]).map(row => this.mapInstruction(row));
+  }
+  getInstruction(id: string): Instruction {
+    const row = this.db.query('SELECT * FROM instructions WHERE id=?').get(id) as Row | null;
+    if (!row) throw new AppError('Инструкция не найдена', 404);
+    return this.mapInstruction(row);
+  }
+  private enabledInstructions(): InstructionSnapshot[] {
+    const snapshots = this.listInstructions().filter(item => item.enabled).map(({ id, title, body }) => ({ id, title, body }));
+    validateInstructionSnapshots(snapshots);
+    return snapshots;
+  }
+  createInstruction(value: InstructionInput, now = Date.now()): Instruction {
+    const input = validateInstruction(value);
+    return this.db.transaction(() => {
+      if ((this.db.query('SELECT count(*) AS n FROM instructions').get() as Row).n >= INSTRUCTION_COUNT_LIMIT) {
+        throw new AppError(`Можно сохранить не больше ${INSTRUCTION_COUNT_LIMIT} инструкций. Удалите ненужную инструкцию.`);
+      }
+      const id = crypto.randomUUID();
+      this.db.query('INSERT INTO instructions (id,title,body,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?)')
+        .run(id, input.title, input.body, +input.enabled, now, now);
+      this.enabledInstructions(); // A failed aggregate check rolls back the entire write.
+      return this.getInstruction(id);
+    }).immediate();
+  }
+  updateInstruction(id: string, value: Partial<InstructionInput>, now = Date.now()): Instruction {
+    return this.db.transaction(() => {
+      const current = this.getInstruction(id);
+      const input = { ...current, ...validateInstructionPatch(value) };
+      this.db.query('UPDATE instructions SET title=?,body=?,enabled=?,updated_at=? WHERE id=?')
+        .run(input.title, input.body, +input.enabled, now, id);
+      this.enabledInstructions();
+      return this.getInstruction(id);
+    }).immediate();
+  }
+  deleteInstruction(id: string): void {
+    const result = this.db.query('DELETE FROM instructions WHERE id=?').run(id);
+    if (!result.changes) throw new AppError('Инструкция не найдена', 404);
+  }
   private mapWorker(row: Row): Worker {
     return { id: row.id, name: row.name, provider: row.provider, effort: row.effort,
       communicationStyle: row.communication_style, avatarUrl: row.avatar_url, archived: !!row.archived,
@@ -150,7 +200,7 @@ export class Store {
     return worker;
   }
   private mapRun(row: Row): Run {
-    return { id: row.id, taskId: row.task_id, workerId: row.worker_id ?? null, worker: row.worker_snapshot ? JSON.parse(row.worker_snapshot) as WorkerSnapshot : null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
+    return { id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: row.worker_snapshot ? JSON.parse(row.worker_snapshot) as WorkerSnapshot : null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
       trigger: row.trigger, scheduledFor: row.scheduled_for, status: row.status, sessionId: row.session_id,
       startedAt: row.started_at, updatedAt: row.updated_at, finishedAt: row.finished_at, summary: row.summary,
       error: row.error, turn: row.turn, mock: !!row.mock };
@@ -214,8 +264,9 @@ export class Store {
       id: task.worker.id, name: task.worker.name, avatarUrl: task.worker.avatarUrl, provider: task.worker.provider,
       effort: task.worker.effort, communicationStyle: task.worker.communicationStyle,
     } : null;
-    this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,scheduled_for,status,started_at,updated_at,mock,worker_id,worker_snapshot) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?)`)
-      .run(id, task.id, task.provider, task.cwd, task.instruction, trigger, scheduledFor, now, now, +mock, worker?.id ?? null, worker ? JSON.stringify(worker) : null);
+    const instructions = this.enabledInstructions();
+    this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,scheduled_for,status,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?,?)`)
+      .run(id, task.id, task.provider, task.cwd, task.instruction, trigger, scheduledFor, now, now, +mock, worker?.id ?? null, worker ? JSON.stringify(worker) : null, JSON.stringify(instructions));
     this.comment(task.id, id, 'system', mock ? 'Демо-запуск: используется тестовый агент, реальные CLI не вызываются.' : `Запуск ${task.provider === 'codex' ? 'Codex' : 'Claude Code'} через CLI.`, now);
     return this.getRun(id);
   }

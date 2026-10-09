@@ -11,7 +11,7 @@ const summary = token('Результат');
 const failure = token('Ошибка');
 const taskId = 'appearance-task';
 const run: Run = {
-  id: 'appearance-run', taskId, workerId: null, worker: null, provider: 'codex', cwd: '/workspace/project', instruction,
+  id: 'appearance-run', taskId, workerId: null, worker: null, instructions: [], provider: 'codex', cwd: '/workspace/project', instruction,
   trigger: 'manual', scheduledFor: null, status: 'completed', sessionId: 'appearance-session',
   startedAt: timestamp, updatedAt: timestamp + 1_000, finishedAt: timestamp + 1_000,
   summary, error: null, turn: 1, mock: false,

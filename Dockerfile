@@ -47,6 +47,7 @@ COPY --chown=trackt:node package.json bun.lock ./
 RUN bun install --frozen-lockfile --ignore-scripts
 COPY --chown=trackt:node index.html vite.config.ts svelte.config.js tsconfig.json tsconfig.server.json ./
 COPY --chown=trackt:node src ./src
+COPY --chown=trackt:node public ./public
 RUN bun run build
 
 FROM runtime-base AS runtime
