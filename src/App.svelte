@@ -496,8 +496,11 @@
         if (detail) detail = { ...detail, task: updateTask(detail.task), runs: [run, ...detail.runs.filter(item => item.id !== run.id)] };
         comment = '';
         followupAttempt = null;
-        followupTargetKey = '';
-        followupRecipientSession = '';
+        // Keep the explicitly selected recipient while the new request runs.
+        // Completed-target polling will rebind its source ID in the same session.
+        // Resetting here would select another worker's last completed run.
+        followupTargetKey = target.key;
+        followupRecipientSession = followupSessionKey(target);
         notifyForTask(task.id, context, 'Дополнительный запрос отправлен в ту же сессию');
       }
       await refresh();
