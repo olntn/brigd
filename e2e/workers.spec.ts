@@ -40,16 +40,16 @@ test.afterEach(async ({ page }, testInfo) => {
   if (!page.isClosed()) await page.screenshot({ path: testInfo.outputPath('brigd-workers.png'), fullPage: true });
 });
 
-test('profile avatar, task assignment and immutable identity through edit and resume', async ({ page, request }) => {
+test('profile avatar, task assignment and immutable identity through edit and resume', async ({ page, request }, testInfo) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   const name = unique('Мира');
   const renamed = unique('Новая Мира');
   const title = unique('Проверка с работником');
-  const avatarRequests: { type: string; bytes: number }[] = [];
+  const avatarRequests: { type: string }[] = [];
   page.on('request', req => {
     if (req.method() === 'POST' && new URL(req.url()).pathname === '/api/avatars') {
-      avatarRequests.push({ type: req.headers()['content-type'], bytes: req.postDataBuffer()?.byteLength ?? 0 });
+      avatarRequests.push({ type: req.headers()['content-type'] });
     }
   });
   const { editor } = await newWorker(page);
@@ -60,20 +60,28 @@ test('profile avatar, task assignment and immutable identity through edit and re
   await editor.getByLabel('Загрузить аватар', { exact: true }).setInputFiles(await imageFile(page));
   await expect(editor.locator('.worker-avatar img')).toHaveAttribute('src', /^blob:/);
   expect(avatarRequests).toEqual([]);
+  await editor.screenshot({ path: testInfo.outputPath('brigd-worker-profile-before-save.png') });
   await editor.getByRole('button', { name: 'Создать работника', exact: true }).click();
   await expect(editor).not.toBeVisible();
   expect(avatarRequests).toHaveLength(1);
-  expect(avatarRequests[0].bytes).toBeGreaterThan(0);
-  expect(avatarRequests[0].bytes).toBeLessThanOrEqual(256 * 1024);
   expect(['image/webp', 'image/png']).toContain(avatarRequests[0].type);
   const profile = page.getByRole('article', { name: `Работник: ${name}`, exact: true });
   await expect(profile).toBeVisible();
   await expect(profile.locator('img')).toHaveJSProperty('complete', true);
   const dimensions = await profile.locator('img').evaluate((image: HTMLImageElement) => ({ width: image.naturalWidth, height: image.naturalHeight }));
-  expect(dimensions.width).toBeGreaterThan(0);
-  expect(Math.max(dimensions.width, dimensions.height)).toBeLessThanOrEqual(256);
+  expect(dimensions).toEqual({ width: 256, height: 128 });
   const worker = (await (await request.get('/api/workers')).json() as Worker[]).find(row => row.name === name)!;
   expect(worker.avatarUrl).toMatch(/^\/api\/avatars\//);
+  // Chromium may omit browser Blob bodies from Playwright request events.
+  // Assert the real persisted bytes rather than treating a missing event body as empty.
+  const savedAvatar = await request.get(worker.avatarUrl!);
+  expect(savedAvatar.status()).toBe(200);
+  expect(savedAvatar.headers()['content-type']).toBe(avatarRequests[0].type);
+  const savedAvatarBytes = await savedAvatar.body();
+  expect(savedAvatarBytes.byteLength).toBeGreaterThan(0);
+  expect(savedAvatarBytes.byteLength).toBeLessThanOrEqual(256 * 1024);
+  await expect(profile.locator('img')).toHaveAttribute('src', worker.avatarUrl!);
+  await page.screenshot({ path: testInfo.outputPath('brigd-workers-with-avatar.png'), fullPage: true });
 
   await page.getByRole('button', { name: 'Все задачи', exact: true }).click();
   await page.getByRole('button', { name: 'Новая задача', exact: true }).click();
@@ -120,8 +128,10 @@ test('profile avatar, task assignment and immutable identity through edit and re
   await expect(drawer.locator('.drawer-badges').getByText('Завершено', { exact: true })).toBeVisible();
   await expect(drawer.locator('.comment-result .comment-meta strong')).toHaveText(name);
   await expect(drawer.locator('.comment-result img')).toHaveAttribute('src', worker.avatarUrl!);
+  await drawer.locator('.comment-result').screenshot({ path: testInfo.outputPath('brigd-worker-frozen-comment.png') });
   await drawer.getByRole('tab', { name: /Запуски/ }).click();
   await expect(drawer.locator('.run-entry .worker-identity')).toContainText(name);
+  await drawer.locator('.run-entry').screenshot({ path: testInfo.outputPath('brigd-worker-frozen-run.png') });
   let detail = await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail;
   expect(detail.runs[0].sessionId).toBe(sessionId);
   expect(detail.runs[0].worker).toMatchObject({ name, provider: 'codex', effort: 'xhigh', avatarUrl: worker.avatarUrl, communicationStyle: 'Коротко и по-русски. Сначала вывод.' });
@@ -246,7 +256,7 @@ test('profile saves once and ignores a stale workers fetch after create', async 
 
 for (const theme of ['light', 'dark'] as const) {
   for (const size of [{ width: 390, height: 844, font: 13 }, { width: 320, height: 640, font: 26 }]) {
-    test(`${theme} worker editor fits ${size.width}px with ${size.font}px text`, async ({ page }) => {
+    test(`${theme} worker editor fits ${size.width}px with ${size.font}px text`, async ({ page }, testInfo) => {
       await page.setViewportSize({ width: size.width, height: size.height });
       await page.evaluate(value => localStorage.setItem('brigd.theme', value), theme);
       await page.reload();
@@ -256,10 +266,13 @@ for (const theme of ['light', 'dark'] as const) {
       await editor.locator('[name="workerName"]').fill('ОченьДлинноеИмяРаботника'.repeat(3));
       await editor.getByLabel('Стиль общения', { exact: true }).fill('ДлиннаяИнструкцияБезПробелов'.repeat(100));
       await noOverflow(page, editor);
+      await editor.evaluate(node => { node.scrollTop = 0; });
+      await editor.screenshot({ path: testInfo.outputPath(`brigd-worker-editor-${theme}-${size.width}-${size.font}-top.png`) });
       const save = editor.getByRole('button', { name: 'Создать работника', exact: true });
       await save.scrollIntoViewIfNeeded();
       await expect(save).toBeInViewport();
       await noOverflow(page, editor);
+      await editor.screenshot({ path: testInfo.outputPath(`brigd-worker-editor-${theme}-${size.width}-${size.font}-fields.png`) });
       await editor.getByRole('button', { name: 'Отмена', exact: true }).click();
       await noOverflow(page);
     });
