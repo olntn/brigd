@@ -15,7 +15,7 @@
   import { WORKFLOW_MIN_STEPS, WORKFLOW_MAX_STEPS, WORKFLOW_TEXT_LIMIT, WORKFLOW_BYTES_LIMIT } from './lib/workflows';
   import { effortLabel, modelLabel } from './lib/workers';
   import { followupTargets, followupFingerprint, followupStage, runWorkflowSteps, taskHasCompletedRun, resolveFollowupTarget, followupSessionKey, type FollowupTarget } from './lib/followups';
-  import { applyTheme, readTheme, saveTheme, themeStorageKey, type Theme } from './lib/theme';
+  import { applyTheme, readTheme, saveTheme, themes, themeStorageKey, type Theme } from './lib/theme';
   import type { AppInfo, Attachment, Comment, FollowupInput, ModelCatalogEntry, Provider, Run, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
 
   type Scope = 'all' | 'scheduled' | 'attention' | 'completed';
@@ -39,7 +39,7 @@
   let provider = $state<'all' | Provider>('all');
   let scope = $state<Scope>('all');
   let view = $state<View>('board');
-  let showArchived = $state(false);
+  let showArchived = $state(true);
   let selectedId = $state<string | null>(null);
   let detail = $state<TaskDetail | null>(null);
   let detailError = $state('');
@@ -109,7 +109,6 @@
     { status: 'waiting_input', title: 'Нужен ответ', icon: 'message', empty: 'Ничего не требует вашего участия' },
     { status: 'completed', title: 'Завершено', icon: 'circlecheck', empty: 'Здесь будут готовые результаты' },
   ];
-  const scopeTitles: Record<Scope, string> = { all: 'Задачи', scheduled: 'По расписанию', attention: 'Требуют внимания', completed: 'Завершённые задачи' };
   const activeStatuses: TaskStatus[] = ['running', 'waiting_input', 'interrupted', 'cancelling'];
   const attentionStatuses: TaskStatus[] = ['waiting_input', 'interrupted', 'failed', 'blocked'];
   const archiveStatuses: TaskStatus[] = ['failed', 'blocked', 'cancelled', 'interrupted'];
@@ -120,10 +119,6 @@
       && (!query || `${task.title} ${task.instruction} ${task.cwd} ${task.worker?.name ?? ''} ${task.latestRun?.worker?.name ?? ''} ${(task.steps ?? []).map(step => `${step.title} ${workers.find(worker => worker.id === step.workerId)?.name ?? ''}`).join(' ')} ${(task.latestRun?.steps ?? []).map(step => `${step.title} ${step.worker.name}`).join(' ')}`.toLocaleLowerCase().includes(query));
   }));
   let archived = $derived(filtered.filter(task => archiveStatuses.includes(task.status)));
-  let waitingCount = $derived(tasks.filter(task => attentionStatuses.includes(task.status)).length);
-  let runningCount = $derived(tasks.filter(task => task.status === 'running' || task.status === 'cancelling').length);
-  let completedCount = $derived(tasks.filter(task => task.status === 'completed').length);
-  let scheduledCount = $derived(tasks.filter(task => task.schedule === 'interval').length);
   let selectedTask = $derived(detail?.task ?? tasks.find(task => task.id === selectedId) ?? null);
   let currentRun = $derived(selectedTask?.latestRun ?? null);
   let completedTargets = $derived(followupTargets(detail?.runs ?? []));
@@ -298,8 +293,8 @@
     settingsOpen = false;
   }
 
-  function toggleTheme(dark: boolean) {
-    theme = dark ? 'dark' : 'light';
+  function selectTheme(value: Theme) {
+    theme = value;
     applyTheme(theme);
     themeSaveError = !saveTheme(theme);
   }
@@ -562,8 +557,8 @@
     const seconds = Math.max(0, Math.floor(((run.finishedAt ?? run.updatedAt) - run.startedAt) / 1000));
     return seconds < 60 ? `${seconds} сек.` : `${Math.floor(seconds / 60)} мин. ${seconds % 60} сек.`;
   }
-  function resetFilters() { search = ''; provider = 'all'; scope = 'all'; }
-  function setScope(value: Scope) { page = 'tasks'; scope = value; showArchived = value === 'attention'; }
+  function resetFilters() { search = ''; provider = 'all'; setScope('all'); }
+  function setScope(value: Scope) { scope = value; showArchived = true; }
   function globalKey(event: KeyboardEvent) {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && page === 'tasks' && !editorOpen && !selectedId && !settingsOpen) {
       event.preventDefault(); searchInput?.focus();
@@ -642,10 +637,7 @@
     <div class="workspace-label"><span class="workspace-icon"><Icon name="folder" size={16} /></span><div><strong>Моё пространство</strong><span>Локальный workspace</span></div><span class="local-light"></span></div>
     <div class="nav-label">РАБОЧЕЕ ПРОСТРАНСТВО</div>
     <nav class="main-nav" aria-label="Задачи">
-      <button class:active={page === 'tasks' && scope === 'all'} aria-label="Задачи" onclick={() => setScope('all')}><Icon name="board" /><span>Задачи</span><span class="nav-count">{tasks.length}</span></button>
-      <button class:active={page === 'tasks' && scope === 'attention'} aria-label="Требуют внимания" onclick={() => setScope('attention')}><Icon name="inbox" /><span>Требуют внимания</span>{#if waitingCount}<span class="nav-count attention-count">{waitingCount}</span>{/if}</button>
-      <button class:active={page === 'tasks' && scope === 'scheduled'} aria-label="По расписанию" onclick={() => setScope('scheduled')}><Icon name="clock" /><span>По расписанию</span>{#if scheduledCount}<span class="nav-count">{scheduledCount}</span>{/if}</button>
-      <button class:active={page === 'tasks' && scope === 'completed'} aria-label="Завершённые задачи" onclick={() => setScope('completed')}><Icon name="circlecheck" /><span>Завершённые</span></button>
+      <button class:active={page === 'tasks'} aria-label="Задачи" onclick={() => { page = 'tasks'; resetFilters(); }}><Icon name="board" /><span>Задачи</span><span class="nav-count">{tasks.length}</span></button>
       <button class:active={page === 'workers'} aria-label="Работники" onclick={() => { page = 'workers'; void loadWorkers(); }}><Icon name="spark" /><span>Работники</span><span class="nav-count">{workers.filter(worker => !worker.archived).length}</span></button>
       <button class:active={page === 'instructions'} aria-label="Инструкции" onclick={() => { page = 'instructions'; }}><Icon name="list" /><span>Инструкции</span></button>
     </nav>
@@ -662,16 +654,21 @@
       {:else if page === 'workers'}
         <Workers {workers} loading={workersLoading} error={workersError} retry={() => { void loadWorkers(); }} onchange={workerChanged} {notify} {models} {modelsLoading} {modelsError} retryModels={() => { void loadModels(); }} />
       {:else}
-      <section class="page-heading" aria-label="Управление задачами">{#if scope !== 'all'}<div><h1>{scopeTitles[scope]}<span>{filtered.length}</span></h1></div>{/if}<button class="button primary create-button" onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={17} />Новая задача</button></section>
+      <section class="page-heading" aria-label="Управление задачами"><button class="button primary create-button" onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={17} />Новая задача</button></section>
 
       {#if info?.mode === 'mock'}
         <div class="mode-banner"><span class="mode-icon"><Icon name="spark" size={17} /></span><div><strong>Демонстрационный режим</strong><span>Запуски симулируются. Codex и Claude CLI не вызываются, файлы не изменяются.</span></div><span class="demo-badge">MOCK</span></div>
       {/if}
       {#if connectionError}<div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{connectionError}</span><button onclick={() => { void loadInfo(); void refresh(); }}>Повторить</button></div>{/if}
 
-      <section class="overview" aria-label="Сводка задач"><div class="overview-stats"><button onclick={() => { setScope('all'); search = ''; provider = 'all'; }}><span class="stat-value">{runningCount}<span class="stat-dot running-dot"></span></span><span class="stat-label">в работе</span></button><button onclick={() => setScope('attention')}><span class="stat-value">{waitingCount}<span class="stat-dot waiting-dot"></span></span><span class="stat-label">ждут внимания</span></button><button onclick={() => setScope('completed')}><span class="stat-value">{completedCount}<span class="stat-dot completed-dot"></span></span><span class="stat-label">завершено</span></button></div></section>
-
-      <div class="toolbar"><div class="view-toggle" aria-label="Вид задач"><button class:selected={view === 'board'} aria-pressed={view === 'board'} onclick={() => view = 'board'}><Icon name="board" size={15} />Доска</button><button class:selected={view === 'list'} aria-pressed={view === 'list'} onclick={() => view = 'list'}><Icon name="list" size={16} />Список</button></div><div class="toolbar-filters"><label class="search-box"><Icon name="search" size={16} /><input bind:this={searchInput} bind:value={search} type="search" placeholder="Найти задачу…" aria-label="Поиск задач" /><span class="key-hint">⌘ K</span></label><label class="provider-filter"><Icon name="sliders" size={15} /><select bind:value={provider} aria-label="Фильтр по агенту"><option value="all">Все агенты</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select><Icon name="down" size={13} /></label></div></div>
+      <div class="toolbar">
+        <div class="view-toggle" aria-label="Вид задач"><button class:selected={view === 'board'} aria-pressed={view === 'board'} onclick={() => view = 'board'}><Icon name="board" size={15} />Доска</button><button class:selected={view === 'list'} aria-pressed={view === 'list'} onclick={() => view = 'list'}><Icon name="list" size={16} />Список</button></div>
+        <div class="toolbar-filters">
+          <label class="search-box"><Icon name="search" size={16} /><input bind:this={searchInput} bind:value={search} type="search" placeholder="Найти задачу…" aria-label="Поиск задач" /><span class="key-hint">⌘ K</span></label>
+          <label class="provider-filter"><Icon name="inbox" size={15} /><select value={scope} onchange={(event) => setScope(event.currentTarget.value as Scope)} aria-label="Фильтр задач"><option value="all">Все задачи</option><option value="attention">Требуют внимания</option><option value="scheduled">По расписанию</option><option value="completed">Завершённые</option></select><Icon name="down" size={13} /></label>
+          <label class="provider-filter"><Icon name="sliders" size={15} /><select bind:value={provider} aria-label="Фильтр по агенту"><option value="all">Все агенты</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select><Icon name="down" size={13} /></label>
+        </div>
+      </div>
 
       {#if loading}
         <div class="board-grid skeleton-grid" aria-label="Загружаем задачи" aria-busy="true">{#each [1, 2, 3, 4] as column}<div class="skeleton-column"><div class="skeleton skeleton-heading"></div><div class="skeleton skeleton-card"></div>{#if column < 3}<div class="skeleton skeleton-card short"></div>{/if}</div>{/each}</div>
@@ -817,7 +814,19 @@
 <dialog class="settings-dialog" bind:this={settings} aria-labelledby="settings-title" oncancel={(event) => { event.preventDefault(); closeSettings(); }} onclick={(event) => backdropClick(event, settings, closeSettings)}>
   <header class="settings-header"><h2 id="settings-title">Настройки</h2><button class="icon-button" aria-label="Закрыть настройки" disabled={modelMutationPending} onclick={closeSettings}><Icon name="close" size={21} /></button></header>
   <div class="settings-body">
-    <label class="theme-setting"><Icon name="moon" size={22} /><span><strong>Тёмная тема</strong><small id="theme-description">Выбор сохраняется в этом браузере.</small></span><input type="checkbox" role="switch" checked={theme === 'dark'} onchange={(event) => toggleTheme(event.currentTarget.checked)} aria-label="Тёмная тема" aria-describedby="theme-description" /></label>
+    <fieldset class="theme-settings">
+      <legend>Цветовая схема</legend>
+      <p id="theme-description">Выбор сохраняется в этом браузере.</p>
+      <div class="theme-options">
+        {#each themes as option (option.id)}
+          <label class="theme-option" class:selected={theme === option.id}>
+            <input type="radio" name="theme" value={option.id} checked={theme === option.id} onchange={() => selectTheme(option.id)} aria-label={option.label} aria-describedby="theme-description" />
+            <span class="theme-preview" aria-hidden="true">{#each option.preview as color}<span style:background={color}></span>{/each}</span>
+            <span class="theme-name">{option.label}</span>
+          </label>
+        {/each}
+      </div>
+    </fieldset>
     {#if themeSaveError}<p class="settings-warning" role="status">Тема изменена, но браузер не разрешил сохранить выбор. После перезагрузки выберите тему снова.</p>{/if}
     {#if settingsOpen}<ModelSettings {models} loading={modelsLoading} error={modelsError} retry={() => { void loadModels(); }} onchange={modelChanged} ondelete={modelDeleted} bind:busy={modelMutationPending} />{/if}
   </div>

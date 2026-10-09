@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { themes, type Theme } from '../src/lib/theme';
 import type { AppInfo, Comment, Run, Task, TaskDetail } from '../src/lib/types';
 
 // Appearance checks use fixed, read-only API fixtures so they neither depend on
@@ -31,7 +32,7 @@ const detail: TaskDetail = {
   comments: [comment],
 };
 
-async function fixtureApi(page: Page, mode: AppInfo['mode'] = 'mock', populated = false) {
+async function fixtureApi(page: Page, mode: AppInfo['mode'] = 'mock', populated: boolean | Task[] = false) {
   const info: AppInfo = {
     mode, cwd: '/workspace/project', scheduler: 'running', startedAt: timestamp,
     providers: [
@@ -48,7 +49,7 @@ async function fixtureApi(page: Page, mode: AppInfo['mode'] = 'mock', populated 
     } else if (path === '/api/workers') {
       await route.fulfill({ json: [] });
     } else if (path === '/api/tasks') {
-      await route.fulfill({ json: populated ? [task] : [] });
+      await route.fulfill({ json: Array.isArray(populated) ? populated : populated ? [task] : [] });
     } else if (path === `/api/tasks/${taskId}`) {
       await route.fulfill({ json: detail });
     } else {
@@ -68,7 +69,11 @@ async function openSettings(page: Page) {
   await trigger.click();
   const dialog = page.getByRole('dialog', { name: 'Настройки', exact: true });
   await expect(dialog).toBeVisible();
-  return { trigger, dialog, toggle: dialog.getByLabel('Тёмная тема', { exact: true }) };
+  return {
+    trigger,
+    dialog,
+    choice: (id: Theme) => dialog.getByRole('radio', { name: themes.find(theme => theme.id === id)!.label, exact: true }),
+  };
 }
 
 async function expectNoHorizontalOverflow(page: Page, dialog?: Locator) {
@@ -135,6 +140,54 @@ test('brigd branding appears in the title, navigation and workspace', async ({ p
   await expect(page.getByText(/Trackt|trackt/)).toHaveCount(0);
 });
 
+test('all task statuses live in the Tasks tab with local filters and no overview', async ({ page }) => {
+  const statuses: Task['status'][] = ['ready', 'running', 'cancelling', 'waiting_input', 'completed', 'blocked', 'failed', 'interrupted', 'cancelled'];
+  const tasks: Task[] = statuses.map(status => ({
+    ...task,
+    id: `status-${status}`,
+    title: `Задача: ${status}`,
+    instruction: 'Проверка отображения статуса',
+    cwd: '/workspace/project',
+    status,
+    schedule: status === 'ready' ? 'interval' : 'manual',
+    intervalMinutes: status === 'ready' ? 60 : null,
+    latestRun: status === 'ready' ? null : { ...run, id: `run-${status}`, taskId: `status-${status}`, status },
+    runCount: status === 'ready' ? 0 : 1,
+  }));
+  await fixtureApi(page, 'cli', tasks);
+  await openApp(page);
+  const navigation = page.getByRole('complementary', { name: 'Основная навигация', exact: true });
+  await expect(navigation.getByRole('button', { name: 'Задачи', exact: true })).toHaveCount(1);
+  for (const name of ['Требуют внимания', 'По расписанию', 'Завершённые задачи']) {
+    await expect(navigation.getByRole('button', { name, exact: true })).toHaveCount(0);
+  }
+  await expect(page.getByRole('region', { name: 'Сводка задач', exact: true })).toHaveCount(0);
+  const filter = page.getByRole('combobox', { name: 'Фильтр задач', exact: true });
+  await expect(filter).toHaveValue('all');
+  await expect(page.getByRole('button', { name: /Другие статусы/ })).toHaveAttribute('aria-expanded', 'true');
+  for (const item of tasks) {
+    await expect(page.getByRole('button', { name: `Открыть задачу: ${item.title}`, exact: true })).toBeVisible();
+  }
+
+  for (const [scope, expectedStatuses] of [
+    ['attention', ['waiting_input', 'blocked', 'failed', 'interrupted']],
+    ['scheduled', ['ready']],
+    ['completed', ['completed']],
+  ] as const) {
+    await filter.selectOption(scope);
+    await expect(page.getByRole('button', { name: /^Открыть задачу:/ })).toHaveCount(expectedStatuses.length);
+    for (const status of expectedStatuses) {
+      await expect(page.getByRole('button', { name: `Открыть задачу: Задача: ${status}`, exact: true })).toBeVisible();
+    }
+  }
+  await navigation.getByRole('button', { name: 'Задачи', exact: true }).click();
+  await expect(filter).toHaveValue('all');
+  await page.getByRole('button', { name: 'Список', exact: true }).click();
+  for (const item of tasks) {
+    await expect(page.getByRole('button', { name: `Открыть: ${item.title}`, exact: true })).toBeVisible();
+  }
+});
+
 for (const legacy of ['light', 'dark'] as const) {
   test(`legacy ${legacy} theme survives the rename and reload`, async ({ page }) => {
     await page.addInitScript(theme => localStorage.setItem('trackt.theme', theme), legacy);
@@ -145,8 +198,8 @@ for (const legacy of ['light', 'dark'] as const) {
     expect(await page.evaluate(() => localStorage.getItem('trackt.theme'))).toBe(legacy);
     await page.reload();
     await expect(page.locator('html')).toHaveAttribute('data-theme', legacy);
-    const { toggle } = await openSettings(page);
-    await toggle.setChecked(legacy !== 'dark');
+    const { choice } = await openSettings(page);
+    await choice(legacy === 'dark' ? 'light' : 'dark').check();
     await page.reload();
     await expect(page.locator('html')).toHaveAttribute('data-theme', legacy === 'dark' ? 'light' : 'dark');
   });
@@ -161,23 +214,42 @@ test('readable legacy dark theme survives a blocked migration write', async ({ p
   await openApp(page);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   expect(await page.evaluate(() => localStorage.getItem('brigd.theme'))).toBeNull();
-  const { toggle } = await openSettings(page);
-  await expect(toggle).toBeChecked();
-  await toggle.uncheck();
+  const { choice } = await openSettings(page);
+  await expect(choice('dark')).toBeChecked();
+  await choice('light').check();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 });
 
-test('new theme preference synchronizes across tabs', async ({ page, context }) => {
+test('all ten color schemes apply, persist and synchronize across tabs', async ({ page, context }) => {
   await fixtureApi(page);
   await openApp(page);
   const other = await context.newPage();
   await fixtureApi(other);
   await openApp(other);
-  const { toggle } = await openSettings(page);
-  await toggle.check();
-  await expect(other.locator('html')).toHaveAttribute('data-theme', 'dark');
-  await toggle.uncheck();
-  await expect(other.locator('html')).toHaveAttribute('data-theme', 'light');
+  const otherSettings = await openSettings(other);
+  let settings = await openSettings(page);
+  await expect(settings.dialog.getByRole('group', { name: 'Цветовая схема', exact: true }).getByRole('radio')).toHaveCount(10);
+  // Switch away from the default so every iteration triggers a real preference write.
+  await settings.choice('dark').check();
+  await expect(otherSettings.choice('dark')).toBeChecked();
+  const backgrounds = new Set<string>();
+  for (const theme of themes) {
+    await settings.choice(theme.id).check();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme.id);
+    await expect(page.locator('html')).toHaveCSS('color-scheme', theme.colorScheme);
+    await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', theme.themeColor);
+    expect(await page.evaluate(() => localStorage.getItem('brigd.theme'))).toBe(theme.id);
+    backgrounds.add(await page.locator('html').evaluate(node => getComputedStyle(node).backgroundColor));
+    await expect(other.locator('html')).toHaveAttribute('data-theme', theme.id);
+    await expect(other.locator('html')).toHaveCSS('color-scheme', theme.colorScheme);
+    await expect(otherSettings.choice(theme.id)).toBeChecked();
+
+    await page.reload();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme.id);
+    settings = await openSettings(page);
+    await expect(settings.choice(theme.id)).toBeChecked();
+  }
+  expect(backgrounds.size, 'each scheme should provide its own page background').toBe(10);
   await other.close();
 });
 
@@ -202,7 +274,7 @@ test('CLI workspace is uncluttered and demo safety warning is preserved', async 
   await expect(page.getByText('Демо-запуски · без вызовов CLI', { exact: true })).toHaveCount(0);
 });
 
-test('theme settings persist both choices and return focus after Escape or Close', async ({ page }, testInfo) => {
+test('standard theme settings persist and return focus after Escape or Close', async ({ page }, testInfo) => {
   await page.emulateMedia({ colorScheme: 'light' });
   await fixtureApi(page);
   await openApp(page);
@@ -210,8 +282,8 @@ test('theme settings persist both choices and return focus after Escape or Close
   const lightBackground = await page.locator('html').evaluate(node => getComputedStyle(node).backgroundColor);
   await page.screenshot({ path: testInfo.outputPath('brigd-light-board.png'), fullPage: true });
   let settings = await openSettings(page);
-  await expect(settings.toggle).not.toBeChecked();
-  await settings.toggle.check();
+  await expect(settings.choice('light')).toBeChecked();
+  await settings.choice('dark').check();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   expect(await page.evaluate(() => localStorage.getItem('brigd.theme'))).toBe('dark');
   const darkBackground = await page.locator('html').evaluate(node => getComputedStyle(node).backgroundColor);
@@ -225,8 +297,8 @@ test('theme settings persist both choices and return focus after Escape or Close
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   settings = await openSettings(page);
-  await expect(settings.toggle).toBeChecked();
-  await settings.toggle.uncheck();
+  await expect(settings.choice('dark')).toBeChecked();
+  await settings.choice('light').check();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   expect(await page.evaluate(() => localStorage.getItem('brigd.theme'))).toBe('light');
   await settings.dialog.getByRole('button', { name: 'Закрыть настройки', exact: true }).click();
@@ -242,9 +314,9 @@ test('an invalid saved theme does not prevent startup', async ({ page }) => {
   await fixtureApi(page);
   await openApp(page);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-  const { toggle } = await openSettings(page);
-  await expect(toggle).not.toBeChecked();
-  await toggle.check();
+  const { choice } = await openSettings(page);
+  await expect(choice('light')).toBeChecked();
+  await choice('dark').check();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
 });
 
@@ -265,10 +337,10 @@ for (const storageFailure of ['read', 'write'] as const) {
     }, storageFailure);
     await fixtureApi(page);
     await openApp(page);
-    const { dialog, toggle } = await openSettings(page);
-    await toggle.check();
+    const { dialog, choice } = await openSettings(page);
+    await choice('dark').check();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
-    await toggle.uncheck();
+    await choice('light').check();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
     await dialog.getByRole('button', { name: 'Закрыть настройки', exact: true }).click();
     await page.getByRole('button', { name: 'Новая задача', exact: true }).click();
@@ -302,8 +374,9 @@ for (const { width, height, fontSize, emulatedLayout } of layouts) {
 
     const settings = await openSettings(page);
     await expectNoHorizontalOverflow(page, settings.dialog);
-    await expectReachable(settings.toggle, settings.dialog);
-    await settings.toggle.check();
+    await expectReachable(settings.choice('dark'), settings.dialog);
+    await expectReachable(settings.choice(themes[themes.length - 1].id), settings.dialog);
+    await settings.choice('dark').check();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
     await settings.dialog.getByRole('button', { name: 'Закрыть настройки', exact: true }).click();
 

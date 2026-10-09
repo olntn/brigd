@@ -52,7 +52,7 @@ async function fixtures(page: Page, detail: TaskDetail, options: { workers?: Wor
 async function openFixture(page: Page, detail: TaskDetail) {
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Новая задача', exact: true })).toBeEnabled();
-  if (['failed', 'blocked', 'cancelled', 'interrupted'].includes(detail.task.status)) await page.getByRole('button', { name: /Другие статусы/ }).click();
+  if (['failed', 'blocked', 'cancelled', 'interrupted'].includes(detail.task.status)) await expect(page.getByRole('button', { name: /Другие статусы/ })).toHaveAttribute('aria-expanded', 'true');
   await page.getByRole('button', { name: `Открыть задачу: ${detail.task.title}`, exact: true }).click();
   const drawer = page.getByRole('dialog', { name: detail.task.title, exact: true });
   await expect(drawer.locator('.current-workflow .workflow-run-step')).toHaveCount(3);

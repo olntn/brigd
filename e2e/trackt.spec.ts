@@ -105,7 +105,7 @@ test('cancel a running turn, inspect other status and keep cancellation durable'
   await expect(drawer.locator('.drawer-badges').getByText('Отменено', { exact: true })).toBeVisible();
   await drawer.getByRole('button', { name: 'Закрыть задачу', exact: true }).click();
   await page.getByLabel('Поиск задач', { exact: true }).fill(title);
-  await page.getByRole('button', { name: /Другие статусы/ }).click();
+  await expect(page.getByRole('button', { name: /Другие статусы/ })).toHaveAttribute('aria-expanded', 'true');
   await page.getByRole('button', { name: `Открыть задачу: ${title}`, exact: true }).click();
   await expect(page.getByRole('dialog', { name: title }).locator('.drawer-badges').getByText('Отменено', { exact: true })).toBeVisible();
   const task = (await (await request.get('/api/tasks')).json()).find((row: any) => row.title === title);

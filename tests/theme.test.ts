@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { legacyThemeStorageKey, readTheme, saveTheme, themeStorageKey } from '../src/lib/theme';
+import { legacyThemeStorageKey, readTheme, saveTheme, themes, themeStorageKey } from '../src/lib/theme';
 
 const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
 afterEach(() => {
@@ -37,6 +37,14 @@ describe('brigd theme migration', () => {
     expect(saveTheme('light')).toBe(true);
     expect(data.get(legacyThemeStorageKey)).toBe('dark');
     expect(data.get(themeStorageKey)).toBe('light');
+  });
+
+  test.each(themes.map(({ id }) => id))('persists and restores %s without falling back to the legacy theme', id => {
+    const data = storage({ [legacyThemeStorageKey]: 'dark' });
+    expect(saveTheme(id)).toBe(true);
+    expect(data.get(themeStorageKey)).toBe(id);
+    expect(readTheme()).toBe(id);
+    expect(data.get(legacyThemeStorageKey)).toBe('dark');
   });
 
   test('invalid or absent settings fall back to legacy, then light', () => {
