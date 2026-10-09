@@ -411,3 +411,76 @@ describe('exclusive service ownership', () => {
     store.releaseLease(currentOwner);
   });
 });
+
+describe('task archive', () => {
+  const finished = (status: Exclude<RunStatus, 'running'> = 'completed') => {
+    const task = store.createTask(input(), BASE);
+    const run = store.startManual(task.id, true, BASE);
+    store.setSession(run.id, 'archived-session');
+    store.finish(run.id, status, 'Done', null, BASE + 1);
+    return { task, run };
+  };
+
+  const expectArchived = (action: () => unknown) => {
+    try { action(); throw new Error('Expected an archive error'); }
+    catch (error) { expect(error).toBeInstanceOf(AppError); expect((error as AppError).status).toBe(409); expect((error as AppError).message).toContain('в архиве'); }
+  };
+
+  test('an archived task stays readable but rejects edits, runs, followups and notes until restored', () => {
+    const { task, run } = finished();
+    const archived = store.archiveTask(task.id, BASE + 10);
+    expect(archived.archivedAt).toBe(BASE + 10);
+    expect(store.archiveTask(task.id, BASE + 20).archivedAt).toBe(BASE + 10);
+    expect(store.listTasks().map(item => [item.id, item.archivedAt])).toEqual([[task.id, BASE + 10]]);
+    const before = store.detail(task.id);
+    expect(before.runs.map(item => item.id)).toEqual([run.id]);
+    expectArchived(() => store.updateTask(task.id, input({ title: 'Edited in archive' })));
+    expectArchived(() => store.comment(task.id, null, 'user', 'Note in archive'));
+    expectArchived(() => store.startFollowup(task.id, { sourceRunId: run.id, sourceStepIndex: null, body: 'Continue', attachmentIds: [], requestId: crypto.randomUUID() }));
+    expect(store.detail(task.id).comments).toEqual(before.comments);
+    expect(store.detail(task.id).task.title).toBe(task.title);
+
+    const restored = store.restoreTask(task.id, BASE + 30);
+    expect(restored.archivedAt).toBeNull();
+    expect(store.restoreTask(task.id, BASE + 40).updatedAt).toBe(BASE + 30);
+    expect(store.updateTask(task.id, input({ title: 'Edited after restore' })).title).toBe('Edited after restore');
+    expect(store.comment(task.id, null, 'user', 'Note after restore').body).toBe('Note after restore');
+  });
+
+  test('an occupied task cannot be archived until its run is settled, then cannot start again', () => {
+    const task = store.createTask(input(), BASE);
+    const run = store.startManual(task.id, true, BASE);
+    expectAppError(() => store.archiveTask(task.id), 409);
+    store.finish(run.id, 'failed', null, 'Broken', BASE + 1);
+    expect(store.archiveTask(task.id, BASE + 2).archivedAt).toBe(BASE + 2);
+    expectArchived(() => store.startManual(task.id, true));
+    expect(store.getTask(task.id).runCount).toBe(1);
+    store.restoreTask(task.id, BASE + 3);
+    expect(store.startManual(task.id, true, BASE + 4).taskId).toBe(task.id);
+  });
+
+  test('archived schedules are never claimed and restoring skips occurrences missed while archived', () => {
+    const task = store.createTask(input({ schedule: 'interval', intervalMinutes: 60, firstRunAt: BASE + MINUTE }), BASE);
+    store.archiveTask(task.id, BASE);
+    expect(store.claimDue(true, BASE + 301 * MINUTE)).toEqual([]);
+    const restored = store.restoreTask(task.id, BASE + 301 * MINUTE);
+    expect(restored.nextRunAt).toBe(BASE + 361 * MINUTE);
+    expect(store.claimDue(true, BASE + 301 * MINUTE)).toEqual([]);
+    expect(store.claimDue(true, BASE + 361 * MINUTE).map(run => run.taskId)).toEqual([task.id]);
+  });
+
+  test('restoring before the next occurrence keeps the planned time', () => {
+    const task = store.createTask(input({ schedule: 'interval', intervalMinutes: 60, firstRunAt: BASE + 60 * MINUTE }), BASE);
+    store.archiveTask(task.id, BASE + MINUTE);
+    expect(store.restoreTask(task.id, BASE + 2 * MINUTE).nextRunAt).toBe(BASE + 60 * MINUTE);
+  });
+
+  test('archive state survives reopening the database', () => {
+    const { task } = finished('cancelled');
+    store.archiveTask(task.id, BASE + 5);
+    store.close();
+    store = new Store(join(folder, 'trackt.sqlite'));
+    expect(store.getTask(task.id).archivedAt).toBe(BASE + 5);
+    expect(store.createTask(input(), BASE).archivedAt).toBeNull();
+  });
+});

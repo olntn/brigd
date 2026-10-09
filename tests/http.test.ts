@@ -412,3 +412,37 @@ describe('local UI static serving', () => {
     expect((await request('/%zz')).status).toBe(400);
   });
 });
+
+describe('task archive API', () => {
+  test('archive and restore round-trip while archived tasks reject edits, runs and notes', async () => {
+    const task = await createTask();
+    const archived = await request(`/api/tasks/${task.id}/archive`, 'POST');
+    expect(archived.status).toBe(200);
+    expect((await archived.json() as Task).archivedAt).toEqual(expect.any(Number));
+    expect((await (await request('/api/tasks')).json() as Task[]).find(item => item.id === task.id)?.archivedAt).toEqual(expect.any(Number));
+    for (const [path, method, value] of [
+      [`/api/tasks/${task.id}`, 'PATCH', { title: 'Edited in archive' }],
+      [`/api/tasks/${task.id}`, 'PATCH', { paused: true }],
+      [`/api/tasks/${task.id}/run`, 'POST', {}],
+      [`/api/tasks/${task.id}/comments`, 'POST', { body: 'Note' }],
+    ] as const) {
+      const response = await request(path, method, value);
+      expect(response.status).toBe(409);
+      expect((await response.json()).error).toContain('архиве');
+    }
+    expect(calls).toHaveLength(0);
+    expect((await detail(task.id)).task.archivedAt).toEqual(expect.any(Number));
+    const restored = await request(`/api/tasks/${task.id}/restore`, 'POST');
+    expect(restored.status).toBe(200);
+    expect((await restored.json() as Task).archivedAt).toBeNull();
+    expect((await request(`/api/tasks/${task.id}/run`, 'POST')).status).toBe(201);
+  });
+
+  test('a running task cannot be archived and unknown tasks are not found', async () => {
+    const task = await createTask();
+    expect((await request(`/api/tasks/${task.id}/run`, 'POST')).status).toBe(201);
+    expect((await request(`/api/tasks/${task.id}/archive`, 'POST')).status).toBe(409);
+    expect((await request('/api/tasks/missing-task/archive', 'POST')).status).toBe(404);
+    expect((await request('/api/tasks/missing-task/restore', 'POST')).status).toBe(404);
+  });
+});

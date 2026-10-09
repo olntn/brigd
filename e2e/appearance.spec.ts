@@ -21,7 +21,7 @@ const task: Task = {
   steps: [], id: taskId, workerId: null, worker: null, title: `Адаптивная-${'Задача'.repeat(18)}`, instruction, provider: 'codex',
   cwd: `/workspace/${'длинный-путь-'.repeat(35)}`, schedule: 'manual', intervalMinutes: null,
   firstRunAt: null, paused: false, createdAt: timestamp, updatedAt: timestamp,
-  nextRunAt: null, status: 'completed', latestRun: run, runCount: 2,
+  archivedAt: null, nextRunAt: null, status: 'completed', latestRun: run, runCount: 2,
 };
 const comment: Comment = {
   stepIndex: null, id: 'appearance-comment', taskId, runId: null, kind: 'user', body: note, createdAt: timestamp,

@@ -585,7 +585,7 @@ function fixtureDetail(): TaskDetail {
     id: input.taskId!, title: 'Файлы пользователя и результат агента', instruction: run.instruction,
     workerId: null, worker: null, steps: [], provider: 'codex', cwd: run.cwd,
     schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false,
-    createdAt: timestamp, updatedAt: timestamp, nextRunAt: null, status: 'completed', latestRun: run, runCount: 1,
+    createdAt: timestamp, updatedAt: timestamp, archivedAt: null, nextRunAt: null, status: 'completed', latestRun: run, runCount: 1,
     attachments: [input, directOutput],
   };
   const result: Comment = { id: 'fixture-result', taskId: task.id, runId: run.id, stepIndex: 1, kind: 'result', body: 'Прикладываю готовый макет и документы.', createdAt: timestamp + 1000, attachments: outputs };

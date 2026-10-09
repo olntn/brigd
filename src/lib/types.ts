@@ -116,6 +116,8 @@ export interface Task extends TaskInput {
   id: string;
   createdAt: number;
   updatedAt: number;
+  /** Set while the task is archived: hidden from the board, never scheduled, read-only. */
+  archivedAt: number | null;
   nextRunAt: number | null;
   status: TaskStatus;
   latestRun: Run | null;

@@ -210,6 +210,7 @@ export class Store {
         ['runs', 'cancel_requested', 'INTEGER NOT NULL DEFAULT 0'],
         ['runs', 'followup_snapshot', 'TEXT'],
         ['comments', 'step_index', 'INTEGER'],
+        ['tasks', 'archived_at', 'INTEGER'],
       ]) {
         if (!(this.db.query(`PRAGMA table_info(${table})`).all() as Row[]).some(row => row.name === column)) {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
@@ -677,7 +678,7 @@ export class Store {
     const hasCompletedRun = !!this.db.query("SELECT 1 FROM runs WHERE task_id=? AND status='completed' LIMIT 1").get(row.id);
     return { hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd,
       schedule: row.schedule, intervalMinutes: row.interval_minutes, firstRunAt: row.first_run_at,
-      nextRunAt: row.next_run_at, paused: !!row.paused, createdAt: row.created_at, updatedAt: row.updated_at,
+      nextRunAt: row.next_run_at, paused: !!row.paused, createdAt: row.created_at, updatedAt: row.updated_at, archivedAt: row.archived_at ?? null,
       status: latest?.status ?? 'ready', latestRun: latest ? this.mapRun(latest) : null,
       runCount: (this.db.query('SELECT count(*) AS n FROM runs WHERE task_id = ?').get(row.id) as Row).n };
   }
@@ -686,6 +687,29 @@ export class Store {
     const row = this.db.query('SELECT * FROM tasks WHERE id = ?').get(id) as Row | null;
     if (!row) throw new AppError('Задача не найдена', 404);
     return this.mapTask(row);
+  }
+  /** Archived tasks are read-only until restored; history and attachments stay readable. */
+  private assertNotArchived(task: Task) {
+    if (task.archivedAt !== null) throw new AppError('Задача в архиве. Восстановите её, чтобы продолжить работу.', 409);
+  }
+  archiveTask(id: string, now = Date.now()): Task {
+    return this.db.transaction(() => {
+      const task = this.getTask(id);
+      if (task.archivedAt !== null) return task;
+      if (this.activeRun(id)) throw new AppError('Сначала завершите или отмените текущий запуск, затем перенесите задачу в архив.', 409);
+      this.db.query('UPDATE tasks SET archived_at=?,updated_at=? WHERE id=?').run(now, now, id);
+      return this.getTask(id);
+    }).immediate();
+  }
+  /** Occurrences that fell due while archived are skipped, never replayed on restore. */
+  restoreTask(id: string, now = Date.now()): Task {
+    return this.db.transaction(() => {
+      const task = this.getTask(id);
+      if (task.archivedAt === null) return task;
+      const next = task.schedule === 'interval' && task.nextRunAt !== null && task.nextRunAt <= now ? nextOccurrence(task.nextRunAt, task.intervalMinutes!, now).next : task.nextRunAt;
+      this.db.query('UPDATE tasks SET archived_at=NULL,next_run_at=?,updated_at=? WHERE id=?').run(next, now, id);
+      return this.getTask(id);
+    }).immediate();
   }
   getRun(id: string): Run {
     const row = this.db.query('SELECT * FROM runs WHERE id = ?').get(id) as Row | null;
@@ -731,6 +755,7 @@ export class Store {
   updateTask(id: string, input: TaskInput, now = Date.now()): Task {
     return this.db.transaction(() => {
       const task = this.getTask(id);
+      this.assertNotArchived(task);
       const steps = this.taskSteps(input.steps === undefined ? task.steps : input.steps, task.steps);
       const worker = steps.length ? null : this.assignedWorker(input.workerId === undefined ? task.workerId : input.workerId, task.workerId);
       const provider = steps.length ? this.getWorker(steps[0]!.workerId).provider : worker?.provider ?? input.provider;
@@ -761,7 +786,8 @@ export class Store {
   }
   comment(taskId: string, runId: string | null, kind: Comment['kind'], body: string, now = Date.now(), stepIndex?: number | null, ids?: string[]): Comment {
     return this.db.transaction(() => {
-      this.getTask(taskId);
+      const task = this.getTask(taskId);
+      if (kind === 'user') this.assertNotArchived(task);
       const run = runId ? this.getRun(runId) : null;
       if (run && run.taskId !== taskId) throw new AppError('Запуск относится к другой задаче', 409);
       const id = crypto.randomUUID();
@@ -783,6 +809,7 @@ export class Store {
     return log;
   }
   private insertRun(task: Task, trigger: Run['trigger'], scheduledFor: number | null, mock: boolean, now: number): Run {
+    this.assertNotArchived(task);
     if (this.activeRun(task.id)) throw new AppError('У задачи уже есть активный запуск. Ответьте агенту, повторите текущий этап или отмените запуск.', 409);
     const id = crypto.randomUUID();
     const steps: RunStep[] = task.steps.map(step => ({ ...step, worker: workerSnapshot(this.getWorker(step.workerId)), status: 'pending',
@@ -823,6 +850,7 @@ export class Store {
     return this.db.transaction(() => {
       const prior = this.getFollowupRequest(taskId, input);
       if (prior) return { run: prior, created: false };
+      this.assertNotArchived(this.getTask(taskId));
       const source = this.getRun(input.sourceRunId);
       if (source.taskId !== taskId) throw new AppError('Исходный запуск относится к другой задаче', 409);
       if (source.status !== 'completed') throw new AppError('Продолжить можно только завершённый запуск', 409);
@@ -863,7 +891,7 @@ export class Store {
   }
   claimDue(mock: boolean, now = Date.now(), settlingTaskIds: readonly string[] = []): Run[] {
     return this.db.transaction(() => {
-      const due = this.db.query("SELECT * FROM tasks WHERE paused=0 AND schedule='interval' AND next_run_at<=?").all(now) as Row[];
+      const due = this.db.query("SELECT * FROM tasks WHERE paused=0 AND archived_at IS NULL AND schedule='interval' AND next_run_at<=?").all(now) as Row[];
       const claimed: Run[] = [];
       for (const row of due) {
         const task = this.mapTask(row);

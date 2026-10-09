@@ -27,7 +27,7 @@ function detailFixture(workflow: boolean): TaskDetail {
     id, title: workflow ? 'Проверка аватаров этапов' : 'Проверка читаемых аватаров', instruction: run.instruction,
     workerId: workflow ? null : worker.id, worker: workflow ? null : worker, steps: steps.map(({ workerId, title, instruction }) => ({ workerId, title, instruction })),
     provider: worker.provider, cwd: run.cwd, schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false,
-    createdAt: timestamp, updatedAt: timestamp + 1000, nextRunAt: null, status: 'completed', latestRun: run, runCount: 1,
+    createdAt: timestamp, updatedAt: timestamp + 1000, archivedAt: null, nextRunAt: null, status: 'completed', latestRun: run, runCount: 1,
   };
   return { task, runs: [run], comments: [{ id: `${id}-result`, taskId: id, runId: run.id, stepIndex: workflow ? 0 : null, kind: 'result', body: 'Результат с хорошо различимым автором.', createdAt: timestamp + 1000 }, { id: `${id}-note`, taskId: id, runId: null, stepIndex: null, kind: 'user', body: 'Обычная заметка пользователя.', createdAt: timestamp + 2000 }] };
 }

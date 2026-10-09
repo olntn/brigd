@@ -87,7 +87,7 @@ function fixtureDetail(status: RunStatus = 'completed', session = true, followup
   const task: Task = {
     id: original.taskId, title: 'Дополнительные запросы в сохранённую сессию', instruction: original.instruction, workerId: worker.id, worker,
     provider: worker.provider, steps: [], cwd: original.cwd, schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false,
-    createdAt: timestamp, updatedAt: latest.updatedAt, nextRunAt: null, status, latestRun: latest, runCount: followup ? 2 : 1,
+    createdAt: timestamp, updatedAt: latest.updatedAt, archivedAt: null, nextRunAt: null, status, latestRun: latest, runCount: followup ? 2 : 1,
   };
   return { task, runs: followup ? [latest, original] : [latest], comments: [{ id: 'original-result', taskId: task.id, runId: original.id, stepIndex: null, kind: 'result', body: original.summary!, createdAt: timestamp + 1000 }] };
 }

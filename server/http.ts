@@ -139,7 +139,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
       }
       if (path === '/api/tasks' && method === 'GET') return json(engine.store.listTasks());
       if (path === '/api/tasks' && method === 'POST') return json(engine.store.createTask(await validateTask(await body(req, TASK_JSON_LIMIT))), 201);
-      const taskMatch = path.match(/^\/api\/tasks\/([a-zA-Z0-9-]+)(?:\/(run|comments|followups))?$/);
+      const taskMatch = path.match(/^\/api\/tasks\/([a-zA-Z0-9-]+)(?:\/(run|comments|followups|archive|restore))?$/);
       if (taskMatch) {
         const [, id, action] = taskMatch;
         if (!action && method === 'GET') return json(engine.store.detail(id));
@@ -154,6 +154,8 @@ export function createHandler(engine: Engine, options: HttpOptions) {
           return json(engine.store.updateTask(id, await validateTask({ ...current, ...patch })));
         }
         if (action === 'run' && method === 'POST') { await body(req); return json(engine.start(id), 201); }
+        if (action === 'archive' && method === 'POST') { await body(req); return json(engine.store.archiveTask(id)); }
+        if (action === 'restore' && method === 'POST') { await body(req); return json(engine.store.restoreTask(id)); }
         if (action === 'followups' && method === 'POST') return json(engine.followup(id, validateFollowup(await body(req))), 201);
         if (action === 'comments' && method === 'POST') {
           const value = await body(req);
