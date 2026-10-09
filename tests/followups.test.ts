@@ -535,6 +535,38 @@ describe('single-session lifecycle, occupancy and stale launch fences', () => {
     expect((await invoke(current, 'list_attachments')).isError).toBe(true);
   });
 
+  test('MCP follow-up output receipt resolves to durable new-run and comment attribution without rewriting its source', async () => {
+    engine = new Engine(store, false, factory, bridgeFactory);
+    const task = store.createTask(taskInput());
+    const source = completed(task, false);
+    const original = JSON.stringify(source);
+    const originalComments = store.detail(task.id).comments.filter(comment => comment.runId === source.id);
+    const run = engine.followup(task.id, input(source));
+    const broker = brokers[0]!;
+    const bytes = Buffer.from('Output generated only for the additional request.');
+    writeFileSync(join(broker.agentConfig.context.outputDirectory, 'additional.txt'), bytes);
+    const args = { path: 'additional.txt', mime: 'text/plain', caption: 'Additional result', idempotency_key: 'additional_output' };
+    const receipt = resultText(await invoke(broker, 'add_attachment', args)).attachment;
+    // Wire receipts deliberately expose file context, not internal attribution.
+    expect(Object.keys(receipt).sort()).toEqual(['id', 'mime', 'name', 'previewable', 'size']);
+    const record = store.getAttachment(task.id, receipt.id);
+    expect(record).toMatchObject({ taskId: task.id, runId: run.id, source: 'agent', stepIndex: null, attemptId: null });
+    expect(record.runId).not.toBe(source.id);
+    const comment = store.detail(task.id).comments.find(item => item.id === record.commentId)!;
+    expect(comment).toMatchObject({ runId: run.id, body: 'Additional result', kind: 'agent' });
+    expect(comment.attachments?.map(file => file.id)).toEqual([receipt.id]);
+    expect(Buffer.from(store.readAttachment(task.id, receipt.id).data)).toEqual(bytes);
+    expect(resultText(await invoke(broker, 'add_attachment', args)).attachment.id).toBe(receipt.id);
+    await settle(0);
+    expect(JSON.stringify(store.getRun(source.id))).toBe(original);
+    expect(store.detail(task.id).comments.filter(item => item.runId === source.id)).toEqual(originalComments);
+    await reopen(false);
+    expect(store.getAttachment(task.id, receipt.id)).toEqual(record);
+    expect(Buffer.from(store.readAttachment(task.id, receipt.id).data)).toEqual(bytes);
+    expect(store.detail(task.id).comments.find(item => item.id === record.commentId)).toEqual(comment);
+    expect(JSON.stringify(store.getRun(source.id))).toBe(original);
+  });
+
   test('cancelling holds task occupancy until the old handle settles and fences late callbacks/results', async () => {
     const task = store.createTask(taskInput());
     const source = completed(task);

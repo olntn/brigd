@@ -7,7 +7,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { Store, runFence } from '../server/store';
 import { prepareAttachment } from '../server/attachments';
 import { createTaskBridge } from '../server/task-mcp';
-import { TASK_MCP_TOOLS } from '../server/task-mcp-protocol';
+import { TASK_MCP_TOOLS, type TaskAttachmentContext } from '../server/task-mcp-protocol';
 
 // Exact production dependencies and bundled stdio helper; no provider or model calls.
 // Unlike unit tests this smoke MUST fail when Unix sockets are unavailable.
@@ -74,9 +74,16 @@ try {
   assert(JSON.stringify(followupInputs.map((file: any) => file.id).sort()) === JSON.stringify([image.id, published.attachment.id, extra.id].sort()), 'Follow-up stdio input scope must preserve source files and exclude unrelated notes');
   assert(text(await client.callTool({ name: 'read_attachment', arguments: { attachment_id: extra.id } })), 'Follow-up attachment read failed');
   assert((await client.callTool({ name: 'read_attachment', arguments: { attachment_id: unrelated.id } })).isError, 'Follow-up read unrelated note attachment');
-  writeFileSync(join(bridge.agentConfig.context.outputDirectory, 'followup-result.txt'), 'Additional request verified');
-  const followupOutput = text(await client.callTool({ name: 'add_attachment', arguments: { path: 'followup-result.txt', mime: 'text/plain', caption: 'Follow-up result', idempotency_key: 'followup_output' } })).attachment;
-  assert(followupOutput.runId === followup.id && followupOutput.runId !== run.id, 'Follow-up output attributed to original run');
+  const followupBytes = Buffer.from('Additional request verified');
+  writeFileSync(join(bridge.agentConfig.context.outputDirectory, 'followup-result.txt'), followupBytes);
+  const followupOutput: TaskAttachmentContext = text(await client.callTool({ name: 'add_attachment', arguments: { path: 'followup-result.txt', mime: 'text/plain', caption: 'Follow-up result', idempotency_key: 'followup_output' } })).attachment;
+  // The MCP receipt deliberately contains only bounded file context. Attribution
+  // belongs to persisted metadata, so verify the exact ID returned over stdio.
+  const followupRecord = store.getAttachment(task.id, followupOutput.id);
+  assert(followupRecord.runId === followup.id && followupRecord.runId !== run.id && followupRecord.source === 'agent', 'Follow-up output attributed to wrong run');
+  const followupComment = store.detail(task.id).comments.find(comment => comment.id === followupRecord.commentId);
+  assert(followupComment?.runId === followup.id && followupComment.body === 'Follow-up result' && followupComment.attachments?.some(file => file.id === followupOutput.id), 'Follow-up output comment attribution missing');
+  assert(Buffer.from(store.readAttachment(task.id, followupOutput.id).data).equals(followupBytes), 'Follow-up output bytes changed');
   await client.close(); client = undefined;
   bridge.close();
   store.finish(followup.id, 'completed', 'Follow-up completed.', null);
@@ -84,6 +91,7 @@ try {
   store.close(); store = new Store(database);
   assert(Buffer.from(store.readAttachment(task.id, image.id).data).equals(original), 'Original image did not persist across reopening the DB');
   assert(Buffer.from(store.readAttachment(task.id, published.attachment.id).data).equals(bytes), 'Agent output did not persist across reopening the DB');
+  assert(store.getAttachment(task.id, followupOutput.id).runId === followup.id && Buffer.from(store.readAttachment(task.id, followupOutput.id).data).equals(followupBytes), 'Follow-up output attribution or bytes did not persist across reopening the DB');
   assert(store.getRun(followup.id).sessionId === 'runtime-original-session' && store.getRun(followup.id).followup?.sourceRunId === run.id, 'Follow-up lineage did not persist');
   assert(store.startFollowup(task.id, intent).run.id === followup.id, 'Follow-up retry after database reopen duplicated a run');
   assert(JSON.stringify(store.getRun(run.id)) === originalRun, 'Database reopen changed original result history');
