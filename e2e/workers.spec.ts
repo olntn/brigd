@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Locator } from '@playwright/test';
-import type { Worker, Task, TaskDetail } from '../src/lib/types';
+import type { ModelCatalogEntry, Worker, Task, TaskDetail } from '../src/lib/types';
 
 const unique = (label: string) => `${label} ${crypto.randomUUID().slice(0, 8)}`;
 const origin = { Origin: 'http://127.0.0.1:4318' };
@@ -41,6 +41,13 @@ test.afterEach(async ({ page }, testInfo) => {
 });
 
 test('profile avatar, task assignment and immutable identity through edit and resume', async ({ page, request }, testInfo) => {
+  const catalog = await (await request.get('/api/models')).json() as ModelCatalogEntry[];
+  const codex = catalog.find(model => model.provider === 'codex')!;
+  const claude = catalog.find(model => model.provider === 'claude')!;
+  expect(codex).toBeDefined();
+  expect(claude).toBeDefined();
+  const codexModel = codex.modelId;
+  const claudeModel = claude.modelId;
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   const name = unique('Мира');
@@ -54,7 +61,9 @@ test('profile avatar, task assignment and immutable identity through edit and re
   });
   const { editor } = await newWorker(page);
   await editor.locator('[name="workerName"]').fill(name);
-  await editor.getByLabel('Модель', { exact: true }).selectOption('codex');
+  await editor.getByLabel('Провайдер', { exact: true }).selectOption('codex');
+  await expect(editor.getByLabel('Модель', { exact: true })).toHaveValue('');
+  await editor.getByLabel('Модель', { exact: true }).selectOption(codexModel);
   await editor.getByLabel('Уровень усилий', { exact: true }).selectOption('xhigh');
   await editor.getByLabel('Стиль общения', { exact: true }).fill('Коротко и по-русски. Сначала вывод.');
   await editor.getByLabel('Загрузить аватар', { exact: true }).setInputFiles(await imageFile(page));
@@ -72,6 +81,8 @@ test('profile avatar, task assignment and immutable identity through edit and re
   expect(dimensions).toEqual({ width: 256, height: 128 });
   const worker = (await (await request.get('/api/workers')).json() as Worker[]).find(row => row.name === name)!;
   expect(worker.avatarUrl).toMatch(/^\/api\/avatars\//);
+  expect(worker.model).toBe(codexModel);
+  await expect(profile.locator('.worker-model-label')).toHaveText(codex.label);
   // Chromium may omit browser Blob bodies from Playwright request events.
   // Assert the real persisted bytes rather than treating a missing event body as empty.
   const savedAvatar = await request.get(worker.avatarUrl!);
@@ -91,6 +102,7 @@ test('profile avatar, task assignment and immutable identity through edit and re
   await taskEditor.getByLabel('Работник', { exact: true }).selectOption(worker.id);
   await expect(taskEditor.locator('.provider-options')).toHaveCount(0);
   await expect(taskEditor.locator('.worker-assignment')).toContainText(name);
+  await expect(taskEditor.locator('.worker-assignment')).toContainText(codex.label);
   await taskEditor.getByRole('button', { name: 'Создать задачу', exact: true }).click();
   const drawer = page.getByRole('dialog', { name: title, exact: true });
   await drawer.getByRole('button', { name: 'Запустить', exact: true }).click();
@@ -105,12 +117,18 @@ test('profile avatar, task assignment and immutable identity through edit and re
   await page.getByRole('button', { name: `Изменить работника: ${name}`, exact: true }).click();
   const workerEditor = page.getByRole('dialog', { name: 'Редактировать работника', exact: true });
   await workerEditor.locator('[name="workerName"]').fill(renamed);
-  await workerEditor.getByLabel('Модель', { exact: true }).selectOption('claude');
+  await expect(workerEditor.getByLabel('Модель', { exact: true })).toHaveValue(codexModel);
+  await workerEditor.getByLabel('Провайдер', { exact: true }).selectOption('claude');
+  await expect(workerEditor.getByLabel('Модель', { exact: true })).toHaveValue('');
+  await workerEditor.getByLabel('Модель', { exact: true }).selectOption(claudeModel);
   await expect(workerEditor.getByLabel('Уровень усилий', { exact: true })).toHaveValue('xhigh');
   await workerEditor.getByLabel('Уровень усилий', { exact: true }).selectOption('max');
-  await workerEditor.getByLabel('Модель', { exact: true }).selectOption('codex');
+  await workerEditor.getByLabel('Провайдер', { exact: true }).selectOption('codex');
+  await expect(workerEditor.getByLabel('Модель', { exact: true })).toHaveValue('');
   await expect(workerEditor.getByLabel('Уровень усилий', { exact: true })).toHaveValue('default');
-  await workerEditor.getByLabel('Модель', { exact: true }).selectOption('claude');
+  await workerEditor.getByLabel('Провайдер', { exact: true }).selectOption('claude');
+  await expect(workerEditor.getByLabel('Модель', { exact: true })).toHaveValue('');
+  await workerEditor.getByLabel('Модель', { exact: true }).selectOption(claudeModel);
   await workerEditor.getByLabel('Уровень усилий', { exact: true }).selectOption('max');
   await workerEditor.getByLabel('Стиль общения', { exact: true }).fill('Подробно, с примерами.');
   await workerEditor.getByRole('button', { name: 'Убрать аватар', exact: true }).click();
@@ -120,9 +138,14 @@ test('profile avatar, task assignment and immutable identity through edit and re
   const taskCard = page.getByRole('button', { name: `Открыть задачу: ${title}`, exact: true });
   await expect(taskCard.locator('.worker-identity')).toContainText(name);
   await expect(taskCard.locator('.worker-identity')).not.toContainText(renamed);
+  await expect(taskCard.locator('.worker-model-label')).toHaveText(`Codex · ${codex.label}`);
   await taskCard.click();
   await expect(drawer.locator('.drawer-badges .worker-identity')).toContainText(name);
   await expect(drawer.locator('.task-properties')).toContainText(renamed);
+  await expect(drawer.locator('.task-properties')).toContainText(claude.label);
+  await drawer.locator('.current-run-instructions summary').click();
+  await expect(drawer.locator('.current-run-instructions .worker-run-settings')).toContainText(codexModel);
+  await expect(drawer.locator('.current-run-instructions .worker-run-settings')).not.toContainText(claudeModel);
   await drawer.getByLabel('Ответ агенту', { exact: true }).fill('Сначала архитектура.');
   await drawer.getByRole('button', { name: 'Продолжить работу', exact: true }).click();
   await expect(drawer.locator('.drawer-badges').getByText('Завершено', { exact: true })).toBeVisible();
@@ -131,14 +154,15 @@ test('profile avatar, task assignment and immutable identity through edit and re
   await drawer.locator('.comment-result').screenshot({ path: testInfo.outputPath('brigd-worker-frozen-comment.png') });
   await drawer.getByRole('tab', { name: /Запуски/ }).click();
   await expect(drawer.locator('.run-entry .worker-identity')).toContainText(name);
+  await expect(drawer.locator('.run-entry .worker-model-label')).toHaveText(`Codex · ${codex.label}`);
   await drawer.locator('.run-entry').screenshot({ path: testInfo.outputPath('brigd-worker-frozen-run.png') });
   let detail = await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail;
   expect(detail.runs[0].sessionId).toBe(sessionId);
-  expect(detail.runs[0].worker).toMatchObject({ name, provider: 'codex', effort: 'xhigh', avatarUrl: worker.avatarUrl, communicationStyle: 'Коротко и по-русски. Сначала вывод.' });
+  expect(detail.runs[0].worker).toMatchObject({ name, provider: 'codex', model: codexModel, effort: 'xhigh', avatarUrl: worker.avatarUrl, communicationStyle: 'Коротко и по-русски. Сначала вывод.' });
   await drawer.getByRole('button', { name: 'Запустить снова', exact: true }).click();
   await expect(drawer.getByText('Агенту нужен ваш ответ', { exact: true })).toBeVisible();
   detail = await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail;
-  expect(detail.runs[0].worker).toMatchObject({ name: renamed, provider: 'claude', effort: 'max', avatarUrl: null, communicationStyle: 'Подробно, с примерами.' });
+  expect(detail.runs[0].worker).toMatchObject({ name: renamed, provider: 'claude', model: claudeModel, effort: 'max', avatarUrl: null, communicationStyle: 'Подробно, с примерами.' });
   expect(detail.runs[1].worker?.name).toBe(name);
   await drawer.getByRole('button', { name: 'Отменить запуск', exact: true }).click();
   await expect(drawer.locator('.drawer-badges').getByText('Отменено', { exact: true })).toBeVisible();
@@ -192,6 +216,8 @@ test('invalid images, cancellation, draft reset, focus and deferred upload', asy
   page.on('request', request => { if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/avatars') uploads++; });
   let { editor, trigger } = await newWorker(page);
   await editor.locator('[name="workerName"]').fill('Черновик, не сохранять');
+  await editor.getByLabel('Модель', { exact: true }).selectOption('__custom__');
+  await editor.getByLabel('ID модели', { exact: true }).fill('custom-draft-model');
   await editor.getByLabel('Загрузить аватар', { exact: true }).setInputFiles({ name: 'unsafe.svg', mimeType: 'image/svg+xml', buffer: Buffer.from('<svg/>') });
   await expect(editor.getByRole('alert')).toContainText('PNG, JPEG или WebP');
   await expect(editor.getByRole('button', { name: 'Создать работника', exact: true })).toBeDisabled();
@@ -208,6 +234,8 @@ test('invalid images, cancellation, draft reset, focus and deferred upload', asy
   await trigger.click();
   editor = page.getByRole('dialog', { name: 'Новый работник', exact: true });
   await expect(editor.locator('[name="workerName"]')).toHaveValue('');
+  await expect(editor.getByLabel('Модель', { exact: true })).toHaveValue('');
+  await expect(editor.getByLabel('ID модели', { exact: true })).toHaveCount(0);
   await expect(editor.locator('.worker-avatar img')).toHaveCount(0);
   await expect(editor.getByRole('alert')).toHaveCount(0);
   await editor.getByRole('button', { name: 'Отмена', exact: true }).click();
@@ -254,6 +282,69 @@ test('profile saves once and ignores a stale workers fetch after create', async 
   expect(workers.filter(worker => worker.name === name)).toHaveLength(1);
 });
 
+test('custom model validation, save retry, reload and provider reset preserve explicit choices', async ({ page, request }) => {
+  const catalog = await (await request.get('/api/models')).json() as ModelCatalogEntry[];
+  const name = unique('Модель по ID');
+  const customModel = 'org/custom-model-v1:preview+fast@region[1m]';
+  let saves = 0;
+  await page.route('**/api/workers', async route => {
+    if (route.request().method() === 'POST' && ++saves === 1) {
+      await route.fulfill({ status: 503, json: { error: 'Профиль пока не сохранён. Попробуйте ещё раз.' } });
+    } else await route.continue();
+  });
+  const { editor } = await newWorker(page);
+  await editor.getByLabel('Имя работника', { exact: true }).fill(name);
+  await expect(editor.getByLabel('Модель', { exact: true })).toHaveValue('');
+  await expect(editor.getByLabel('ID модели', { exact: true })).toHaveCount(0);
+  await expect(editor.locator('[name="workerModel"] option')).toHaveText([
+    'По умолчанию CLI', ...catalog.filter(model => model.provider === 'codex').map(model => `${model.label} · ${model.modelId}`), 'Другая модель…',
+  ]);
+  await editor.getByLabel('Модель', { exact: true }).selectOption('__custom__');
+  for (const invalid of ['--unsafe-option', 'model with spaces', 'model;command', '   ']) {
+    await editor.getByLabel('ID модели', { exact: true }).fill(invalid);
+    await editor.getByRole('button', { name: 'Создать работника', exact: true }).click();
+    await expect(editor.getByRole('alert')).toContainText('ID модели');
+    await expect(editor).toBeVisible();
+    expect(saves).toBe(0);
+  }
+  await editor.getByLabel('ID модели', { exact: true }).fill(customModel);
+  await editor.getByRole('button', { name: 'Создать работника', exact: true }).click();
+  await expect(editor.getByRole('alert')).toContainText('Профиль пока не сохранён');
+  await expect(editor.getByLabel('ID модели', { exact: true })).toHaveValue(customModel);
+  await editor.getByRole('button', { name: 'Создать работника', exact: true }).click();
+  await expect(editor).not.toBeVisible();
+  expect(saves).toBe(2);
+  const worker = (await (await request.get('/api/workers')).json() as Worker[]).find(item => item.name === name)!;
+  expect(worker.model).toBe(customModel);
+  await expect(page.getByRole('article', { name: `Работник: ${name}`, exact: true })).toContainText(customModel);
+
+  await page.reload();
+  await openWorkers(page);
+  await page.getByRole('button', { name: `Изменить работника: ${name}`, exact: true }).click();
+  const edit = page.getByRole('dialog', { name: 'Редактировать работника', exact: true });
+  await expect(edit.getByLabel('Модель', { exact: true })).toHaveValue('__custom__');
+  await expect(edit.getByLabel('ID модели', { exact: true })).toHaveValue(customModel);
+  await edit.getByLabel('Провайдер', { exact: true }).selectOption('claude');
+  await expect(edit.getByLabel('Модель', { exact: true })).toHaveValue('');
+  await expect(edit.getByLabel('ID модели', { exact: true })).toHaveCount(0);
+  await expect(edit.locator('[name="workerModel"] option')).toHaveText([
+    'По умолчанию CLI', ...catalog.filter(model => model.provider === 'claude').map(model => `${model.label} · ${model.modelId}`), 'Другая модель…',
+  ]);
+  await edit.getByLabel('Модель', { exact: true }).selectOption('__custom__');
+  await expect(edit.getByLabel('ID модели', { exact: true })).toHaveValue('');
+  await edit.getByLabel('Модель', { exact: true }).selectOption('');
+  await edit.getByRole('button', { name: 'Сохранить профиль', exact: true }).click();
+  await expect(edit).not.toBeVisible();
+  const saved = (await (await request.get('/api/workers')).json() as Worker[]).find(item => item.id === worker.id)!;
+  expect(saved).toMatchObject({ provider: 'claude', model: null });
+  await page.reload();
+  await openWorkers(page);
+  await page.getByRole('button', { name: `Изменить работника: ${name}`, exact: true }).click();
+  await expect(edit.getByLabel('Провайдер', { exact: true })).toHaveValue('claude');
+  await expect(edit.getByLabel('Модель', { exact: true })).toHaveValue('');
+  await edit.getByRole('button', { name: 'Отмена', exact: true }).click();
+});
+
 for (const theme of ['light', 'dark'] as const) {
   for (const size of [{ width: 390, height: 844, font: 13 }, { width: 320, height: 640, font: 26 }]) {
     test(`${theme} worker editor fits ${size.width}px with ${size.font}px text`, async ({ page }, testInfo) => {
@@ -263,7 +354,11 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await page.addStyleTag({ content: `html { font-size: ${size.font}px !important; }` });
       const { editor } = await newWorker(page);
-      await editor.locator('[name="workerName"]').fill('ОченьДлинноеИмяРаботника'.repeat(3));
+      const name = unique('ОченьДлинноеИмяРаботника'.repeat(3).slice(0, 71));
+      await editor.locator('[name="workerName"]').fill(name);
+      await editor.getByLabel('Модель', { exact: true }).selectOption('__custom__');
+      await editor.getByLabel('ID модели', { exact: true }).fill('m'.repeat(128));
+      await expect(editor.getByLabel('ID модели', { exact: true })).toHaveAttribute('maxlength', '128');
       await editor.getByLabel('Стиль общения', { exact: true }).fill('ДлиннаяИнструкцияБезПробелов'.repeat(100));
       await noOverflow(page, editor);
       await editor.evaluate(node => { node.scrollTop = 0; });
@@ -273,8 +368,12 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(save).toBeInViewport();
       await noOverflow(page, editor);
       await editor.screenshot({ path: testInfo.outputPath(`brigd-worker-editor-${theme}-${size.width}-${size.font}-fields.png`) });
-      await editor.getByRole('button', { name: 'Отмена', exact: true }).click();
+      await save.click();
+      await expect(editor).not.toBeVisible();
+      const card = page.getByRole('article', { name: `Работник: ${name}`, exact: true });
+      await expect(card.locator('.worker-model-label')).toHaveText('m'.repeat(128));
       await noOverflow(page);
+      await card.screenshot({ path: testInfo.outputPath(`brigd-worker-card-${theme}-${size.width}-${size.font}.png`) });
     });
   }
 }

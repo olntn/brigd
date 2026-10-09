@@ -16,21 +16,35 @@ export interface Attachment {
   createdAt: number;
 }
 export type Effort = 'default' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export interface ModelCatalogInput {
+  provider: Provider;
+  modelId: string;
+  label: string;
+}
+/** A selectable preset; worker/run model IDs deliberately have no catalog foreign key. */
+export interface ModelCatalogEntry extends ModelCatalogInput {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+}
 export interface WorkerInput {
   name: string;
   provider: Provider;
+  /** null/omitted keeps the native CLI default; explicit IDs are frozen per run. */
+  model?: string | null;
   effort: Effort;
   communicationStyle: string;
   avatarUrl: string | null;
 }
 export interface Worker extends WorkerInput {
+  model: string | null;
   id: string;
   archived: boolean;
   createdAt: number;
   updatedAt: number;
 }
 /** Immutable identity and execution settings captured when a run starts. */
-export interface WorkerSnapshot extends WorkerInput { id: string; }
+export interface WorkerSnapshot extends WorkerInput { id: string; model: string | null; }
 
 export interface InstructionInput {
   title: string;

@@ -2,18 +2,23 @@
   import { onDestroy, tick } from 'svelte';
   import Icon from './Icon.svelte';
   import WorkerAvatar from './WorkerAvatar.svelte';
-  import { effortOptions, effortLabel } from './workers';
-  import type { Effort, Provider, Worker, WorkerInput } from './types';
+  import { effortOptions, effortLabel, modelLabel, normalizeModel, MODEL_ID_LIMIT } from './workers';
+  import type { Effort, ModelCatalogEntry, Provider, Worker, WorkerInput } from './types';
 
-  let { workers, loading, error, retry, onchange, notify }: {
+  let { workers, loading, error, retry, onchange, notify, models, modelsLoading, modelsError, retryModels }: {
     workers: Worker[]; loading: boolean; error: string; retry: () => void;
     onchange: (worker: Worker) => void; notify: (message: string, type?: 'success' | 'error') => void;
+    models: ModelCatalogEntry[]; modelsLoading: boolean; modelsError: string; retryModels: () => void;
   } = $props();
   let dialog: HTMLDialogElement;
   let editing = $state(false);
   let editingId = $state<string | null>(null);
   let name = $state('');
   let provider = $state<Provider>('codex');
+  // Keep the actual ID independent of the available options. Renaming, moving or
+  // deleting a catalog entry must never change an open draft or saved profile.
+  let draftModel = $state('');
+  let customSelection = $state(false);
   let effort = $state<Effort>('default');
   let communicationStyle = $state('');
   let avatarUrl = $state<string | null>(null);
@@ -29,6 +34,13 @@
   let fileInput = $state<HTMLInputElement>();
   let activeWorkers = $derived(workers.filter(worker => !worker.archived));
   let archivedWorkers = $derived(workers.filter(worker => worker.archived));
+  let providerModels = $derived(modelsError ? [] : models.filter(model => model.provider === provider));
+  let modelSelection = $derived(customSelection || (!!draftModel && !providerModels.some(option => option.modelId === draftModel)) ? '__custom__' : draftModel);
+  $effect(() => {
+    // Once a disappearing option becomes manual input, keep that input open even
+    // while the user clears/retypes its value or the catalog recovers.
+    if (editing && draftModel && !customSelection && !providerModels.some(option => option.modelId === draftModel)) customSelection = true;
+  });
   const providerName = (value: Provider) => value === 'codex' ? 'Codex' : 'Claude Code';
 
   async function request<T>(path: string, options: RequestInit): Promise<T> {
@@ -53,6 +65,8 @@
     editingId = worker?.id ?? null;
     name = worker?.name ?? '';
     provider = worker?.provider ?? 'codex';
+    draftModel = worker?.model ?? '';
+    customSelection = !!draftModel && (modelsError !== '' || !models.some(option => option.provider === provider && option.modelId === draftModel));
     effort = worker?.effort ?? 'default';
     communicationStyle = worker?.communicationStyle ?? '';
     avatarUrl = worker?.avatarUrl ?? null;
@@ -71,6 +85,19 @@
     dialog.close();
     editing = false;
     clearPreview();
+  }
+
+  function changeProvider(event: Event) {
+    const nextProvider = (event.currentTarget as HTMLSelectElement).value as Provider;
+    draftModel = '';
+    customSelection = false;
+    if (!effortOptions[nextProvider].includes(effort)) effort = 'default';
+  }
+
+  function changeModel(event: Event) {
+    const value = (event.currentTarget as HTMLSelectElement).value;
+    customSelection = value === '__custom__';
+    if (!customSelection) draftModel = value;
   }
 
   function removeAvatar() {
@@ -133,6 +160,11 @@
     if (submitting || imageBusy || imageError) return;
     formError = '';
     if (!name.trim()) { formError = 'Укажите имя работника.'; return; }
+    let model: string | null;
+    try {
+      model = normalizeModel(draftModel);
+      if (modelSelection === '__custom__' && !model) throw new Error('Укажите ID модели или выберите «По умолчанию CLI».');
+    } catch (error) { formError = error instanceof Error ? error.message : 'Проверьте ID модели.'; return; }
     submitting = true;
     try {
       if (avatarBlob) {
@@ -142,7 +174,7 @@
         avatarUrl = uploaded.avatarUrl;
         avatarBlob = null; // A failed profile save can reuse this upload on retry.
       }
-      const payload: WorkerInput = { name: name.trim(), provider, effort, communicationStyle: communicationStyle.trim(), avatarUrl };
+      const payload: WorkerInput = { name: name.trim(), provider, model, effort, communicationStyle: communicationStyle.trim(), avatarUrl };
       const saved = await request<Worker>(editingId ? `/api/workers/${encodeURIComponent(editingId)}` : '/api/workers', {
         method: editingId ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
       });
@@ -177,7 +209,7 @@
 
 {#snippet workerCard(worker: Worker)}
   <article class="worker-card" class:archived-worker={worker.archived} aria-label={'Работник: ' + worker.name}>
-    <div class="worker-card-heading"><WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={48} /><div><h2>{worker.name}</h2><p>{providerName(worker.provider)} <span>·</span> {effortLabel(worker.effort)}</p></div>{#if worker.archived}<span class="worker-archived-label">В архиве</span>{/if}</div>
+    <div class="worker-card-heading"><WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={48} /><div><h2>{worker.name}</h2><p>{providerName(worker.provider)} <span>·</span> <span class="worker-model-label" title={worker.model ?? undefined}>{modelLabel(worker.model, models, worker.provider)}</span></p><p>Усилия: {effortLabel(worker.effort)}</p></div>{#if worker.archived}<span class="worker-archived-label">В архиве</span>{/if}</div>
     <p class="worker-style-preview">{worker.communicationStyle || 'Стиль общения по умолчанию'}</p>
     <div class="worker-card-actions"><button class="button secondary" disabled={pending.includes(worker.id)} onclick={() => openEditor(worker)} aria-label={'Изменить работника: ' + worker.name}><Icon name="edit" size={14} />Изменить</button><button class="button text-button" disabled={pending.includes(worker.id)} onclick={() => setArchived(worker)} aria-label={(worker.archived ? 'Восстановить работника: ' : 'В архив: ') + worker.name}><Icon name={pending.includes(worker.id) ? 'refresh' : worker.archived ? 'refresh' : 'inbox'} size={14} class={pending.includes(worker.id) ? 'spin' : ''} />{worker.archived ? 'Восстановить' : 'В архив'}</button></div>
   </article>
@@ -200,7 +232,15 @@
       {#if imageBusy}<p class="worker-image-status" role="status">Подготавливаем изображение…</p>{/if}
       {#if imageError}<div class="form-error" role="alert">{imageError}</div>{/if}
       <label class="form-field"><span>Имя работника <span class="required">*</span></span><input name="workerName" aria-label="Имя работника" bind:value={name} maxlength="80" placeholder="Например, Мира" required disabled={submitting} /></label>
-      <div class="worker-model-fields"><label class="form-field"><span>Модель</span><select name="workerProvider" aria-label="Модель" bind:value={provider} onchange={(event) => { if (!effortOptions[event.currentTarget.value as Provider].includes(effort)) effort = 'default'; }} disabled={submitting}><option value="codex">Codex</option><option value="claude">Claude Code</option></select></label><label class="form-field"><span>Уровень усилий</span><select name="workerEffort" aria-label="Уровень усилий" bind:value={effort} disabled={submitting}>{#each effortOptions[provider] as option}<option value={option}>{effortLabel(option)}</option>{/each}</select><small>Фактический уровень зависит от модели и возможностей CLI.</small></label></div>
+      <div class="worker-model-fields">
+        <label class="form-field"><span>Провайдер</span><select name="workerProvider" aria-label="Провайдер" bind:value={provider} onchange={changeProvider} disabled={submitting}><option value="codex">Codex</option><option value="claude">Claude Code</option></select><small>При смене провайдера модель сбросится на значение CLI по умолчанию.</small></label>
+        <label class="form-field"><span>Модель</span><select name="workerModel" aria-label="Модель" value={modelSelection} onchange={changeModel} disabled={submitting}><option value="">По умолчанию CLI</option>{#each providerModels as option (option.id)}<option value={option.modelId}>{option.label} · {option.modelId}</option>{/each}<option value="__custom__">Другая модель…</option></select><small>Список можно изменить в настройках. Доступность зависит от вашего CLI и аккаунта; ID можно указать вручную.</small></label>
+      </div>
+      {#if modelsError}<div class="model-load-error" role="alert"><span>{modelsError} Можно выбрать значение CLI по умолчанию или указать ID вручную.</span><button class="button secondary" type="button" disabled={submitting} onclick={retryModels}>Повторить загрузку моделей</button></div>
+      {:else if modelsLoading}<p class="worker-image-status" role="status">Загружаем список моделей… Можно указать ID вручную.</p>
+      {:else if !providerModels.length}<p class="worker-image-status">В списке этого провайдера пока нет моделей. Добавьте их в настройках или укажите ID вручную.</p>{/if}
+      {#if modelSelection === '__custom__'}<label class="form-field"><span>ID модели <span class="required">*</span></span><input name="workerCustomModel" aria-label="ID модели" bind:value={draftModel} maxlength={MODEL_ID_LIMIT} placeholder={providerModels[0]?.modelId ?? 'model-id'} autocomplete="off" autocapitalize="off" spellcheck="false" required disabled={submitting} /><small>Укажите ID или алиас, который принимает ваш CLI, до {MODEL_ID_LIMIT} символов. Без пробелов внутри и символов управления.</small></label>{/if}
+      <label class="form-field"><span>Уровень усилий</span><select name="workerEffort" aria-label="Уровень усилий" bind:value={effort} disabled={submitting}>{#each effortOptions[provider] as option}<option value={option}>{effortLabel(option)}</option>{/each}</select><small>Поддержка уровня зависит от выбранной модели, аккаунта и версии CLI. «По умолчанию CLI» сохраняет настройки CLI.</small></label>
       <label class="form-field"><span>Стиль общения</span><textarea name="communicationStyle" aria-label="Стиль общения" bind:value={communicationStyle} rows="5" maxlength="4000" placeholder="Например: отвечай по-русски, кратко. Сначала вывод, затем важные детали. Если есть риск, скажи о нём прямо." disabled={submitting}></textarea><small>Добавим к инструкции работника при запуске. Саму задачу опишите отдельно.</small></label>
       {#if editingId}<div class="form-note">Уже начатые запуски и их продолжения сохранят прежний профиль. Обновления будут действовать со следующего запуска.</div>{/if}
     </div>

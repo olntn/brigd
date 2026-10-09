@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
   import WorkerAvatar from './WorkerAvatar.svelte';
-  import { effortLabel } from './workers';
+  import { effortLabel, modelLabel } from './workers';
   import type { Run, RunStepStatus } from './types';
   let { run }: { run: Run } = $props();
   const labels: Record<RunStepStatus, string> = {
@@ -21,12 +21,12 @@
         <span class="workflow-step-mark" aria-hidden="true">{#if step.status === 'completed'}<Icon name="check" size={17} />{:else}{index + 1}{/if}</span>
         <div class="workflow-step-content">
           <div class="workflow-step-heading"><h4>{step.title}</h4><span class="workflow-step-status">{labels[step.status]}</span></div>
-          <div class="workflow-step-worker"><WorkerAvatar name={step.worker.name} avatarUrl={step.worker.avatarUrl} size={24} /><span>{step.worker.name}</span><small>{step.worker.provider === 'codex' ? 'Codex' : 'Claude Code'}</small></div>
+          <div class="workflow-step-worker"><WorkerAvatar name={step.worker.name} avatarUrl={step.worker.avatarUrl} size={24} /><span>{step.worker.name}</span><small class="worker-model-label" title={step.worker.model ?? undefined}>{step.worker.provider === 'codex' ? 'Codex' : 'Claude Code'} · {modelLabel(step.worker.model)}</small></div>
           {#if step.summary}<p class="workflow-step-summary">{step.summary}</p>{/if}
           {#if step.error}<p class="workflow-step-error">{step.error}</p>{/if}
           <details class="workflow-step-snapshot"><summary>Задание и история этапа</summary>
             <p class="workflow-step-instruction">{step.instruction}</p>
-            <dl><div><dt>Работник</dt><dd>{step.worker.name}</dd></div><div><dt>Модель и усилия</dt><dd>{step.worker.provider === 'codex' ? 'Codex' : 'Claude Code'} · {effortLabel(step.worker.effort)}</dd></div><div><dt>Стиль общения</dt><dd>{step.worker.communicationStyle || 'Не задан'}</dd></div><div><dt>Начало / завершение</dt><dd>{time(step.startedAt)} / {time(step.finishedAt)}</dd></div></dl>
+            <dl><div><dt>Работник</dt><dd>{step.worker.name}</dd></div><div><dt>Провайдер</dt><dd>{step.worker.provider === 'codex' ? 'Codex' : 'Claude Code'}</dd></div><div><dt>Модель</dt><dd>{modelLabel(step.worker.model)}{#if step.worker.model && modelLabel(step.worker.model) !== step.worker.model} ({step.worker.model}){/if}</dd></div><div><dt>Усилия</dt><dd>{effortLabel(step.worker.effort)}</dd></div><div><dt>Стиль общения</dt><dd>{step.worker.communicationStyle || 'Не задан'}</dd></div><div><dt>Начало / завершение</dt><dd>{time(step.startedAt)} / {time(step.finishedAt)}</dd></div></dl>
             {#if step.attempts.length}<ol class="workflow-attempts" aria-label={`Попытки этапа ${index + 1}`}>
               {#each step.attempts as attempt (attempt.id)}<li><strong>Попытка {attempt.number} · {labels[attempt.status]}</strong><p>{time(attempt.startedAt)} · Ход {attempt.turn}</p>{#if attempt.sessionId}<p class="workflow-session">Сессия: {attempt.sessionId}</p>{/if}{#if attempt.summary}<p>{attempt.summary}</p>{/if}{#if attempt.error}<p class="workflow-step-error">{attempt.error}</p>{/if}</li>{/each}
             </ol>{:else}<p class="workflow-help">Этот этап ещё не запускался.</p>{/if}

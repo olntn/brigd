@@ -8,6 +8,7 @@ import { TASK_JSON_LIMIT } from './workflows';
 import { ATTACHMENT_MAX_BYTES } from '../src/lib/attachments';
 import { attachmentIds, attachmentDisposition, prepareAttachment } from './attachments';
 import { INSTRUCTION_JSON_LIMIT, validateInstruction, validateInstructionPatch } from './instructions';
+import { validateModel, validateModelPatch } from './models';
 
 export interface HttpOptions { port: number; dev?: boolean; root?: string; startedAt?: number; allowedHosts?: string[]; allowedOrigins?: string[]; defaultCwd?: string; }
 const JSON_LIMIT = 32_768;
@@ -103,13 +104,27 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         const avatar = engine.store.getAvatar(avatarMatch[1]!);
         return new Response(method === 'HEAD' ? null : new Uint8Array(avatar.data), { headers: { ...securityHeaders, 'Content-Type': avatar.mime, 'Content-Length': String(avatar.data.byteLength), 'Content-Disposition': 'inline' } });
       }
+      if (path === '/api/models' && method === 'GET') return json(engine.store.listModels());
+      if (path === '/api/models' && method === 'POST') return json(engine.store.createModel(validateModel(await body(req))), 201);
+      const modelMatch = path.match(/^\/api\/models\/([a-zA-Z0-9-]+)$/);
+      if (modelMatch) {
+        const id = modelMatch[1]!;
+        if (method === 'GET') return json(engine.store.getModel(id));
+        if (method === 'PATCH') return json(engine.store.updateModel(id, validateModelPatch(await body(req))));
+        if (method === 'DELETE') { engine.store.deleteModel(id); return json({ ok: true }); }
+      }
       if (path === '/api/workers' && method === 'GET') return json(engine.store.listWorkers());
       if (path === '/api/workers' && method === 'POST') return json(engine.store.createWorker(validateWorker(await body(req))), 201);
       const workerMatch = path.match(/^\/api\/workers\/([a-zA-Z0-9-]+)$/);
       if (workerMatch) {
         const id = workerMatch[1]!;
         if (method === 'GET') return json(engine.store.getWorker(id));
-        if (method === 'PATCH') return json(engine.store.updateWorker(id, validateWorker({ ...engine.store.getWorker(id), ...await body(req) })));
+        if (method === 'PATCH') {
+          const current = engine.store.getWorker(id), patch = await body(req);
+          // A provider-only edit must not carry an incompatible old model across.
+          const model = patch.model === undefined && patch.provider !== undefined && patch.provider !== current.provider ? null : current.model;
+          return json(engine.store.updateWorker(id, validateWorker({ ...current, model, ...patch })));
+        }
         if (method === 'DELETE') return json(engine.store.archiveWorker(id));
       }
       if (path === '/api/instructions' && method === 'GET') return json(engine.store.listInstructions());

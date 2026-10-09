@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import type { Attachment, Effort, Envelope, InstructionSnapshot, Provider } from '../src/lib/types';
-import { effortOptions } from '../src/lib/workers';
+import { effortOptions, normalizeModel } from '../src/lib/workers';
 import schema from './envelope.schema.json';
 import { AgentProtocol, ProtocolError, validateSessionId } from './protocol';
 import type { WorkflowContext } from './workflows';
@@ -18,6 +18,7 @@ export interface AgentInput {
   sessionId?: string;
   answer?: string;
   mock?: boolean;
+  model?: string | null;
   effort?: Effort;
   communicationStyle?: string;
 }
@@ -44,6 +45,8 @@ export interface CliCapabilities {
   schema: boolean;
   permissionPrompts: boolean;
   taskMcp?: boolean;
+  /** Explicit --model support on both new and resumed invocations. */
+  model?: boolean;
   /** Explicitly supported overrides, as opposed to the model's effective level. */
   efforts?: readonly Effort[];
 }
@@ -54,6 +57,8 @@ function flag(help: string, name: string): boolean {
 
 function validateWorkerSettings(input: AgentInput): Effort {
   if (input.provider !== 'codex' && input.provider !== 'claude') throw new ProtocolError('Unsupported provider.');
+  try { normalizeModel(input.model); }
+  catch (error) { throw new ProtocolError(error instanceof Error ? error.message : 'Invalid model ID.'); }
   const effort = input.effort === undefined ? 'default' : input.effort;
   if (!effortOptions[input.provider].includes(effort)) {
     throw new AgentRunError('UNSUPPORTED', `Unsupported effort for ${input.provider}. Choose one of: ${effortOptions[input.provider].join(', ')}.`);
@@ -86,6 +91,7 @@ export function capabilitiesFromHelp(provider: Provider, help: string, resumeHel
     }
     return {
       schema: flag(help, '--output-schema') && flag(resumeHelp, '--output-schema'), permissionPrompts: false,
+      model: flag(help, '--model') && flag(resumeHelp, '--model'),
       taskMcp: flag(help, '--strict-config') && flag(resumeHelp, '--strict-config') && flag(resumeHelp, '--config'),
       // --config alone can silently accept an unknown key on an old CLI. Require
       // strict validation on both paths and enable it whenever we override effort.
@@ -97,7 +103,7 @@ export function capabilitiesFromHelp(provider: Provider, help: string, resumeHel
     if (!flag(help, option)) throw new AgentRunError('UNSUPPORTED', `Installed Claude lacks required ${option} support. Update the CLI.`);
   }
   if (!help.includes('stream-json')) throw new AgentRunError('UNSUPPORTED', 'Installed Claude does not advertise stream-json output. Update the CLI.');
-  return { schema: flag(help, '--json-schema'), permissionPrompts: flag(help, '--permission-prompts'),
+  return { schema: flag(help, '--json-schema'), permissionPrompts: flag(help, '--permission-prompts'), model: flag(help, '--model'),
     taskMcp: flag(help, '--mcp-config') && flag(help, '--allowedTools') && flag(help, '--permission-prompts'), efforts: claudeEfforts(help) };
 }
 
@@ -175,6 +181,10 @@ export function buildPrompt(input: AgentInput): string {
 /** Argument vectors only: no shell interpolation, no --last, forks, or approval bypass. */
 export function buildArgv(input: AgentInput, binary: string, capabilities: CliCapabilities): string[] {
   const effort = validateWorkerSettings(input);
+  const model = normalizeModel(input.model);
+  if (model && !capabilities.model) {
+    throw new AgentRunError('UNSUPPORTED', `Installed ${input.provider === 'codex' ? 'Codex' : 'Claude Code'} CLI cannot safely apply requested model "${model}" on new and resumed runs. Update the CLI or choose the default model.`);
+  }
   if (effort !== 'default' && !capabilities.efforts?.includes(effort)) {
     throw new AgentRunError('UNSUPPORTED', `Installed ${input.provider === 'codex' ? 'Codex' : 'Claude Code'} CLI cannot safely apply requested effort "${effort}". Update the CLI or choose default effort.`);
   }
@@ -193,6 +203,7 @@ export function buildArgv(input: AgentInput, binary: string, capabilities: CliCa
       for (const tool of TASK_MCP_TOOLS) args.push('-c', `${prefix}.tools.${tool}.approval_mode="approve"`);
     }
     if (input.sessionId) args.push('resume');
+    if (model) args.push('--model', model);
     args.push('--json');
     if (capabilities.schema) args.push('--output-schema', schemaPath);
     args.push('--');
@@ -201,6 +212,7 @@ export function buildArgv(input: AgentInput, binary: string, capabilities: CliCa
     return args;
   }
   const args = [binary, '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'default'];
+  if (model) args.push('--model', model);
   if (input.taskBridge) {
     const bridge = input.taskBridge;
     // Literal ${VAR} references are expanded by Claude from its child-only env.
@@ -358,6 +370,7 @@ export function startAgent(input: AgentInput, callbacks: AgentCallbacks): AgentH
   const abort = new AbortController();
   const result = (async (): Promise<AgentOutcome> => {
     const effort = validateWorkerSettings(input);
+    const model = normalizeModel(input.model);
     buildPrompt(input); // Apply the same guidance and size validation in mock mode.
     if (!input.instruction.trim()) throw new ProtocolError('The task instruction cannot be empty.');
     if (input.answer !== undefined && !input.sessionId) throw new ProtocolError('A clarification requires the original session ID.');
@@ -385,8 +398,9 @@ export function startAgent(input: AgentInput, callbacks: AgentCallbacks): AgentH
       catch (error) {
         // Keep provider stderr private, but give a useful diagnostic when an
         // installed model/account rejects a requested (CLI-supported) level.
-        if (effort !== 'default' && error instanceof ProtocolError) {
-          throw new ProtocolError(`${error.message} Requested ${input.provider} effort: ${effort}. Check the selected model/account supports this level, or choose default effort. Native permissions still apply.`);
+        if ((model || effort !== 'default') && error instanceof ProtocolError) {
+          const requested = [model ? `Requested ${input.provider} model: ${model}.` : '', effort !== 'default' ? `Requested ${input.provider} effort: ${effort}.` : ''].filter(Boolean).join(' ');
+          throw new ProtocolError(`${error.message} ${requested} Check the selected model/account supports these settings, or choose default model and effort. brigd did not substitute the requested model. Native permissions still apply.`);
         }
         throw error;
       }

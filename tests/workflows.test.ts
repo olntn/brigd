@@ -57,9 +57,9 @@ function expectError(action: () => unknown, status = 409) {
 }
 function workers(): Worker[] {
   return [
-    store.createWorker(workerInput()),
-    store.createWorker(workerInput({ name: 'Builder', provider: 'claude', effort: 'max', communicationStyle: 'Show changes.' })),
-    store.createWorker(workerInput({ name: 'Reviewer', effort: 'xhigh', communicationStyle: 'Report verified checks.' })),
+    store.createWorker(workerInput({ model: 'gpt-5.3-codex' })),
+    store.createWorker(workerInput({ name: 'Builder', provider: 'claude', model: 'opus', effort: 'max', communicationStyle: 'Show changes.' })),
+    store.createWorker(workerInput({ name: 'Reviewer', model: 'custom-review-model', effort: 'xhigh', communicationStyle: 'Report verified checks.' })),
   ];
 }
 function checklist(crew = workers()) {
@@ -105,7 +105,7 @@ describe('optional ordered workflow definitions', () => {
     const run = engine.start(task.id);
     expect(run).toMatchObject({ steps: [], currentStepIndex: null, worker: null, provider: 'codex' });
     expect(calls[0]!.input).toEqual({ provider: 'codex', cwd: folder, instruction: task.instruction, instructions: [],
-      effort: 'default', communicationStyle: '', sessionId: undefined, answer: undefined, mock: true });
+      model: null, effort: 'default', communicationStyle: '', sessionId: undefined, answer: undefined, mock: true });
     calls[0]!.reject(new Error('Simple failure'));
     await flush();
     expect(store.activeRun(task.id)).toBeNull();
@@ -233,7 +233,7 @@ describe('durable sequential execution and frozen inputs', () => {
     const run = engine.start(task.id);
     const frozen = run.steps.map(step => ({ title: step.title, instruction: step.instruction, worker: step.worker }));
     for (const worker of crew) {
-      store.updateWorker(worker.id, { ...worker, name: 'Edited later', provider: 'claude', effort: 'low', communicationStyle: 'New style.' });
+      store.updateWorker(worker.id, { ...worker, name: 'Edited later', provider: 'claude', model: 'new-profile-model', effort: 'low', communicationStyle: 'New style.' });
       store.archiveWorker(worker.id);
     }
     store.updateInstruction(guidance.id, { body: 'Changed guidance', enabled: false });
@@ -241,10 +241,10 @@ describe('durable sequential execution and frozen inputs', () => {
     store.createInstruction({ title: 'New guidance', body: 'Only for future runs.', enabled: true });
     store.updateTask(task.id, taskInput({ title: 'Edited task', cwd: '/var/tmp', instruction: 'New overall task', steps: [] }));
     await settle(0, 'Frozen plan');
-    expect(calls[1]!.input).toMatchObject({ provider: 'claude', cwd: folder, instruction: task.instruction, effort: 'max', communicationStyle: crew[1]!.communicationStyle,
+    expect(calls[1]!.input).toMatchObject({ provider: 'claude', model: 'opus', cwd: folder, instruction: task.instruction, effort: 'max', communicationStyle: crew[1]!.communicationStyle,
       instructions: [{ id: guidance.id, title: guidance.title, body: guidance.body }], workflow: { title: 'Implement', instruction: 'Do only step 2.' } });
     await settle(1, 'Frozen implementation');
-    expect(calls[2]!.input).toMatchObject({ provider: 'codex', effort: 'xhigh', cwd: folder, instruction: task.instruction,
+    expect(calls[2]!.input).toMatchObject({ provider: 'codex', model: 'custom-review-model', effort: 'xhigh', cwd: folder, instruction: task.instruction,
       communicationStyle: crew[2]!.communicationStyle, instructions: run.instructions, workflow: { title: 'Verify', instruction: 'Do only step 3.' } });
     expect(store.getRun(run.id).steps.map(step => ({ title: step.title, instruction: step.instruction, worker: step.worker }))).toEqual(frozen);
     await settle(2);
@@ -252,6 +252,36 @@ describe('durable sequential execution and frozen inputs', () => {
     expect(detail.task.steps).toEqual([]);
     expect(detail.runs[0].steps.map((step: Run['steps'][number]) => ({ title: step.title, instruction: step.instruction, worker: step.worker }))).toEqual(frozen);
     expect(detail.runs[0].instructions).toEqual(run.instructions);
+  });
+
+  test('models stay frozen through profile edits, waiting, restart, resume, future steps and retry; new runs use current profiles', async () => {
+    const crew = workers();
+    const task = workflow({}, crew);
+    const run = engine.start(task.id);
+    const frozenModels = crew.map(worker => worker.model);
+    expect(run.steps.map(step => step.worker.model)).toEqual(frozenModels);
+    expect(calls[0]!.input.model).toBe(frozenModels[0]);
+    for (const [index, worker] of crew.entries()) store.updateWorker(worker.id, { ...worker, model: `changed-model-${index}` });
+    expect(store.getRun(run.id).steps.map(step => step.worker.model)).toEqual(frozenModels);
+    await settle(0, 'Choose a target', 'needs_input', 'original-model-session');
+    await reopen();
+    expect(store.getRun(run.id).steps.map(step => step.worker.model)).toEqual(frozenModels);
+    engine.resume(run.id, 'Continue.', false);
+    expect(calls[1]!.input).toMatchObject({ model: frozenModels[0], sessionId: 'original-model-session' });
+    await settle(1, 'Plan complete', 'completed', 'original-model-session');
+    expect(calls[2]!.input.model).toBe(frozenModels[1]);
+    calls[2]!.reject(new Error('Retry this step.'));
+    await flush();
+    engine.retry(run.id);
+    expect(calls[3]!.input.model).toBe(frozenModels[1]);
+    expect(calls[3]!.input.sessionId).toBeUndefined();
+    await settle(3, 'Implementation complete');
+    expect(calls[4]!.input.model).toBe(frozenModels[2]);
+    await settle(4, 'Review complete');
+    const next = engine.start(task.id);
+    expect(calls[5]!.input.model).toBe('changed-model-0');
+    expect(next.steps.map(step => step.worker.model)).toEqual(['changed-model-0', 'changed-model-1', 'changed-model-2']);
+    expect(store.getRun(run.id).steps.map(step => step.worker.model)).toEqual(frozenModels);
   });
 
   test('repeated starts and scheduler ticks cannot overlap an active workflow or launch a future step', async () => {
@@ -731,12 +761,13 @@ describe('handoff prompt and native argv safety', () => {
     expect(prompt).toContain(JSON.stringify({ title: 'Implement', instruction: 'Do only step 2.' }));
     expect(prompt).toContain('UNTRUSTED DATA');
     expect(prompt).toContain('native');
-    const capabilities = { schema: true, permissionPrompts: true };
+    const capabilities = { schema: true, permissionPrompts: true, model: true };
     const args = buildArgv(input, provider, capabilities);
     const ordinary = buildArgv({ ...input, workflow: undefined }, provider, capabilities);
     expect(args.slice(0, -1)).toEqual(ordinary.slice(0, -1));
     expect(args.at(-1)).toBe(prompt);
     expect(args.filter(arg => arg === prompt)).toHaveLength(1);
+    expect(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2)).toEqual(['--model', input.model!]);
     expect(args).not.toContain('--last');
     expect(args).not.toContain('--dangerously-skip-permissions');
     expect(args).not.toContain('--yolo');
@@ -744,7 +775,8 @@ describe('handoff prompt and native argv safety', () => {
       expect(args.slice(0, 6)).toEqual(['codex', 'exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="on-request"']);
       expect(args.slice(-3, -1)).toEqual(['--', 'exact-resume-session']);
     } else {
-      expect(args.slice(0, 8)).toEqual(['claude', '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'default', '--permission-prompts']);
+      expect(args.slice(0, 7)).toEqual(['claude', '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'default']);
+      expect(args).toContain('--permission-prompts');
       expect(args.slice(-3, -1)).toEqual(['--resume', 'exact-resume-session']);
     }
   });
@@ -778,6 +810,49 @@ describe('handoff prompt and native argv safety', () => {
 // Capture legacy bytes independently of the current Store so its migrations cannot
 // make a malformed compatibility fixture look self-consistent.
 describe('additive workflow migration', () => {
+  test('pre-model workflow snapshots normalize to null without rewriting history or borrowing current profile models', async () => {
+    const crew = workers();
+    const task = workflow({}, crew);
+    const first = store.startManual(task.id, true, BASE);
+    store.setSession(first.id, 'legacy-plan-session');
+    store.finish(first.id, 'completed', 'Historical plan', null, BASE + 1);
+    store.setSession(first.id, 'legacy-build-session');
+    const waiting = store.finish(first.id, 'waiting_input', 'Historical question', null, BASE + 2);
+    const legacyWorker = (worker: Run['steps'][number]['worker']) => {
+      const { model: _model, ...legacy } = worker;
+      return legacy;
+    };
+    const workerJSON = JSON.stringify(legacyWorker(waiting.worker!), null, 2);
+    const stepsJSON = JSON.stringify(waiting.steps.map(step => ({ ...step, worker: legacyWorker(step.worker) })), null, 2);
+    store.db.query('UPDATE runs SET worker_snapshot=?,steps_snapshot=? WHERE id=?').run(workerJSON, stepsJSON, waiting.id);
+    store.db.exec('ALTER TABLE workers DROP COLUMN model');
+    const tables = ['workers', 'tasks', 'runs', 'comments', 'instructions'];
+    const original = new Map(tables.map(table => [table, store.db.query(`SELECT * FROM ${table} ORDER BY rowid`).all() as Record<string, unknown>[]]));
+    for (let pass = 0; pass < 2; pass++) {
+      await reopen();
+      for (const table of tables) {
+        const rows = original.get(table)!;
+        if (!rows.length) continue;
+        const columns = Object.keys(rows[0]!).map(name => `"${name}"`).join(',');
+        expect(store.db.query(`SELECT ${columns} FROM ${table} ORDER BY rowid`).all()).toEqual(rows);
+      }
+      expect(store.listWorkers().every(worker => worker.model === null)).toBe(true);
+      expect(store.getRun(waiting.id).worker?.model).toBeNull();
+      expect(store.getRun(waiting.id).steps.map(step => step.worker.model)).toEqual([null, null, null]);
+      expect(store.db.query('SELECT worker_snapshot,steps_snapshot FROM runs WHERE id=?').get(waiting.id)).toEqual({ worker_snapshot: workerJSON, steps_snapshot: stepsJSON });
+      expect(store.db.query('PRAGMA foreign_key_check').all()).toEqual([]);
+    }
+    for (const worker of crew) store.updateWorker(worker.id, { ...worker, model: 'profile-after-migration' });
+    engine.resume(waiting.id, 'Resume with the historical CLI default.', false);
+    expect(calls[0]!.input).toMatchObject({ model: null, sessionId: 'legacy-build-session' });
+    await settle(0, 'Historical implementation', 'completed', 'legacy-build-session');
+    expect(calls[1]!.input.model).toBeNull();
+    expect(store.getRun(waiting.id).steps.map(step => step.worker.model)).toEqual([null, null, null]);
+    await settle(1);
+    const fresh = engine.start(task.id);
+    expect(fresh.steps.map(step => step.worker.model)).toEqual(crew.map(() => 'profile-after-migration'));
+  });
+
   test('two opens preserve all raw legacy rows, JSON bytes, comments, IDs, leases, and session continuity', () => {
     const path = join(folder, 'pre-workflows.sqlite');
     const legacy = new Database(path);
@@ -824,14 +899,15 @@ describe('additive workflow migration', () => {
           const columns = Object.keys(original[0]!).map(name => `"${name}"`).join(',');
           expect(migrated.db.query(`SELECT ${columns} FROM ${table} ORDER BY rowid`).all()).toEqual(original);
         }
-        expect(migrated.getTask('legacy-task')).toMatchObject({ steps: [], workerId: 'legacy-worker', status: 'waiting_input' });
-        expect(migrated.getRun('legacy-waiting')).toMatchObject({ steps: [], currentStepIndex: null, sessionId: 'waiting-session', turn: 3 });
+        expect(migrated.getWorker('legacy-worker').model).toBeNull();
+        expect(migrated.getTask('legacy-task')).toMatchObject({ steps: [], workerId: 'legacy-worker', worker: { model: null }, status: 'waiting_input' });
+        expect(migrated.getRun('legacy-waiting')).toMatchObject({ steps: [], currentStepIndex: null, worker: { model: null }, sessionId: 'waiting-session', turn: 3 });
         expect(migrated.detail('legacy-task').comments.every(comment => comment.stepIndex === null)).toBe(true);
         expect(migrated.db.query('PRAGMA foreign_key_check').all()).toEqual([]);
         if (pass === 0) { migrated.close(); migrated = undefined; }
       }
       const resumed = migrated!.resume('legacy-waiting', 'main');
-      expect(resumed).toMatchObject({ steps: [], currentStepIndex: null, sessionId: 'waiting-session', turn: 4, status: 'running' });
+      expect(resumed).toMatchObject({ steps: [], currentStepIndex: null, worker: { model: null }, sessionId: 'waiting-session', turn: 4, status: 'running' });
       expect(migrated!.db.query('SELECT worker_snapshot,instructions_snapshot FROM runs WHERE id=?').get(resumed.id)).toEqual({ worker_snapshot: rawWorker, instructions_snapshot: rawGuidance });
       const comment = migrated!.detail('legacy-task').comments.at(-1)!;
       expect(comment).toMatchObject({ kind: 'user', body: 'main', stepIndex: null });
@@ -928,6 +1004,10 @@ describe('persisted workflow corruption fails closed', () => {
       { name: 'out-of-bounds index', row: { current_step_index: 99 } },
       { name: 'missing active worker snapshot', row: { worker_snapshot: null } },
       { name: 'changed active provider snapshot', row: { worker_snapshot: JSON.stringify({ ...run.steps[1]!.worker, provider: 'codex' }) } },
+      { name: 'changed active model snapshot', row: { worker_snapshot: JSON.stringify({ ...run.steps[1]!.worker, model: 'different-model' }) } },
+      { name: 'malicious future model', steps: steps => { steps[2]!.worker.model = '--permission-bypass'; return steps; } },
+      { name: 'noncanonical future model', steps: steps => { steps[2]!.worker.model = ' model '; return steps; } },
+      { name: 'extra future worker key', steps: steps => { Object.assign(steps[2]!.worker, { extra: true }); return steps; } },
       { name: 'changed active effort snapshot', row: { worker_snapshot: JSON.stringify({ ...run.steps[1]!.worker, effort: 'low' }) } },
       { name: 'missing future worker effort', steps: steps => { delete (steps[2]!.worker as Partial<WorkerInput>).effort; return steps; } },
       { name: 'missing future communication style', steps: steps => { delete (steps[2]!.worker as Partial<WorkerInput>).communicationStyle; return steps; } },

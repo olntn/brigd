@@ -1,11 +1,12 @@
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import type { AppInfo, Run, RunStatus, RunStep, Task, TaskDetail, Worker } from '../src/lib/types';
+import { modelPresets, modelLabel } from '../src/lib/workers';
 
 const origin = { Origin: 'http://127.0.0.1:4318' };
 const unique = (title: string) => `${title} ${crypto.randomUUID().slice(0, 8)}`;
 const timestamp = Date.UTC(2026, 8, 4, 12);
 function worker(id: string, provider: 'codex' | 'claude' = 'codex'): Worker {
-  return { id, name: `Работник ${id}`, provider, effort: 'high', communicationStyle: `Стиль ${id}`, avatarUrl: null, archived: false, createdAt: timestamp, updatedAt: timestamp };
+  return { id, name: `Работник ${id}`, provider, model: modelPresets[provider][0].id, effort: 'high', communicationStyle: `Стиль ${id}`, avatarUrl: null, archived: false, createdAt: timestamp, updatedAt: timestamp };
 }
 const fixtureWorkers = [worker('аналитик'), worker('редактор', 'claude'), worker('проверяющий')];
 function fixtureDetail(status: RunStatus = 'waiting_input', session = true): TaskDetail {
@@ -53,7 +54,7 @@ async function openFixture(page: Page, detail: TaskDetail) {
 }
 async function createWorkers(request: APIRequestContext) {
   return Promise.all(['Исследователь', 'Исполнитель', 'Проверяющий'].map(async (name, index) => {
-    const response = await request.post('/api/workers', { headers: origin, data: { name: unique(name), provider: index === 1 ? 'claude' : 'codex', effort: 'high', communicationStyle: 'Сначала результат.', avatarUrl: null } });
+    const response = await request.post('/api/workers', { headers: origin, data: { name: unique(name), provider: index === 1 ? 'claude' : 'codex', model: modelPresets[index === 1 ? 'claude' : 'codex'][0].id, effort: 'high', communicationStyle: 'Сначала результат.', avatarUrl: null } });
     expect(response.ok()).toBe(true); return response.json() as Promise<Worker>;
   }));
 }
@@ -97,6 +98,7 @@ test('complex editor orders named workers, resumes exact middle session and free
   await editor.locator('[name="step-instruction-0"]').fill('Проверь исходные данные.');
   await editor.locator('[name="step-title-1"]').fill('Исполнение');
   await editor.locator('[name="step-worker-1"]').selectOption(workers[1].id);
+  await expect(editor.locator('.workflow-assignment').nth(1)).toContainText(modelLabel(workers[1].model));
   await editor.locator('[name="step-instruction-1"]').fill('[ask] Уточни нужный вариант.');
   await editor.getByRole('button', { name: 'Добавить этап', exact: true }).click();
   await editor.locator('[name="step-title-2"]').fill('Проверка');
@@ -128,7 +130,7 @@ test('complex editor orders named workers, resumes exact middle session and free
   const originalSession = original.steps[1].sessionId;
   expect(originalSession).toBeTruthy();
   const renamed = unique('Обновлённый работник');
-  await request.patch(`/api/workers/${workers[1].id}`, { headers: origin, data: { name: renamed, communicationStyle: 'Новый стиль.' } });
+  await request.patch(`/api/workers/${workers[1].id}`, { headers: origin, data: { name: renamed, model: 'custom-model-after-edit', communicationStyle: 'Новый стиль.' } });
   await drawer.getByRole('button', { name: 'Изменить', exact: true }).click();
   const edit = page.getByRole('dialog', { name: 'Редактировать задачу', exact: true });
   await expect(edit.getByText(/Изменения применятся к следующему запуску/)).toBeVisible();
@@ -138,6 +140,8 @@ test('complex editor orders named workers, resumes exact middle session and free
   // Wait for successful dismissal before typing into its otherwise inert textarea.
   await expect(edit).not.toBeVisible();
   await expect(drawer.locator('.resume-panel')).toContainText(workers[1].name);
+  await expect(checklist.locator('.workflow-step-worker').nth(1)).toContainText(modelLabel(workers[1].model));
+  await expect(checklist).not.toContainText('custom-model-after-edit');
   await drawer.getByLabel('Ответ агенту', { exact: true }).fill('Выбираю первый вариант.');
   await expect(drawer.getByLabel('Ответ агенту', { exact: true })).toHaveValue('Выбираю первый вариант.');
   await expect(drawer.getByRole('button', { name: 'Продолжить работу', exact: true })).toBeEnabled();
@@ -157,9 +161,13 @@ test('complex editor orders named workers, resumes exact middle session and free
   expect(final.runs[0].id).toBe(original.id);
   expect(final.runs[0].steps[1].sessionId).toBe(originalSession);
   expect(final.runs[0].steps[1].worker.name).toBe(workers[1].name);
+  expect(final.runs[0].steps[1].worker.model).toBe(workers[1].model);
   expect(final.runs[0].steps[2].instruction).toBe('Проверь итоговый результат.');
   await drawer.getByRole('tab', { name: /Запуски/ }).click();
   await expect(drawer.locator('.run-entry .workflow-checklist')).toContainText('3 из 3 этапов завершено');
+  await expect(drawer.locator('.run-entry .workflow-step-worker').nth(1)).toContainText(modelLabel(workers[1].model));
+  await drawer.locator('.run-entry .workflow-step-snapshot').nth(1).locator('summary').click();
+  await expect(drawer.locator('.run-entry .workflow-step-snapshot').nth(1)).toContainText(workers[1].model!);
   await drawer.locator('.run-entry .workflow-step-snapshot').nth(2).locator('summary').click();
   await expect(drawer.locator('.run-entry .workflow-step-instruction').nth(2)).toHaveText('Проверь итоговый результат.');
   await drawer.screenshot({ path: testInfo.outputPath('workflow-frozen-history.png') });
@@ -329,12 +337,14 @@ for (const theme of ['light', 'dark']) {
       const detail = fixtureDetail('blocked');
       detail.runs[0].steps[1].title = 'ДлинноеНазваниеЭтапа'.repeat(20);
       detail.runs[0].steps[1].worker.name = 'ДлинноеИмяРаботника'.repeat(20);
+      detail.runs[0].steps[1].worker.model = 'm'.repeat(128);
       detail.task.steps[1].title = detail.runs[0].steps[1].title;
-      await fixtures(page, detail); await page.setViewportSize(size);
+      await fixtures(page, detail, { workers: fixtureWorkers.map(profile => profile.id === detail.runs[0].steps[1].workerId ? { ...profile, model: 'm'.repeat(128) } : profile) }); await page.setViewportSize(size);
       await page.addInitScript(value => localStorage.setItem('brigd.theme', value), theme);
       const drawer = await openFixture(page, detail);
       await page.addStyleTag({ content: `html { font-size: ${size.font}px !important; }` });
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      await expect(drawer.locator('.current-workflow .worker-model-label').nth(1)).toContainText('m'.repeat(128));
       await noOverflow(page, drawer);
       // Frozen worker names also appear below the checklist in comment authors.
       // Verify that area directly rather than only the top of the drawer.
@@ -349,6 +359,12 @@ for (const theme of ['light', 'dark']) {
       await drawer.screenshot({ path: testInfo.outputPath(`workflow-${theme}-${size.width}-checklist.png`) });
       await drawer.getByRole('button', { name: 'Изменить', exact: true }).click();
       const editor = page.getByRole('dialog', { name: 'Редактировать задачу', exact: true });
+      await expect(editor.locator('.workflow-assignment .worker-model-label').nth(1)).toContainText('m'.repeat(128));
+      for (const avatar of await editor.locator('.workflow-assignment .worker-avatar').all()) {
+        const box = await avatar.boundingBox();
+        expect(box?.width).toBe(24);
+        expect(box?.height).toBe(24);
+      }
       await noOverflow(page, editor);
       await editor.getByRole('button', { name: 'Поднять этап 2', exact: true }).scrollIntoViewIfNeeded();
       await expect(editor.getByRole('button', { name: 'Поднять этап 2', exact: true })).toBeInViewport();

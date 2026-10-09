@@ -1,5 +1,5 @@
 import { buildArgv, capabilitiesFromHelp, runBoundedProcess } from '../server/adapter';
-import { effortOptions } from '../src/lib/workers';
+import { effortOptions, modelPresets } from '../src/lib/workers';
 import type { Provider } from '../src/lib/types';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -25,10 +25,11 @@ for (const provider of ['codex', 'claude'] as Provider[]) {
   const capabilities = provider === 'codex'
     ? capabilitiesFromHelp(provider, await probe([binary, 'exec', '--help']), await probe([binary, 'exec', 'resume', '--help']))
     : capabilitiesFromHelp(provider, await probe([binary, '--help']));
+  if (!capabilities.model) throw new Error(`${provider} does not advertise --model on new and resumed paths`);
   for (const effort of effortOptions[provider]) {
     if (effort !== 'default' && !capabilities.efforts?.includes(effort)) throw new Error(`${provider} does not advertise the configured effort ${effort}`);
-    for (const resumed of [false, true]) for (const taskBridge of [undefined, bridge]) {
-      const argv = buildArgv({ provider, cwd: process.cwd(), instruction: 'Never submitted: help probe only.', effort,
+    for (const model of [null, modelPresets[provider][0]!.id]) for (const resumed of [false, true]) for (const taskBridge of [undefined, bridge]) {
+      const argv = buildArgv({ provider, cwd: process.cwd(), instruction: 'Never submitted: help probe only.', model, effort,
         ...(taskBridge ? { taskBridge } : {}),
         ...(resumed ? { sessionId: '0199a213-81c0-7800-8aa1-bbab2a035a53', answer: 'Never submitted.' } : {}) }, binary, capabilities);
       // Drop every positional prompt/session argument in Codex. Claude's explicit
@@ -49,5 +50,5 @@ for (const provider of ['codex', 'claude'] as Provider[]) {
       if (!parsed || JSON.stringify(parsed).includes(bridge.env.BRIGD_TASK_CAPABILITY)) throw new Error('Invalid or credential-bearing MCP config');
     } finally { rmSync(home, { recursive: true, force: true }); }
   }
-  console.log(`PASS: ${provider} native new/resume flag parsing for ${effortOptions[provider].join(', ')} with and without task MCP${provider === 'codex' ? ', including TOML server/tool config deserialization' : ''}; no model calls.`);
+  console.log(`PASS: ${provider} native new/resume flag parsing for default/explicit model and ${effortOptions[provider].join(', ')} with and without task MCP${provider === 'codex' ? ', including TOML server/tool config deserialization' : ''}; no model calls.`);
 }

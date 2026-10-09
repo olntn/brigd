@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { AgentProtocol, ProtocolError, validateEnvelope } from '../server/protocol';
 import { AgentRunError, buildArgv, buildPrompt, capabilitiesFromHelp, runBoundedProcess, startAgent, type AgentInput } from '../server/adapter';
 import type { Envelope, Provider } from '../src/lib/types';
-import { effortOptions } from '../src/lib/workers';
+import { effortOptions, modelLabel, modelPresets, normalizeModel } from '../src/lib/workers';
 
 const sid = '0199a213-81c0-7800-8aa1-bbab2a035a53';
 const completed: Envelope = { status: 'completed', summary: 'Task finished.', questions: [] };
@@ -296,6 +296,99 @@ describe('effort launch failures (synthetic CLI, no model calls)', () => {
   });
 });
 
+describe('explicit model selection', () => {
+  const base = { cwd: process.cwd(), instruction: 'Read only.', provider: 'codex' as const };
+  const codexHelp = '--json --sandbox --config --strict-config --model <MODEL>', codexResume = '--json SESSION_ID --config --strict-config --model <MODEL>';
+  const claudeHelp = '--print --output-format stream-json --verbose --resume --permission-mode --model <model>\n--effort <level> low medium high xhigh max';
+  test('model support requires the exact flag on both Codex paths', () => {
+    expect(capabilitiesFromHelp('codex', codexHelp, codexResume).model).toBe(true);
+    expect(capabilitiesFromHelp('claude', claudeHelp).model).toBe(true);
+    expect(capabilitiesFromHelp('codex', codexHelp.replace('--model', '--model-unsupported'), codexResume).model).toBe(false);
+    expect(capabilitiesFromHelp('codex', codexHelp, codexResume.replace('--model', '--model-unsupported')).model).toBe(false);
+    expect(capabilitiesFromHelp('claude', claudeHelp.replace('--model', '--model-unsupported')).model).toBe(false);
+  });
+  test.each(['codex', 'claude'] as const)('%s null/default preserves legacy argv and every preset/custom ID is exact on new/resume', provider => {
+    const caps = provider === 'codex' ? capabilitiesFromHelp(provider, codexHelp, codexResume) : capabilitiesFromHelp(provider, claudeHelp);
+    expect(buildArgv({ ...base, provider, model: null }, provider, caps)).toEqual(buildArgv({ ...base, provider }, provider, caps));
+    expect(buildArgv({ ...base, provider, model: '' }, provider, caps)).not.toContain('--model');
+    for (const model of [...modelPresets[provider].map(preset => preset.id), 'org/new-model-v1', 'opus[1m]', 'us.anthropic.claude-opus-5-5-v1:0']) {
+      for (const sessionId of [undefined, sid]) {
+        const args = buildArgv({ ...base, provider, model, effort: 'high', sessionId }, provider, caps);
+        expect(args.filter(value => value === '--model')).toHaveLength(1);
+        expect(args[args.indexOf('--model') + 1]).toBe(model);
+        if (provider === 'codex') {
+          expect(args).toContain('model_reasoning_effort="high"');
+          expect(args[args.indexOf('--sandbox') + 1]).toBe('workspace-write');
+          expect(args).toContain('approval_policy="on-request"');
+          if (sessionId) expect(args.indexOf('--model')).toBeGreaterThan(args.indexOf('resume'));
+        } else {
+          expect(args[args.indexOf('--effort') + 1]).toBe('high');
+          expect(args[args.indexOf('--permission-mode') + 1]).toBe('default');
+          if (sessionId) expect(args[args.indexOf('--resume') + 1]).toBe(sid);
+        }
+      }
+    }
+  });
+  test('unadvertised model override fails closed instead of silently using default', () => {
+    for (const provider of ['codex', 'claude'] as const) {
+      expect(() => buildArgv({ ...base, provider, model: 'new-model' }, provider, { schema: false, permissionPrompts: false })).toThrow('cannot safely apply requested model');
+    }
+  });
+  test.each([0, false, {}, [], '--last', '-m', 'model id', 'model\n', '\tmodel', 'model\0id', 'model\x7fid', 'model\u2028', 'model\u0085', '$(bad)', 'model;bad', 'model"', 'x'.repeat(129)])('invalid model %# is rejected before mock or CLI invocation', async model => {
+    const input = { ...base, model, mock: true } as AgentInput;
+    expect(() => buildPrompt(input)).toThrow('ID модели');
+    await expect(startAgent(input, capture()).result).rejects.toThrow('ID модели');
+  });
+  test('normalization preserves valid native IDs and only trims outer spaces', () => {
+    for (const value of [undefined, null, '', '   ']) expect(normalizeModel(value)).toBeNull();
+    expect(normalizeModel('  gpt-6.1-sol  ')).toBe('gpt-6.1-sol');
+    expect(normalizeModel('x'.repeat(128))).toHaveLength(128);
+    expect(normalizeModel('arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-opus-5-5-v1:0')).toStartWith('arn:');
+  });
+  test('catalog labels are provider-specific and an empty catalog never resurrects presets', () => {
+    const catalog = [
+      { id: 'a', provider: 'codex' as const, modelId: 'shared-model', label: 'Codex name', createdAt: 1, updatedAt: 1 },
+      { id: 'b', provider: 'claude' as const, modelId: 'shared-model', label: 'Claude name', createdAt: 1, updatedAt: 1 },
+    ];
+    expect(modelLabel('shared-model', catalog, 'codex')).toBe('Codex name');
+    expect(modelLabel('shared-model', catalog, 'claude')).toBe('Claude name');
+    expect(modelLabel('gpt-6.1-sol', [], 'codex')).toBe('gpt-6.1-sol');
+    expect(modelLabel(null, [])).toBe('По умолчанию CLI');
+    expect(modelLabel('gpt-6.1-sol')).toBe('Sol 6.1');
+  });
+  test.each(['codex', 'claude'] as const)('%s missing model flag prevents task launch', async provider => {
+    const folder = mkdtempSync(join(tmpdir(), 'brigd-fake-model-cli-')), previousPath = process.env.PATH;
+    const marker = join(folder, 'launched');
+    const help = provider === 'codex' ? codexHelp + ' SESSION_ID' : claudeHelp;
+    writeFileSync(join(folder, provider), `#!${process.execPath}\nif(process.argv.includes('--help')) console.log(${JSON.stringify(help.replace('--model', '--model-unsupported'))}); else { await Bun.write(${JSON.stringify(marker)}, 'called'); process.exit(1); }`, { mode: 0o700 });
+    try {
+      process.env.PATH = folder + ':' + previousPath;
+      await expect(startAgent({ ...base, provider, cwd: folder, model: 'requested-model' }, capture()).result).rejects.toThrow('cannot safely apply requested model');
+      expect(await Bun.file(marker).exists()).toBe(false);
+    } finally { process.env.PATH = previousPath; rmSync(folder, { recursive: true, force: true }); }
+  });
+  test.each(['codex', 'claude'] as const)('%s rejection reports the requested model and effort without stderr or automatic fallback', async provider => {
+    const folder = mkdtempSync(join(tmpdir(), 'brigd-fake-model-error-')), previousPath = process.env.PATH;
+    const help = provider === 'codex' ? codexHelp + ' SESSION_ID' : claudeHelp;
+    const marker = join(folder, 'launch-count');
+    writeFileSync(join(folder, provider), `#!${process.execPath}\nif(process.argv.includes('--help')) console.log(${JSON.stringify(help)}); else { await Bun.write(${JSON.stringify(marker)}, 'one'); console.error('SECRET diagnostic'); process.exit(2); }`, { mode: 0o700 });
+    const callbacks = capture();
+    try {
+      process.env.PATH = folder + ':' + previousPath;
+      let error: unknown;
+      try { await startAgent({ ...base, provider, cwd: folder, model: 'account-specific-model', effort: 'high' }, callbacks).result; }
+      catch (caught) { error = caught; }
+      expect(error).toBeInstanceOf(ProtocolError);
+      expect((error as Error).message).toContain(`Requested ${provider} model: account-specific-model`);
+      expect((error as Error).message).toContain(`Requested ${provider} effort: high`);
+      expect((error as Error).message).toContain('brigd did not substitute');
+      expect((error as Error).message).not.toContain('SECRET');
+      expect(callbacks.comments.join('\n')).not.toContain('SECRET');
+      expect(await Bun.file(marker).text()).toBe('one');
+    } finally { process.env.PATH = previousPath; rmSync(folder, { recursive: true, force: true }); }
+  });
+});
+
 describe('bounded subprocess runner (synthetic processes, no real model calls)', () => {
   const synthetic = (source: string) => [process.execPath, '-e', source];
   test('uses literal argv and consumes both output streams', async () => {
@@ -397,6 +490,29 @@ describe('ephemeral task attachment CLI configuration', () => {
   const tools = ['list_attachments', 'read_attachment', 'view_attachment', 'add_comment', 'add_attachment'];
   const input: AgentInput = { provider: 'codex', cwd: '/workspace', instruction: 'Inspect inputs and publish a report.', taskBridge: bridge };
   const caps = { schema: true, permissionPrompts: true, taskMcp: true };
+  test.each(['codex', 'claude'] as const)('%s model and effort coexist with exact task tools and native safety on new/resume', provider => {
+    const model = modelPresets[provider][0]!.id;
+    for (const sessionId of [undefined, sid]) {
+      const supported = { ...caps, model: true, efforts: effortOptions[provider] };
+      const args = buildArgv({ ...input, provider, model, effort: 'high', sessionId }, provider, supported);
+      expect(args[args.indexOf('--model') + 1]).toBe(model);
+      if (provider === 'codex') {
+        expect(args).toContain('model_reasoning_effort="high"');
+        expect(args[args.indexOf('--sandbox') + 1]).toBe('workspace-write');
+        expect(args).toContain('approval_policy="on-request"');
+        for (const tool of tools) expect(args).toContain(`mcp_servers.${bridge.name}.tools.${tool}.approval_mode="approve"`);
+        if (sessionId) expect(args[args.indexOf('--') + 1]).toBe(sid);
+      } else {
+        expect(args[args.indexOf('--effort') + 1]).toBe('high');
+        expect(args[args.indexOf('--permission-mode') + 1]).toBe('default');
+        expect(args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--mcp-config'))).toEqual(tools.map(tool => `mcp__${bridge.name}__${tool}`));
+        if (sessionId) expect(args[args.indexOf('--resume') + 1]).toBe(sid);
+      }
+      expect(args.some(arg => arg.startsWith('--dangerously') || arg === '--full-auto' || arg === '--continue' || arg === '--last')).toBe(false);
+      expect(JSON.stringify(args)).not.toContain(bridge.env.BRIGD_TASK_CAPABILITY);
+      expect(JSON.stringify(args)).not.toContain(bridge.env.BRIGD_TASK_SOCKET);
+    }
+  });
   test.each([undefined, sid])('Codex exact per-tool config preserves workspace/on-request on new and resumed invocations', sessionId => {
     const args = buildArgv({ ...input, sessionId, ...(sessionId ? { answer: 'Proceed with those inputs.' } : {}) }, 'codex', caps);
     expect(args.slice(0, 6)).toEqual(['codex', 'exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="on-request"']);

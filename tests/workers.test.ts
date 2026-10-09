@@ -83,7 +83,7 @@ const workerInput = (patch: Partial<WorkerInput> = {}): WorkerInput => ({
   name: 'Ada', provider: 'codex', effort: 'default', communicationStyle: '', avatarUrl: null, ...patch,
 });
 const snapshot = (worker: Worker): WorkerSnapshot => ({
-  id: worker.id, name: worker.name, provider: worker.provider, effort: worker.effort,
+  id: worker.id, name: worker.name, provider: worker.provider, model: worker.model, effort: worker.effort,
   communicationStyle: worker.communicationStyle, avatarUrl: worker.avatarUrl,
 });
 function request(path: string, method = 'GET', value?: unknown, headers: Record<string, string> = {}) {
@@ -221,7 +221,7 @@ describe('worker profile CRUD and validation', () => {
     const response = await request('/api/workers', 'POST', { name: '  Ада  ', provider: 'codex' });
     expect(response.status).toBe(201);
     const created: Worker = await response.json();
-    expect(created).toMatchObject({ name: 'Ада', provider: 'codex', effort: 'default', communicationStyle: '', avatarUrl: null, archived: false });
+    expect(created).toMatchObject({ name: 'Ада', provider: 'codex', model: null, effort: 'default', communicationStyle: '', avatarUrl: null, archived: false });
     expect(created.id).toMatch(/^[a-zA-Z0-9-]+$/);
     expect(created.createdAt).toBeGreaterThan(0);
     expect(created.updatedAt).toBe(created.createdAt);
@@ -241,6 +241,56 @@ describe('worker profile CRUD and validation', () => {
     expect(await restored.json()).toMatchObject({ id: created.id, archived: false, effort: 'high', createdAt: created.createdAt });
     await reopen();
     expect(store.getWorker(created.id)).toMatchObject({ id: created.id, archived: false, name: 'Ada Lovelace' });
+  });
+
+  test.each(['codex', 'claude'] as const)('round-trips nullable, trimmed and custom %s model IDs without an allowlist', async provider => {
+    const worker = await createWorker({ provider, model: '  vendor/model-v2.1:latest+fast@region[1m]  ' });
+    expect(worker.model).toBe('vendor/model-v2.1:latest+fast@region[1m]');
+    expect((await (await request('/api/workers')).json())[0].model).toBe(worker.model);
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { name: 'Renamed' })).status).toBe(200);
+    expect(store.getWorker(worker.id).model).toBe(worker.model);
+    await reopen();
+    expect(store.getWorker(worker.id).model).toBe(worker.model);
+    for (const model of [null, '', '   ']) {
+      expect((await request(`/api/workers/${worker.id}`, 'PATCH', { model })).status).toBe(200);
+      expect(store.getWorker(worker.id).model).toBeNull();
+    }
+    const exact = 'm'.repeat(128);
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { model: exact })).status).toBe(200);
+    expect(store.getWorker(worker.id).model).toBe(exact);
+  });
+
+  test('HTTP provider changes reset an omitted model but accept an explicit new model', async () => {
+    const worker = await createWorker({ model: 'gpt-5.3-codex' });
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { provider: 'codex', effort: 'high' })).status).toBe(200);
+    expect(store.getWorker(worker.id).model).toBe('gpt-5.3-codex');
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { provider: 'claude' })).status).toBe(200);
+    expect(store.getWorker(worker.id).model).toBeNull();
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { model: 'sonnet' })).status).toBe(200);
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { provider: 'codex', model: 'future-codex' })).status).toBe(200);
+    expect(store.getWorker(worker.id)).toMatchObject({ provider: 'codex', model: 'future-codex' });
+  });
+
+  test('direct callers preserve omitted models on same-provider edits and reset on provider changes', () => {
+    const worker = store.createWorker(workerInput({ model: '  custom-model  ' }));
+    expect(worker.model).toBe('custom-model');
+    expect(store.updateWorker(worker.id, workerInput({ name: 'Changed' })).model).toBe('custom-model');
+    expect(store.updateWorker(worker.id, workerInput({ provider: 'claude' })).model).toBeNull();
+    expect(store.updateWorker(worker.id, workerInput({ provider: 'codex', model: 'new-model' })).model).toBe('new-model');
+    expect(store.updateWorker(worker.id, workerInput({ model: null })).model).toBeNull();
+    expect(store.createWorker(workerInput()).model).toBeNull();
+  });
+
+  test.each([0, false, {}, [], '-m', '--help', 'm'.repeat(129), 'two models', 'model\tname', 'model\nname',
+    '\tmodel', 'model\r', '\u0000model', 'model\u007f', 'model\u0085', 'model;echo', '$(id)', '`id`',
+    '"model"', "model'", 'model\\path', 'model=other', 'model💥'].map(model => ({ model })))('rejects invalid model $model atomically over HTTP and direct Store calls', async ({ model }) => {
+    const worker = await createWorker({ model: 'kept-model' });
+    expect((await request('/api/workers', 'POST', { ...workerInput(), model })).status).toBe(400);
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { model, name: 'Do not save' })).status).toBe(400);
+    const invalid = { ...workerInput(), model } as WorkerInput;
+    expectAppError(() => store.createWorker(invalid), 400);
+    expectAppError(() => store.updateWorker(worker.id, invalid), 400);
+    expect(store.listWorkers()).toEqual([worker]);
   });
 
   const supported: [Provider, Effort][] = [
@@ -312,19 +362,20 @@ describe('worker assignment and immutable run snapshots', () => {
   test('task providers follow current profiles; old sessions keep their original identity across edits, reassignment, archive, and restart', async () => {
     const originalAvatar = store.saveAvatar(PNG, 'image/png', BASE);
     const replacementAvatar = store.saveAvatar(JPEG, 'image/jpeg', BASE);
-    const original = store.createWorker(workerInput({ name: 'Original', effort: 'xhigh', communicationStyle: 'Use short summaries', avatarUrl: originalAvatar }), BASE);
+    const original = store.createWorker(workerInput({ name: 'Original', model: 'gpt-5.3-codex', effort: 'xhigh', communicationStyle: 'Use short summaries', avatarUrl: originalAvatar }), BASE);
     const task = store.createTask(taskInput({ workerId: original.id, provider: 'claude' }), BASE);
     expect(task).toMatchObject({ workerId: original.id, provider: 'codex', worker: original });
     const run = store.startManual(task.id, true, BASE + 1);
     const frozen = snapshot(original);
     expect(run).toMatchObject({ workerId: original.id, worker: frozen, provider: 'codex' });
-    expect(Object.keys(run.worker!).sort()).toEqual(['avatarUrl', 'communicationStyle', 'effort', 'id', 'name', 'provider']);
+    expect(frozen.model).toBe('gpt-5.3-codex');
+    expect(Object.keys(run.worker!).sort()).toEqual(['avatarUrl', 'communicationStyle', 'effort', 'id', 'model', 'name', 'provider']);
     store.setSession(run.id, 'original-persistent-session');
     store.finish(run.id, 'waiting_input', 'Choose branch', null, BASE + 2);
-    const edited = store.updateWorker(original.id, workerInput({ name: 'Edited', provider: 'claude', effort: 'max', communicationStyle: 'Long explanations', avatarUrl: replacementAvatar }), BASE + 3);
+    const edited = store.updateWorker(original.id, workerInput({ name: 'Edited', provider: 'claude', model: 'claude-opus-4-6', effort: 'max', communicationStyle: 'Long explanations', avatarUrl: replacementAvatar }), BASE + 3);
     expect(store.getTask(task.id)).toMatchObject({ worker: edited, provider: 'claude' });
     expect(store.getRun(run.id).worker).toEqual(frozen);
-    const other = store.createWorker(workerInput({ name: 'Other', provider: 'claude', effort: 'high' }), BASE + 4);
+    const other = store.createWorker(workerInput({ name: 'Other', provider: 'claude', model: 'sonnet', effort: 'high' }), BASE + 4);
     store.updateTask(task.id, taskInput({ workerId: other.id, instruction: 'Replacement task instruction' }), BASE + 5);
     store.archiveWorker(original.id, BASE + 6);
     store.archiveWorker(other.id, BASE + 7);
@@ -342,6 +393,37 @@ describe('worker assignment and immutable run snapshots', () => {
     expect(Buffer.from(store.getAvatar(originalAvatar.split('/').at(-1)!).data)).toEqual(PNG);
     expect(store.detail(task.id).runs.map(item => item.workerId)).toEqual([other.id, original.id]);
     expect(store.db.query('PRAGMA foreign_key_check').all()).toEqual([]);
+  });
+
+  test('a CLI-default snapshot stays null when the active worker receives a model later', () => {
+    const worker = store.createWorker(workerInput());
+    const task = store.createTask(taskInput({ workerId: worker.id }));
+    const run = store.startManual(task.id, true);
+    store.setSession(run.id, 'default-model-session');
+    store.updateWorker(worker.id, workerInput({ model: 'new-explicit-model' }));
+    expect(store.getRun(run.id).worker?.model).toBeNull();
+    store.finish(run.id, 'waiting_input', 'Continue?', null);
+    expect(store.resume(run.id, 'Yes').worker?.model).toBeNull();
+    store.finish(run.id, 'completed', 'Done', null);
+    expect(store.startManual(task.id, true).worker?.model).toBe('new-explicit-model');
+  });
+
+  test('malicious model data in a persisted simple snapshot cannot launch a resumed process', async () => {
+    const worker = store.createWorker(workerInput({ model: 'valid-model' }));
+    const task = store.createTask(taskInput({ workerId: worker.id }));
+    const run = store.startManual(task.id, true);
+    store.setSession(run.id, 'snapshot-model-session');
+    store.finish(run.id, 'waiting_input', 'Continue?', null);
+    const original = (store.db.query('SELECT worker_snapshot FROM runs WHERE id=?').get(run.id) as { worker_snapshot: string }).worker_snapshot;
+    try {
+      for (const model of ['--dangerous-option', 'model\n--dangerous-option', { value: 'model' }]) {
+        const corrupted = JSON.stringify({ ...JSON.parse(original), model });
+        store.db.query('UPDATE runs SET worker_snapshot=? WHERE id=?').run(corrupted, run.id);
+        expectAppError(() => engine.resume(run.id, 'Do not launch.', false), 409);
+        expect(calls).toHaveLength(0);
+        expect(store.db.query('SELECT worker_snapshot FROM runs WHERE id=?').get(run.id)).toEqual({ worker_snapshot: corrupted });
+      }
+    } finally { store.db.query('UPDATE runs SET worker_snapshot=? WHERE id=?').run(original, run.id); }
   });
 
   test('archives retain assigned tasks but reject new assignment; explicit detach and restore behave predictably', async () => {
@@ -381,12 +463,12 @@ describe('worker assignment and immutable run snapshots', () => {
   });
 
   test('scheduled snapshots capture current settings at each occurrence and still run for archived assigned workers', async () => {
-    const worker = store.createWorker(workerInput({ effort: 'low', communicationStyle: 'Initial style' }), BASE);
+    const worker = store.createWorker(workerInput({ model: 'gpt-5.3-codex', effort: 'low', communicationStyle: 'Initial style' }), BASE);
     const task = store.createTask(taskInput({ workerId: worker.id, schedule: 'interval', intervalMinutes: 5, firstRunAt: BASE }), BASE);
     const first = store.claimDue(true, BASE)[0]!;
     expect(first).toMatchObject({ taskId: task.id, workerId: worker.id, worker: snapshot(worker), trigger: 'schedule', scheduledFor: BASE });
     store.finish(first.id, 'completed', 'First complete', null, BASE + 1);
-    const edited = store.updateWorker(worker.id, workerInput({ provider: 'claude', effort: 'max', communicationStyle: 'Updated style' }), BASE + 2);
+    const edited = store.updateWorker(worker.id, workerInput({ provider: 'claude', model: 'opus', effort: 'max', communicationStyle: 'Updated style' }), BASE + 2);
     store.archiveWorker(worker.id, BASE + 3);
     await reopen();
     const second = store.claimDue(true, BASE + 5 * MINUTE)[0]!;
@@ -397,7 +479,7 @@ describe('worker assignment and immutable run snapshots', () => {
   });
 
   test('HTTP run and detail round-trip frozen worker data while task detail shows the current profile', async () => {
-    const worker = await createWorker({ communicationStyle: 'Keep it brief', effort: 'high' });
+    const worker = await createWorker({ model: 'gpt-5.3-codex', communicationStyle: 'Keep it brief', effort: 'high' });
     const task = await createTask({ workerId: worker.id });
     const response = await request(`/api/tasks/${task.id}/run`, 'POST', {});
     expect(response.status).toBe(201);
@@ -406,9 +488,9 @@ describe('worker assignment and immutable run snapshots', () => {
     expect(calls).toHaveLength(1);
     calls[0]!.resolve({ sessionId: 'synthetic-worker-session', envelope: { status: 'completed', summary: 'Done', questions: [] } });
     await flush();
-    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { name: 'New display name', effort: 'low' })).status).toBe(200);
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { name: 'New display name', model: 'gpt-5.4', effort: 'low' })).status).toBe(200);
     const detail = await (await request(`/api/tasks/${task.id}`)).json();
-    expect(detail.task.worker).toMatchObject({ name: 'New display name', effort: 'low' });
+    expect(detail.task.worker).toMatchObject({ name: 'New display name', model: 'gpt-5.4', effort: 'low' });
     expect(detail.runs[0]).toMatchObject({ id: run.id, status: 'completed', worker: snapshot(worker) });
     expect(detail.task.latestRun.worker).toEqual(snapshot(worker));
   });

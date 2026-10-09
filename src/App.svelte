@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import Icon from './lib/Icon.svelte';
   import Workers from './lib/Workers.svelte';
+  import ModelSettings from './lib/ModelSettings.svelte';
   import Instructions from './lib/Instructions.svelte';
   import AttachmentComposer from './lib/AttachmentComposer.svelte';
   import AttachmentList from './lib/AttachmentList.svelte';
@@ -10,9 +11,9 @@
   import WorkflowEditor from './lib/WorkflowEditor.svelte';
   import WorkflowChecklist from './lib/WorkflowChecklist.svelte';
   import { WORKFLOW_MIN_STEPS, WORKFLOW_MAX_STEPS, WORKFLOW_TEXT_LIMIT, WORKFLOW_BYTES_LIMIT } from './lib/workflows';
-  import { effortLabel } from './lib/workers';
+  import { effortLabel, modelLabel } from './lib/workers';
   import { applyTheme, readTheme, saveTheme, themeStorageKey, type Theme } from './lib/theme';
-  import type { AppInfo, Attachment, Comment, Provider, Run, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
+  import type { AppInfo, Attachment, Comment, ModelCatalogEntry, Provider, Run, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
 
   type Scope = 'all' | 'scheduled' | 'attention' | 'completed';
   type View = 'board' | 'list';
@@ -23,6 +24,12 @@
   let workersLoading = $state(true);
   let workersError = $state('');
   let workerSequence = 0;
+  let models = $state<ModelCatalogEntry[]>([]);
+  let modelsLoading = $state(true);
+  let modelsError = $state('');
+  let modelSequence = 0;
+  let modelReadSequence: number | null = null;
+  let modelMutationPending = $state(false);
   let loading = $state(true);
   let connectionError = $state('');
   let search = $state('');
@@ -165,6 +172,40 @@
     } finally { if (sequence === workerSequence) workersLoading = false; }
   }
 
+  async function loadModels() {
+    // Do not read midway through a write. Its result invalidates every older read.
+    if (modelMutationPending || modelReadSequence !== null) return;
+    const sequence = ++modelSequence;
+    modelReadSequence = sequence;
+    try {
+      const result = await api<ModelCatalogEntry[]>('/api/models');
+      if (sequence !== modelSequence) return;
+      models = result;
+      modelsError = '';
+    } catch (error) {
+      if (sequence === modelSequence) modelsError = error instanceof Error ? error.message : 'Не удалось загрузить модели';
+    } finally {
+      if (modelReadSequence === sequence) modelReadSequence = null;
+      if (sequence === modelSequence) modelsLoading = false;
+    }
+  }
+
+  function modelChanged(entry: ModelCatalogEntry) {
+    modelSequence++;
+    modelReadSequence = null;
+    models = models.some(item => item.id === entry.id) ? models.map(item => item.id === entry.id ? entry : item) : [...models, entry];
+    modelsError = '';
+    modelsLoading = false;
+  }
+
+  function modelDeleted(id: string) {
+    modelSequence++;
+    modelReadSequence = null;
+    models = models.filter(item => item.id !== id);
+    modelsError = '';
+    modelsLoading = false;
+  }
+
   function workerChanged(worker: Worker) {
     workerSequence++;
     workers = workers.some(item => item.id === worker.id) ? workers.map(item => item.id === worker.id ? worker : item) : [worker, ...workers];
@@ -191,7 +232,7 @@
   }
 
   async function refresh() {
-    await Promise.all([loadTasks(), loadWorkers(), selectedId ? loadDetail() : Promise.resolve()]);
+    await Promise.all([loadTasks(), loadWorkers(), loadModels(), selectedId ? loadDetail() : Promise.resolve()]);
   }
 
   async function loadInfo() {
@@ -221,9 +262,11 @@
   function openSettings() {
     settingsOpen = true;
     settings.showModal();
+    void loadModels();
   }
 
   function closeSettings() {
+    if (modelMutationPending) return;
     settings.close();
     settingsOpen = false;
   }
@@ -458,7 +501,7 @@
 {/snippet}
 
 {#snippet workerBadge(worker: Worker | WorkerSnapshot, compact = false)}
-  <span class="worker-identity" class:compact title={worker.name}><WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={compact ? 23 : 28} /><span>{worker.name}</span>{#if 'archived' in worker && worker.archived}<small>в архиве</small>{/if}</span>
+  <span class="worker-identity" class:compact title={worker.name}><WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={compact ? 23 : 28} /><span class="worker-identity-copy"><span>{worker.name}</span><small class="worker-model-label" title={worker.model ?? undefined}>{providerName(worker.provider)} · {modelLabel(worker.model, 'archived' in worker ? models : undefined, worker.provider)}</small></span>{#if 'archived' in worker && worker.archived}<small>в архиве</small>{/if}</span>
 {/snippet}
 
 {#snippet statusBadge(status: TaskStatus)}
@@ -471,6 +514,7 @@
     <p class="snapshot-help">Копия на момент старта. При продолжении этого запуска используются те же правила.</p>
     <section class="snapshot-instruction"><h4>Общее задание запуска</h4><p>{run.instruction}</p></section>
     <section class="snapshot-instruction"><h4>Рабочая папка запуска</h4><p>{run.cwd}</p></section>
+    {#if run.worker && !run.steps?.length}<section class="snapshot-instruction worker-run-settings"><h4>Настройки работника на момент запуска</h4><p>{run.worker.name} · {providerName(run.worker.provider)}<br />Модель: {modelLabel(run.worker.model)}{#if run.worker.model && modelLabel(run.worker.model) !== run.worker.model} ({run.worker.model}){/if}<br />Усилия: {effortLabel(run.worker.effort)}</p></section>{/if}
     {#if run.inputAttachments?.length}<section class="snapshot-instruction"><h4>Файлы на момент запуска</h4><AttachmentList attachments={run.inputAttachments} taskId={run.taskId} label="Файлы запуска" author={attachmentAuthor} /></section>{/if}
     {#each run.instructions ?? [] as instruction (instruction.id)}
       <section class="snapshot-instruction"><h4>{instruction.title}</h4><p>{instruction.body}</p></section>
@@ -525,7 +569,7 @@
       {#if page === 'instructions'}
         <Instructions {notify} />
       {:else if page === 'workers'}
-        <Workers {workers} loading={workersLoading} error={workersError} retry={() => { void loadWorkers(); }} onchange={workerChanged} {notify} />
+        <Workers {workers} loading={workersLoading} error={workersError} retry={() => { void loadWorkers(); }} onchange={workerChanged} {notify} {models} {modelsLoading} {modelsError} retryModels={() => { void loadModels(); }} />
       {:else}
       <section class="page-heading" aria-label="Управление задачами">{#if scope !== 'all'}<div><h1>{scopeTitles[scope]}<span>{filtered.length}</span></h1></div>{/if}<button class="button primary create-button" onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={17} />Новая задача</button></section>
 
@@ -574,7 +618,7 @@
     <header class="drawer-topbar"><span><Icon name="terminal" size={16} />Задача <span class="detail-ref">{selectedId?.slice(0, 8).toUpperCase()}</span></span><button class="icon-button" aria-label="Закрыть задачу" onclick={closeDrawer}><Icon name="close" size={20} /></button></header>
     {#if selectedTask}
       <div class="drawer-heading">
-        <div class="drawer-badges">{@render statusBadge(selectedTask.status)}{#if visibleWorker(selectedTask)}{@render workerBadge(visibleWorker(selectedTask)!)}{/if}{@render providerBadge(visibleProvider(selectedTask), true)}{#if selectedTask.latestRun?.mock}<span class="demo-badge">MOCK</span>{/if}{#if workflowSteps(selectedTask).length}<span class="workflow-type-badge">Сложная задача</span>{/if}</div>
+        <div class="drawer-badges">{@render statusBadge(selectedTask.status)}{#if visibleWorker(selectedTask)}{@render workerBadge(visibleWorker(selectedTask)!)}{:else}{@render providerBadge(visibleProvider(selectedTask), true)}{/if}{#if selectedTask.latestRun?.mock}<span class="demo-badge">MOCK</span>{/if}{#if workflowSteps(selectedTask).length}<span class="workflow-type-badge">Сложная задача</span>{/if}</div>
         <h2 id="detail-title">{selectedTask.title}</h2><p class="detail-created">Создано {dateTime(selectedTask.createdAt)}</p>
         <div class="detail-actions">
           {#if !taskIsOccupied(selectedTask)}
@@ -629,7 +673,7 @@
       {#if !detail}<div class="detail-loading"><Icon name="refresh" class="spin" size={19} />Загружаем историю…</div>{:else if detailTab === 'conversation'}
         <div id="conversation-panel" tabindex="0" role="tabpanel" aria-labelledby="conversation-tab" class="conversation-panel">{#each detail.comments as entry (entry.id)}<article class="comment-entry comment-{entry.kind}">{#if commentWorker(entry)}<WorkerAvatar name={commentWorker(entry)!.name} avatarUrl={commentWorker(entry)!.avatarUrl} />{:else}<span class="comment-avatar">{#if entry.kind === 'user'}Я{:else if entry.kind === 'system'}<Icon name="terminal" size={14} />{:else if entry.kind === 'question'}<Icon name="message" size={14} />{:else}<Icon name="spark" size={14} />{/if}</span>{/if}<div class="comment-main"><div class="comment-meta"><strong>{commentAuthor(entry)}</strong>{#if entry.stepIndex != null}<span class="comment-step-label">Этап {entry.stepIndex + 1}</span>{/if}<time datetime={new Date(entry.createdAt).toISOString()}>{dateTime(entry.createdAt)}</time></div>{#if entry.body}<p>{entry.body}</p>{/if}<AttachmentList attachments={entry.attachments ?? []} taskId={selectedTask.id} label="Вложения сообщения" author={attachmentAuthor} /></div></article>{:else}<div class="conversation-empty"><Icon name="message" size={25} /><strong>У каждой задачи своя история</strong><p>Здесь появятся сообщения агента, вопросы и результат.<br />Можно оставить заметку уже сейчас.</p></div>{/each}</div>
       {:else}
-        <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name="play" size={14} />Запуск {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{#if run.worker}{@render workerBadge(run.worker, true)}{/if}{@render providerBadge(run.provider, true)}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'schedule' ? 'По расписанию' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}{#if run.steps?.length}<WorkflowChecklist {run} />{/if}{@render instructionSnapshot(run)}<div class="run-details">Ход {run.turn}{#if run.worker}<span> · Усилия: {effortLabel(run.worker.effort)}</span>{/if}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
+        <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name="play" size={14} />Запуск {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{#if run.worker}{@render workerBadge(run.worker, true)}{:else}{@render providerBadge(run.provider, true)}{/if}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'schedule' ? 'По расписанию' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}{#if run.steps?.length}<WorkflowChecklist {run} />{/if}{@render instructionSnapshot(run)}<div class="run-details">Ход {run.turn}{#if run.worker}<span> · Усилия: {effortLabel(run.worker.effort)}</span>{/if}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
       {/if}
       {#if detail}<form class="comment-form" hidden={detailTab !== 'conversation'} onpaste={(event) => commentComposer?.handlePaste(event)} onsubmit={sendComment}><label for="task-comment">Заметка к задаче</label><div class="comment-input"><textarea id="task-comment" bind:value={comment} maxlength="8000" placeholder="Добавьте контекст или заметку…" rows="2" disabled={taskBusy}></textarea><button class="icon-button" type="submit" disabled={(!comment.trim() && !commentAttachmentCount) || taskBusy || commentUploading || commentAttachmentInvalid} aria-label="Сохранить заметку"><Icon name="send" size={17} /></button></div>{#key drawerContext}<AttachmentComposer bind:this={commentComposer} label="Файлы заметки" disabled={taskBusy} bind:count={commentAttachmentCount} bind:uploading={commentUploading} bind:invalid={commentAttachmentInvalid} />{/key}<p>Заметки сохраняются в истории. Для ответа агенту используйте «Продолжить работу».</p></form>{/if}
     {:else}<div class="detail-loading"><Icon name="refresh" class="spin" />Загружаем задачу…</div>{/if}
@@ -637,10 +681,11 @@
 </dialog>
 
 <dialog class="settings-dialog" bind:this={settings} aria-labelledby="settings-title" oncancel={(event) => { event.preventDefault(); closeSettings(); }} onclick={(event) => backdropClick(event, settings, closeSettings)}>
-  <header class="settings-header"><h2 id="settings-title">Настройки</h2><button class="icon-button" aria-label="Закрыть настройки" onclick={closeSettings}><Icon name="close" size={21} /></button></header>
+  <header class="settings-header"><h2 id="settings-title">Настройки</h2><button class="icon-button" aria-label="Закрыть настройки" disabled={modelMutationPending} onclick={closeSettings}><Icon name="close" size={21} /></button></header>
   <div class="settings-body">
     <label class="theme-setting"><Icon name="moon" size={22} /><span><strong>Тёмная тема</strong><small id="theme-description">Выбор сохраняется в этом браузере.</small></span><input type="checkbox" role="switch" checked={theme === 'dark'} onchange={(event) => toggleTheme(event.currentTarget.checked)} aria-label="Тёмная тема" aria-describedby="theme-description" /></label>
     {#if themeSaveError}<p class="settings-warning" role="status">Тема изменена, но браузер не разрешил сохранить выбор. После перезагрузки выберите тему снова.</p>{/if}
+    {#if settingsOpen}<ModelSettings {models} loading={modelsLoading} error={modelsError} retry={() => { void loadModels(); }} onchange={modelChanged} ondelete={modelDeleted} bind:busy={modelMutationPending} />{/if}
   </div>
 </dialog>
 
@@ -657,9 +702,9 @@
         <label class="form-field"><span>{formComplex ? 'Общая цель и ограничения' : 'Что нужно сделать?'} <span class="required">*</span></span><textarea bind:value={formInstruction} name="instruction" maxlength="16000" rows="4" placeholder="Опишите результат, важные детали и ограничения. Агент получит эту инструкцию при каждом запуске." required disabled={submitting}></textarea></label>
         {#key editorContext}<AttachmentComposer bind:this={formComposer} initial={formAttachments} label="Файлы задачи" disabled={submitting} bind:count={formAttachmentCount} bind:uploading={formUploading} bind:invalid={formAttachmentInvalid} />{/key}
         {#if !formComplex}
-        <label class="form-field"><span>Работник</span><select name="workerId" aria-label="Работник" bind:value={formWorkerId} disabled={submitting || workersLoading}><option value="">Без работника — выбрать модель вручную</option>{#each workers.filter(worker => !worker.archived || worker.id === formOriginalWorker?.id) as worker (worker.id)}<option value={worker.id}>{worker.name} · {providerName(worker.provider)}{worker.archived ? ' (в архиве)' : ''}</option>{/each}{#if formOriginalWorker && !workers.some(worker => worker.id === formOriginalWorker?.id)}<option value={formOriginalWorker.id}>{formOriginalWorker.name}{formOriginalWorker.archived ? ' (в архиве)' : ''}</option>{/if}</select><small>Профили можно создать и настроить в разделе «Работники».</small></label>
+        <label class="form-field"><span>Работник</span><select name="workerId" aria-label="Работник" bind:value={formWorkerId} disabled={submitting || workersLoading}><option value="">Без работника — выбрать провайдера вручную</option>{#each workers.filter(worker => !worker.archived || worker.id === formOriginalWorker?.id) as worker (worker.id)}<option value={worker.id}>{worker.name} · {providerName(worker.provider)}{worker.archived ? ' (в архиве)' : ''}</option>{/each}{#if formOriginalWorker && !workers.some(worker => worker.id === formOriginalWorker?.id)}<option value={formOriginalWorker.id}>{formOriginalWorker.name}{formOriginalWorker.archived ? ' (в архиве)' : ''}</option>{/if}</select><small>Профили можно создать и настроить в разделе «Работники».</small></label>
         {#if formWorker}
-          <div class="worker-assignment">{@render workerBadge(formWorker)}<div class="worker-assignment-meta">{@render providerBadge(formWorker.provider, true)}<span>Усилия: {effortLabel(formWorker.effort)}</span></div>{#if formWorker.communicationStyle}<p>{formWorker.communicationStyle}</p>{/if}</div>
+          <div class="worker-assignment">{@render workerBadge(formWorker)}<div class="worker-assignment-meta"><span>Усилия: {effortLabel(formWorker.effort)}</span></div>{#if formWorker.communicationStyle}<p>{formWorker.communicationStyle}</p>{/if}</div>
           {#if formWorker.archived}<p class="field-warning"><Icon name="inbox" size={15} />Работник в архиве. Можно сохранить это назначение, выбрать другого или убрать работника. Для новых назначений сначала восстановите профиль.</p>{/if}
         {:else}
         <fieldset class="provider-options"><legend>Агент</legend>{#each ['codex', 'claude'] as agent}<label class:selected={formProvider === agent}><input type="radio" bind:group={formProvider} value={agent} disabled={submitting} /><span class="agent-option-logo {agent}">{#if agent === 'codex'}<Icon name="code" size={20} />{:else}<span class="claude-mark">✳</span>{/if}</span><span><strong>{providerName(agent as Provider)}</strong><small>{info?.mode === 'mock' ? 'Демо-адаптер' : info?.providers.find(p => p.id === agent)?.available ? 'CLI доступен' : 'CLI не найден'}</small></span><span class="radio-indicator">{#if formProvider === agent}<span></span>{/if}</span></label>{/each}</fieldset>

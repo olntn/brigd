@@ -3,7 +3,7 @@
   import Icon from './Icon.svelte';
   import WorkerAvatar from './WorkerAvatar.svelte';
   import { WORKFLOW_MIN_STEPS, WORKFLOW_MAX_STEPS, WORKFLOW_STEP_TITLE_LIMIT, WORKFLOW_STEP_INSTRUCTION_LIMIT } from './workflows';
-  import { effortLabel } from './workers';
+  import { effortLabel, modelLabel } from './workers';
   import type { Worker } from './types';
 
   type DraftStep = { key: string; workerId: string; title: string; instruction: string };
@@ -59,7 +59,7 @@
         </div></div>
         <label class="form-field" for={`step-title-${step.key}`}><span>Название этапа <span class="required">*</span></span><input id={`step-title-${step.key}`} name={`step-title-${index}`} bind:value={step.title} maxlength={WORKFLOW_STEP_TITLE_LIMIT} required disabled={disabled} /></label>
         <label class="form-field"><span>Работник этапа <span class="required">*</span></span><select name={`step-worker-${index}`} bind:value={step.workerId} required disabled={disabled || loading}><option value="">Выберите работника</option>{#each workers.filter(item => canAssign(item, step)) as item (item.id)}<option value={item.id}>{item.name} · {item.provider === 'codex' ? 'Codex' : 'Claude Code'}{item.archived ? ' (в архиве)' : ''}</option>{/each}{#if step.workerId && !worker}<option value={step.workerId}>Недоступный работник</option>{/if}</select></label>
-        {#if worker}<div class="workflow-assignment"><WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={24} /><span>{worker.name} · Усилия: {effortLabel(worker.effort)}</span></div>{/if}
+        {#if worker}<div class="workflow-assignment"><WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={24} /><span class="workflow-assignment-copy">{worker.name}<small class="worker-model-label" title={worker.model ?? undefined}>{worker.provider === 'codex' ? 'Codex' : 'Claude Code'} · {modelLabel(worker.model)}</small><small>Усилия: {effortLabel(worker.effort)}</small></span></div>{/if}
         {#if worker?.archived}<p class="field-warning">Работник в архиве. Прежнее назначение можно сохранить; новые назначения требуют восстановления профиля.</p>{/if}
         {#if worker && unavailableProviders.includes(worker.provider)}<p class="field-warning">CLI этого работника не найден. До запуска установите и авторизуйте {worker.provider === 'codex' ? 'Codex' : 'Claude Code'}.</p>{/if}
         <label class="form-field"><span>Задание этапа <span class="required">*</span></span><textarea name={`step-instruction-${index}`} bind:value={step.instruction} maxlength={WORKFLOW_STEP_INSTRUCTION_LIMIT} rows="3" placeholder="Какой результат должен передать этот работник следующему?" required disabled={disabled}></textarea></label>

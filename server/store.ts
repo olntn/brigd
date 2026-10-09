@@ -1,13 +1,14 @@
 import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import type { Attachment, Comment, Instruction, InstructionInput, InstructionSnapshot, Run, RunStatus, RunStep, StepAttempt, Task, TaskDetail, TaskInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot } from '../src/lib/types';
+import type { Attachment, Comment, Instruction, InstructionInput, InstructionSnapshot, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunStatus, RunStep, StepAttempt, Task, TaskDetail, TaskInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot } from '../src/lib/types';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { validateInstruction, validateInstructionPatch, validateInstructionSnapshots } from './instructions';
 import { AppError } from './errors';
 import { validateWorkflowSteps } from './workflows';
 import { validateSessionId } from './protocol';
-import { effortOptions } from '../src/lib/workers';
+import { effortOptions, MODEL_CATALOG_PROVIDER_LIMIT, modelPresets, normalizeModel } from '../src/lib/workers';
+import { validateModel, validateModelPatch } from './models';
 import { attachmentIds, preparedAttachmentPayload, type PreparedAttachment } from './attachments';
 import { ATTACHMENT_MAX_COUNT, ATTACHMENT_TASK_MAX_COUNT, ATTACHMENT_TASK_MAX_BYTES, ATTACHMENT_STAGING_MAX_COUNT, ATTACHMENT_STAGING_MAX_BYTES, ATTACHMENT_TOTAL_MAX_BYTES, ATTACHMENT_STAGING_TTL_MS } from '../src/lib/attachments';
 export { AppError } from './errors';
@@ -26,20 +27,32 @@ function matchesFence(run: Run, fence?: RunFence): boolean {
   return current.turn === fence.turn && current.currentStepIndex === fence.currentStepIndex && current.attemptId === fence.attemptId;
 }
 function workerSnapshot(worker: Worker): WorkerSnapshot {
-  return { id: worker.id, name: worker.name, provider: worker.provider, effort: worker.effort,
+  return { id: worker.id, name: worker.name, provider: worker.provider, model: worker.model, effort: worker.effort,
     communicationStyle: worker.communicationStyle, avatarUrl: worker.avatarUrl };
+}
+function validatedModel(value: unknown): string | null {
+  try { return normalizeModel(value); }
+  catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректная модель'); }
 }
 function validWorkerSnapshot(value: unknown): value is WorkerSnapshot {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const worker = value as WorkerSnapshot;
-  if (Object.keys(worker).sort().join(',') !== 'avatarUrl,communicationStyle,effort,id,name,provider') return false;
+  const keys = Object.keys(worker).sort().join(',');
+  if (keys !== 'avatarUrl,communicationStyle,effort,id,name,provider' && keys !== 'avatarUrl,communicationStyle,effort,id,model,name,provider') return false;
   if (typeof worker.id !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(worker.id) || typeof worker.name !== 'string' || !worker.name.trim() || worker.name.length > 80 || worker.name.includes('\0')) return false;
   if (!['codex', 'claude'].includes(worker.provider) || !effortOptions[worker.provider]?.includes(worker.effort)) return false;
   if (typeof worker.communicationStyle !== 'string' || worker.communicationStyle.length > 4_000 || worker.communicationStyle.includes('\0')) return false;
-  return worker.avatarUrl === null || (typeof worker.avatarUrl === 'string' && /^\/api\/avatars\/[a-f0-9]{64}$/.test(worker.avatarUrl));
+  if (worker.avatarUrl !== null && (typeof worker.avatarUrl !== 'string' || !/^\/api\/avatars\/[a-f0-9]{64}$/.test(worker.avatarUrl))) return false;
+  try {
+    const model = normalizeModel(worker.model);
+    if ('model' in worker && worker.model !== model) return false;
+    // Upgrade legacy JSON in memory only; opening a database never rewrites snapshots.
+    worker.model = model;
+    return true;
+  } catch { return false; }
 }
 function sameWorker(left: WorkerSnapshot, right: WorkerSnapshot): boolean {
-  return left.id === right.id && left.name === right.name && left.provider === right.provider && left.effort === right.effort && left.communicationStyle === right.communicationStyle && left.avatarUrl === right.avatarUrl;
+  return left.id === right.id && left.name === right.name && left.provider === right.provider && left.model === right.model && left.effort === right.effort && left.communicationStyle === right.communicationStyle && left.avatarUrl === right.avatarUrl;
 }
 function beginAttempt(step: RunStep, turn: number, now: number) {
   const attempt: StepAttempt = { id: crypto.randomUUID(), number: step.attempts.length + 1, status: 'running', sessionId: null,
@@ -114,6 +127,7 @@ export class Store {
     // Additive migrations preserve existing task IDs, runs, comments, and CLI sessions.
     this.db.transaction(() => {
       for (const [table, column, definition] of [
+        ['workers', 'model', 'TEXT'],
         ['tasks', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_snapshot', 'TEXT'],
@@ -128,6 +142,28 @@ export class Store {
         if (!(this.db.query(`PRAGMA table_info(${table})`).all() as Row[]).some(row => row.name === column)) {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
         }
+      }
+    }).immediate();
+    // The explicit marker makes even an intentionally empty catalog persistent.
+    // Creation, seeding and the marker commit together, including concurrent opens.
+    this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS app_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS model_catalog (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+          provider TEXT NOT NULL CHECK(provider IN ('codex','claude')),
+          model_id TEXT NOT NULL COLLATE BINARY, label TEXT NOT NULL,
+          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+          UNIQUE(provider,model_id)
+        );
+      `);
+      if (!this.db.query('SELECT name FROM app_migrations WHERE name=?').get('model_catalog_v1')) {
+        const now = Date.now();
+        const insert = this.db.query('INSERT INTO model_catalog (id,provider,model_id,label,created_at,updated_at) VALUES (?,?,?,?,?,?)');
+        for (const provider of ['codex', 'claude'] as const) {
+          for (const model of modelPresets[provider]) insert.run(crypto.randomUUID(), provider, model.id, model.label, now, now);
+        }
+        this.db.query('INSERT INTO app_migrations (name,applied_at) VALUES (?,?)').run('model_catalog_v1', now);
       }
     }).immediate();
     this.db.transaction(() => {
@@ -191,6 +227,51 @@ export class Store {
     }).immediate();
   }
   releaseLease(owner: string) { this.db.query('DELETE FROM service_lease WHERE singleton=1 AND owner=?').run(owner); }
+  private mapModel(row: Row): ModelCatalogEntry {
+    return { id: row.id, provider: row.provider, modelId: row.model_id, label: row.label,
+      createdAt: row.created_at, updatedAt: row.updated_at };
+  }
+  listModels(): ModelCatalogEntry[] {
+    return (this.db.query('SELECT * FROM model_catalog ORDER BY seq').all() as Row[]).map(row => this.mapModel(row));
+  }
+  getModel(id: string): ModelCatalogEntry {
+    const row = this.db.query('SELECT * FROM model_catalog WHERE id=?').get(id) as Row | null;
+    if (!row) throw new AppError('Модель не найдена', 404);
+    return this.mapModel(row);
+  }
+  private checkModelCapacity(provider: Provider, modelId: string, excludingId: string | null = null) {
+    if (this.db.query('SELECT id FROM model_catalog WHERE provider=? AND model_id=? AND id IS NOT ?').get(provider, modelId, excludingId)) {
+      throw new AppError('Модель с таким ID уже есть у этого провайдера', 409);
+    }
+    const count = (this.db.query('SELECT count(*) AS n FROM model_catalog WHERE provider=? AND id IS NOT ?').get(provider, excludingId) as Row).n;
+    if (count >= MODEL_CATALOG_PROVIDER_LIMIT) throw new AppError(`Можно сохранить не больше ${MODEL_CATALOG_PROVIDER_LIMIT} моделей для каждого провайдера`, 409);
+  }
+  createModel(value: ModelCatalogInput, now = Date.now()): ModelCatalogEntry {
+    const input = validateModel(value);
+    return this.db.transaction(() => {
+      this.checkModelCapacity(input.provider, input.modelId);
+      const id = crypto.randomUUID();
+      this.db.query('INSERT INTO model_catalog (id,provider,model_id,label,created_at,updated_at) VALUES (?,?,?,?,?,?)')
+        .run(id, input.provider, input.modelId, input.label, now, now);
+      return this.getModel(id);
+    }).immediate();
+  }
+  updateModel(id: string, value: Partial<ModelCatalogInput>, now = Date.now()): ModelCatalogEntry {
+    return this.db.transaction(() => {
+      const current = this.getModel(id);
+      const input = { ...current, ...validateModelPatch(value) };
+      this.checkModelCapacity(input.provider, input.modelId, id);
+      this.db.query('UPDATE model_catalog SET provider=?,model_id=?,label=?,updated_at=? WHERE id=?')
+        .run(input.provider, input.modelId, input.label, now, id);
+      return this.getModel(id);
+    }).immediate();
+  }
+  deleteModel(id: string): void {
+    this.db.transaction(() => {
+      this.getModel(id);
+      this.db.query('DELETE FROM model_catalog WHERE id=?').run(id);
+    }).immediate();
+  }
   private mapInstruction(row: Row): Instruction {
     return { id: row.id, title: row.title, body: row.body, enabled: !!row.enabled,
       createdAt: row.created_at, updatedAt: row.updated_at };
@@ -236,7 +317,7 @@ export class Store {
     if (!result.changes) throw new AppError('Инструкция не найдена', 404);
   }
   private mapWorker(row: Row): Worker {
-    return { id: row.id, name: row.name, provider: row.provider, effort: row.effort,
+    return { id: row.id, name: row.name, provider: row.provider, model: validatedModel(row.model), effort: row.effort,
       communicationStyle: row.communication_style, avatarUrl: row.avatar_url, archived: !!row.archived,
       createdAt: row.created_at, updatedAt: row.updated_at };
   }
@@ -254,17 +335,19 @@ export class Store {
     if (!match || !this.db.query('SELECT id FROM avatars WHERE id=?').get(match[1]!)) throw new AppError('Выберите загруженный аватар');
   }
   createWorker(input: WorkerInput, now = Date.now()): Worker {
+    const model = validatedModel(input.model);
     this.assertAvatar(input.avatarUrl);
     const id = crypto.randomUUID();
-    this.db.query(`INSERT INTO workers (id,name,provider,effort,communication_style,avatar_url,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
-      .run(id, input.name, input.provider, input.effort, input.communicationStyle, input.avatarUrl, now, now);
+    this.db.query(`INSERT INTO workers (id,name,provider,model,effort,communication_style,avatar_url,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`)
+      .run(id, input.name, input.provider, model, input.effort, input.communicationStyle, input.avatarUrl, now, now);
     return this.getWorker(id);
   }
   updateWorker(id: string, input: WorkerInput & { archived?: boolean }, now = Date.now()): Worker {
     const current = this.getWorker(id);
+    const model = validatedModel(input.model === undefined && input.provider === current.provider ? current.model : input.model);
     this.assertAvatar(input.avatarUrl);
-    this.db.query('UPDATE workers SET name=?,provider=?,effort=?,communication_style=?,avatar_url=?,archived=?,updated_at=? WHERE id=?')
-      .run(input.name, input.provider, input.effort, input.communicationStyle, input.avatarUrl, +(input.archived ?? current.archived), now, id);
+    this.db.query('UPDATE workers SET name=?,provider=?,model=?,effort=?,communication_style=?,avatar_url=?,archived=?,updated_at=? WHERE id=?')
+      .run(input.name, input.provider, model, input.effort, input.communicationStyle, input.avatarUrl, +(input.archived ?? current.archived), now, id);
     return this.getWorker(id);
   }
   archiveWorker(id: string, now = Date.now()): Worker {
@@ -466,6 +549,8 @@ export class Store {
   private mapRun(row: Row): Run {
     const steps = JSON.parse(row.steps_snapshot ?? '[]') as RunStep[];
     const invalid = (): never => { throw new AppError('Повреждён снимок этапов. Запуск остановлен; восстановите базу из резервной копии.', 409); };
+    const worker = row.worker_snapshot ? JSON.parse(row.worker_snapshot) as unknown : null;
+    if (worker !== null && !validWorkerSnapshot(worker)) invalid();
     if (!Array.isArray(steps)) invalid();
     if (row.workflow_version === 0) {
       if (steps.length || row.current_step_index !== null) invalid();
@@ -489,7 +574,6 @@ export class Store {
         if (index < row.current_step_index && (step.status !== 'completed' || step.attempts.at(-1)?.status !== 'completed')) invalid();
         if (index > row.current_step_index && (step.attempts.length || step.status !== (row.cancel_requested ? 'cancelled' : 'pending') || step.sessionId !== null)) invalid();
         if (index === row.current_step_index) {
-          const worker = row.worker_snapshot ? JSON.parse(row.worker_snapshot) as unknown : null;
           if (!validWorkerSnapshot(worker) || !sameWorker(step.worker, worker)) invalid();
           const attempt = step.attempts.at(-1);
           if (!attempt || attempt.turn !== row.turn || attempt.sessionId !== row.session_id || step.sessionId !== row.session_id || step.workerId !== row.worker_id || step.worker.provider !== row.provider) invalid();
@@ -498,7 +582,7 @@ export class Store {
         }
       }
     } else invalid();
-    return { inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: row.worker_snapshot ? JSON.parse(row.worker_snapshot) as WorkerSnapshot : null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
+    return { inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
       trigger: row.trigger, scheduledFor: row.scheduled_for, status: row.status, sessionId: row.session_id,
       startedAt: row.started_at, updatedAt: row.updated_at, finishedAt: row.finished_at, summary: row.summary,
       error: row.error, turn: row.turn, mock: !!row.mock };

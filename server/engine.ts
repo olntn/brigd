@@ -75,7 +75,7 @@ export class Engine {
       }
       const input: AgentInput = { provider: run.provider, cwd: run.cwd, instruction: run.instruction, instructions: run.instructions,
         ...(run.inputAttachments?.length ? { attachments: run.inputAttachments } : {}), ...(launch.bridge ? { taskBridge: launch.bridge.agentConfig } : {}),
-        effort: run.worker?.effort ?? 'default', communicationStyle: run.worker?.communicationStyle ?? '',
+        model: run.worker?.model ?? null, effort: run.worker?.effort ?? 'default', communicationStyle: run.worker?.communicationStyle ?? '',
         sessionId: run.sessionId ?? undefined, answer, mock: run.mock, ...(workflow ? { workflow } : {}) };
       buildPrompt(input); // Enforce the complete UTF-8 bound before even a custom factory.
       if (!isCurrent() || launch.cancelRequested || this.closing) {
