@@ -167,21 +167,23 @@ describe('additive worker migration and legacy compatibility', () => {
     `);
     const originalTasks = legacy.query('SELECT * FROM tasks').all() as Record<string, unknown>[];
     const originalRuns = legacy.query('SELECT * FROM runs ORDER BY id').all() as Record<string, unknown>[];
-    const originalComments = legacy.query('SELECT * FROM comments ORDER BY seq').all();
+    const originalComments = legacy.query('SELECT * FROM comments ORDER BY seq').all() as Record<string, unknown>[];
     legacy.close();
     let migrated: Store | undefined;
     try {
       for (let pass = 0; pass < 2; pass++) {
         migrated = new Store(path);
         const tasks = (migrated.db.query('SELECT * FROM tasks').all() as Record<string, unknown>[])
-          .map(({ worker_id, ...row }) => { expect(worker_id).toBeNull(); return row; });
+          .map(row => { expect(row.worker_id).toBeNull(); return Object.fromEntries(Object.keys(originalTasks[0]!).map(key => [key, row[key]])); });
         const runs = (migrated.db.query('SELECT * FROM runs ORDER BY id').all() as Record<string, unknown>[])
-          .map(({ worker_id, worker_snapshot, instructions_snapshot, ...row }) => {
-            expect(worker_id).toBeNull(); expect(worker_snapshot).toBeNull(); expect(instructions_snapshot).toBe('[]'); return row;
+          .map(row => {
+            expect(row.worker_id).toBeNull(); expect(row.worker_snapshot).toBeNull(); expect(row.instructions_snapshot).toBe('[]');
+            return Object.fromEntries(Object.keys(originalRuns[0]!).map(key => [key, row[key]]));
           });
         expect(tasks).toEqual(originalTasks);
         expect(runs).toEqual(originalRuns);
-        expect(migrated.db.query('SELECT * FROM comments ORDER BY seq').all()).toEqual(originalComments);
+        expect((migrated.db.query('SELECT * FROM comments ORDER BY seq').all() as Record<string, unknown>[]).map(row =>
+          Object.fromEntries(Object.keys(originalComments[0] as Record<string, unknown>).map(key => [key, row[key]])))).toEqual(originalComments);
         expect(migrated.db.query('SELECT * FROM service_lease').get()).toEqual({ singleton: 1, pid: process.pid, owner: 'keep-this-owner', identity: null });
         expect(migrated.listWorkers()).toEqual([]);
         expect(migrated.detail('legacy-task').task).toMatchObject({

@@ -31,7 +31,37 @@ export interface InstructionSnapshot { id: string; title: string; body: string; 
 
 export type RunStatus = 'running' | 'cancelling' | 'waiting_input' | 'completed' | 'blocked' | 'failed' | 'interrupted' | 'cancelled';
 export type TaskStatus = 'ready' | RunStatus;
+export interface TaskStepInput {
+  workerId: string;
+  title: string;
+  instruction: string;
+}
+export type RunStepStatus = 'pending' | RunStatus;
+export interface StepAttempt {
+  id: string;
+  number: number;
+  status: RunStatus;
+  sessionId: string | null;
+  turn: number;
+  startedAt: number;
+  updatedAt: number;
+  finishedAt: number | null;
+  summary: string | null;
+  error: string | null;
+}
+export interface RunStep extends TaskStepInput {
+  worker: WorkerSnapshot;
+  status: RunStepStatus;
+  sessionId: string | null;
+  startedAt: number | null;
+  updatedAt: number;
+  finishedAt: number | null;
+  summary: string | null;
+  error: string | null;
+  attempts: StepAttempt[];
+}
 export interface TaskInput {
+  steps?: TaskStepInput[];
   workerId?: string | null;
   title: string;
   instruction: string;
@@ -43,6 +73,7 @@ export interface TaskInput {
   paused: boolean;
 }
 export interface Task extends TaskInput {
+  steps: TaskStepInput[];
   workerId: string | null;
   worker: Worker | null;
   id: string;
@@ -54,6 +85,8 @@ export interface Task extends TaskInput {
   runCount: number;
 }
 export interface Run {
+  steps: RunStep[];
+  currentStepIndex: number | null;
   instructions: InstructionSnapshot[];
   workerId: string | null;
   worker: WorkerSnapshot | null;
@@ -75,6 +108,7 @@ export interface Run {
   mock: boolean;
 }
 export interface Comment {
+  stepIndex: number | null;
   id: string;
   taskId: string;
   runId: string | null;

@@ -355,3 +355,65 @@ dialog::backdrop { background: var(--overlay); backdrop-filter: blur(2px); }
 .run-entry .run-instruction-snapshot { margin-top: 12px; }
 @media (max-width: 700px) { .current-run-instructions { margin-inline: 20px; } }
 @media (max-width: 400px) { .instruction-card { padding: 16px; }.instruction-card-actions .button { flex: 1 1 100%; }.instruction-editor .editor-footer .button, .instruction-delete-dialog .editor-footer .button { flex: 1 1 100%; } }
+
+/* Sequential workflows: static progress, accessible ordered editing and frozen history. */
+.task-type-switch { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); gap: 5px; padding: 4px; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; }
+.task-type-switch button { min-width: 0; padding: 11px; border: 1px solid transparent; border-radius: 5px; font-size: .92rem; color: var(--secondary); overflow-wrap: anywhere; }
+.task-type-switch button.selected { background: var(--surface); border-color: var(--line); color: var(--accent-text); box-shadow: var(--shadow); }
+.workflow-editor, .workflow-checklist { min-width: 0; }
+.workflow-section-heading { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px; }
+.workflow-section-heading > div { flex: 1 1 13rem; min-width: 0; }
+.workflow-section-heading h3 { margin: 0; font-size: 1rem; font-weight: 600; line-height: 1.6; overflow-wrap: anywhere; }
+.workflow-section-heading p, .workflow-help { margin: 8px 0 0; color: var(--muted); font-size: .85rem; line-height: 1.75; overflow-wrap: anywhere; }
+.workflow-count, .workflow-progress, .workflow-type-badge { padding: 4px 8px; color: var(--accent-text); background: var(--soft); border-radius: 5px; font-size: .77rem; line-height: 1.6; overflow-wrap: anywhere; }
+.workflow-draft-list, .workflow-run-list { padding: 0; margin: 16px 0; list-style: none; display: grid; gap: 12px; }
+.workflow-draft-step { border: 1px solid var(--line); border-radius: 8px; padding: 16px; background: var(--subtle); display: grid; gap: 14px; min-width: 0; }
+.workflow-draft-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+.workflow-draft-heading > strong { font-size: .85rem; font-weight: 600; color: var(--accent-text); }
+.workflow-reorder { display: flex; gap: 4px; }
+.workflow-reorder .icon-button { width: 34px; min-height: 34px; border: 1px solid var(--line); border-radius: 5px; font-size: 1.25rem; }
+.workflow-assignment, .workflow-step-worker { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: .85rem; color: var(--secondary); min-width: 0; }
+.workflow-assignment > span, .workflow-step-worker > span { min-width: 0; overflow-wrap: anywhere; }
+.workflow-step-worker small { color: var(--muted); font-size: .77rem; }
+.workflow-add { width: 100%; }
+.card-workflow-progress { display: flex; align-items: center; gap: 6px; margin-top: 13px; color: var(--accent-text); font-size: .77rem; line-height: 1.65; }
+.card-workflow-progress > span { min-width: 0; overflow-wrap: anywhere; }
+.list-task-name .list-workflow-progress { color: var(--accent-text); }
+.current-workflow, .workflow-template { margin: 0 26px 20px; }
+.workflow-template { padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--subtle); }
+.workflow-template summary { cursor: pointer; font-size: .85rem; font-weight: 500; color: var(--secondary); overflow-wrap: anywhere; }
+.workflow-template ol { padding-left: 22px; margin-bottom: 0; }
+.workflow-template li { margin-top: 12px; padding-left: 4px; font-size: .85rem; line-height: 1.75; overflow-wrap: anywhere; }
+.workflow-template li > span { display: block; color: var(--muted); }
+.workflow-template li p { white-space: pre-wrap; color: var(--secondary); margin: 5px 0 0; }
+.workflow-run-step { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 10px; border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 12px; min-width: 0; }
+.workflow-run-step.current-step { border-color: var(--focus); background: var(--subtle); }
+.workflow-step-mark { width: 26px; height: 26px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; font-size: .77rem; color: var(--muted); }
+.step-completed .workflow-step-mark { border-color: var(--success-line); color: var(--success); background: var(--success-bg); }
+.step-failed .workflow-step-status, .step-blocked .workflow-step-status { color: var(--error); }
+.step-waiting_input .workflow-step-status, .step-interrupted .workflow-step-status { color: var(--warning); }
+.workflow-step-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 10px; margin-bottom: 9px; }
+.workflow-step-heading h4 { flex: 1 1 8rem; margin: 0; font-size: .92rem; font-weight: 600; line-height: 1.6; overflow-wrap: anywhere; }
+.workflow-step-status { font-size: .77rem; line-height: 1.7; color: var(--muted); overflow-wrap: anywhere; }
+.workflow-step-summary, .workflow-step-error, .workflow-step-instruction { margin: 10px 0 0; font-size: .85rem; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--secondary); }
+.workflow-step-error { color: var(--error); }
+.workflow-step-snapshot { margin-top: 10px; min-width: 0; }
+.workflow-step-snapshot summary { font-size: .77rem; line-height: 1.8; color: var(--accent-text); cursor: pointer; overflow-wrap: anywhere; }
+.workflow-step-snapshot dl { font-size: .77rem; line-height: 1.8; margin: 14px 0; }
+.workflow-step-snapshot dl > div { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr)); gap: 2px 10px; margin-bottom: 8px; }
+.workflow-step-snapshot dt { color: var(--muted); }
+.workflow-step-snapshot dd { margin: 0; color: var(--secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
+.workflow-attempts { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 10px; }
+.workflow-attempts li { border-top: 1px solid var(--line); padding-top: 10px; font-size: .77rem; line-height: 1.8; overflow-wrap: anywhere; }
+.workflow-attempts strong { font-weight: 500; }
+.workflow-attempts p { margin: 5px 0 0; white-space: pre-wrap; }
+.workflow-session { color: var(--muted); }
+.workflow-retry-panel { margin: 0 26px 20px; padding: 17px; border: 1px solid var(--warning-line); border-radius: 8px; background: var(--warning-bg); color: var(--secondary); }
+.workflow-retry-panel h3 { display: flex; align-items: flex-start; gap: 8px; margin: 0; font-size: 1rem; line-height: 1.65; overflow-wrap: anywhere; color: var(--warning); }
+.workflow-retry-panel h3 svg { margin-top: 3px; }
+.workflow-retry-panel p { font-size: .85rem; line-height: 1.8; overflow-wrap: anywhere; }
+.workflow-retry-panel .button { margin-top: 8px; }
+.current-step-context { font-weight: 600; }
+.comment-step-label { color: var(--accent-text); font-size: .69rem; }
+@media (max-width: 700px) { .current-workflow, .workflow-template, .workflow-retry-panel { margin-inline: 20px; } }
+@media (max-width: 400px) { .workflow-draft-step { padding: 11px; }.workflow-run-step { padding: 10px; gap: 7px; grid-template-columns: 24px minmax(0, 1fr); }.workflow-step-mark { width: 23px; height: 23px; }.workflow-retry-panel { padding: 12px; }.task-drawer .detail-actions .button { flex-grow: 1; } }

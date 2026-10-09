@@ -4,6 +4,7 @@ import { Engine } from './engine';
 import { AppError } from './store';
 import { MAX_AVATAR_BYTES, validateAvatar } from './avatars';
 import { textField, validateTask, validateWorker } from './validation';
+import { TASK_JSON_LIMIT } from './workflows';
 import { INSTRUCTION_JSON_LIMIT, validateInstruction, validateInstructionPatch } from './instructions';
 
 export interface HttpOptions { port: number; dev?: boolean; root?: string; startedAt?: number; allowedHosts?: string[]; allowedOrigins?: string[]; defaultCwd?: string; }
@@ -89,14 +90,14 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         if (method === 'DELETE') { engine.store.deleteInstruction(id); return json({ ok: true }); }
       }
       if (path === '/api/tasks' && method === 'GET') return json(engine.store.listTasks());
-      if (path === '/api/tasks' && method === 'POST') return json(engine.store.createTask(await validateTask(await body(req))), 201);
+      if (path === '/api/tasks' && method === 'POST') return json(engine.store.createTask(await validateTask(await body(req, TASK_JSON_LIMIT))), 201);
       const taskMatch = path.match(/^\/api\/tasks\/([a-zA-Z0-9-]+)(?:\/(run|comments))?$/);
       if (taskMatch) {
         const [, id, action] = taskMatch;
         if (!action && method === 'GET') return json(engine.store.detail(id));
         if (!action && method === 'PATCH') {
           const current = engine.store.getTask(id);
-          const patch = await body(req);
+          const patch = await body(req, TASK_JSON_LIMIT);
           // Stopping a schedule must remain possible after its project mount disappears.
           if (Object.keys(patch).length === 1 && 'paused' in patch) {
             if (typeof patch.paused !== 'boolean') throw new AppError('paused должен быть boolean');
@@ -107,11 +108,11 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         if (action === 'run' && method === 'POST') { await body(req); return json(engine.start(id), 201); }
         if (action === 'comments' && method === 'POST') return json(engine.store.comment(id, null, 'user', textField((await body(req)).body, 'Комментарий', 8_000)), 201);
       }
-      const runMatch = path.match(/^\/api\/runs\/([a-zA-Z0-9-]+)\/(resume|cancel)$/);
+      const runMatch = path.match(/^\/api\/runs\/([a-zA-Z0-9-]+)\/(resume|cancel|retry)$/);
       if (runMatch && method === 'POST') {
         const [, id, action] = runMatch;
         const value = await body(req);
-        return json(action === 'cancel' ? engine.cancel(id) : engine.resume(id, textField(value.answer, 'Ответ', 8_000), value.acknowledgeInterruption === true));
+        return json(action === 'cancel' ? engine.cancel(id, value.acknowledgeInterruption === true) : action === 'retry' ? engine.retry(id, value.acknowledgeInterruption === true) : engine.resume(id, textField(value.answer, 'Ответ', 8_000), value.acknowledgeInterruption === true));
       }
       if (path.startsWith('/api/')) throw new AppError('Маршрут не найден', 404);
       if (method !== 'GET' && method !== 'HEAD') throw new AppError('Метод не поддерживается', 405);

@@ -173,7 +173,7 @@ test('frozen instructions survive edit, disable, delete and resuming the same ru
   await page.getByRole('article', { name: `Инструкция: ${second.title}`, exact: true }).getByRole('switch').click();
   await expect(page.getByRole('article', { name: `Инструкция: ${second.title}`, exact: true }).getByRole('switch')).toBeChecked();
 
-  await page.getByRole('button', { name: 'Все задачи', exact: true }).click();
+  await page.getByRole('button', { name: 'Задачи', exact: true }).click();
   await page.getByRole('button', { name: `Открыть задачу: ${title}`, exact: true }).click();
   await drawer.getByLabel('Ответ агенту', { exact: true }).fill('Начни с архитектуры.');
   await drawer.getByRole('button', { name: 'Продолжить работу', exact: true }).click();

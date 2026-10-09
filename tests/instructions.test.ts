@@ -364,7 +364,7 @@ describe('instruction HTTP boundary', () => {
     expect(store.listInstructions()).toEqual([]);
   });
 
-  test('instruction-only JSON cap accepts worst-case valid escaped bodies and rejects declared/streamed overflow', async () => {
+  test('instruction-specific JSON cap accepts worst-case valid escaped bodies and rejects declared/streamed overflow', async () => {
     const value = JSON.stringify(input({ title: 'я'.repeat(140), body: '\u0001'.repeat(16_000), enabled: false }));
     expect(Buffer.byteLength(value)).toBeGreaterThan(32_768);
     const exact = value + ' '.repeat(INSTRUCTION_JSON_LIMIT - Buffer.byteLength(value));
@@ -376,8 +376,9 @@ describe('instruction HTTP boundary', () => {
     expect((await send(exact + ' ', { 'content-length': '1' })).status).toBe(413);
     expect((await send(value, { 'content-length': String(INSTRUCTION_JSON_LIMIT + 1) })).status).toBe(413);
     expect(store.listInstructions()).toHaveLength(1);
-    const ordinary = JSON.stringify(taskInput()) + ' '.repeat(32_768);
-    expect((await handler(new Request(ORIGIN + '/api/tasks', { method: 'POST', headers: { origin: ORIGIN, 'content-type': 'application/json' }, body: ordinary }))).status).toBe(413);
+    const task = store.createTask(taskInput());
+    const ordinary = JSON.stringify({ body: 'A normal comment' }) + ' '.repeat(32_768);
+    expect((await handler(new Request(ORIGIN + `/api/tasks/${task.id}/comments`, { method: 'POST', headers: { origin: ORIGIN, 'content-type': 'application/json' }, body: ordinary }))).status).toBe(413);
     let cancelled = false;
     const stream = new ReadableStream<Uint8Array>({
       start(controller) { controller.enqueue(new Uint8Array(INSTRUCTION_JSON_LIMIT)); controller.enqueue(new Uint8Array(1)); },

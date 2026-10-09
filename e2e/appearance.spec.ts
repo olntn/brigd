@@ -11,19 +11,19 @@ const summary = token('Результат');
 const failure = token('Ошибка');
 const taskId = 'appearance-task';
 const run: Run = {
-  id: 'appearance-run', taskId, workerId: null, worker: null, instructions: [], provider: 'codex', cwd: '/workspace/project', instruction,
+  steps: [], currentStepIndex: null, id: 'appearance-run', taskId, workerId: null, worker: null, instructions: [], provider: 'codex', cwd: '/workspace/project', instruction,
   trigger: 'manual', scheduledFor: null, status: 'completed', sessionId: 'appearance-session',
   startedAt: timestamp, updatedAt: timestamp + 1_000, finishedAt: timestamp + 1_000,
   summary, error: null, turn: 1, mock: false,
 };
 const task: Task = {
-  id: taskId, workerId: null, worker: null, title: `Адаптивная-${'Задача'.repeat(18)}`, instruction, provider: 'codex',
+  steps: [], id: taskId, workerId: null, worker: null, title: `Адаптивная-${'Задача'.repeat(18)}`, instruction, provider: 'codex',
   cwd: `/workspace/${'длинный-путь-'.repeat(35)}`, schedule: 'manual', intervalMinutes: null,
   firstRunAt: null, paused: false, createdAt: timestamp, updatedAt: timestamp,
   nextRunAt: null, status: 'completed', latestRun: run, runCount: 2,
 };
 const comment: Comment = {
-  id: 'appearance-comment', taskId, runId: null, kind: 'user', body: note, createdAt: timestamp,
+  stepIndex: null, id: 'appearance-comment', taskId, runId: null, kind: 'user', body: note, createdAt: timestamp,
 };
 const detail: TaskDetail = {
   task,
@@ -60,7 +60,7 @@ async function fixtureApi(page: Page, mode: AppInfo['mode'] = 'mock', populated 
 async function openApp(page: Page) {
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Новая задача', exact: true })).toBeEnabled();
-  await expect(page.getByRole('heading', { name: /^Все задачи/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Задачи', exact: true })).toBeVisible();
 }
 
 async function openSettings(page: Page) {

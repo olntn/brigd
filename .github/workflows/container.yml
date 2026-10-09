@@ -97,6 +97,36 @@ jobs:
           assert detail['runs'][0]['instructions'] == [{key: instruction[key] for key in ('id', 'title', 'body')}]
           with open(os.environ['RUNNER_TEMP'] + '/trackt-smoke-id', 'w') as f:
               f.write(task['id'])
+          workers = [request('/api/workers', {
+              'name': name, 'provider': provider, 'effort': 'default',
+              'communicationStyle': 'Report verified results.', 'avatarUrl': None,
+          }) for name, provider in [('Designer', 'codex'), ('Implementer', 'claude'), ('Tester', 'codex')]]
+          workflow = request('/api/tasks', {
+              'title': 'Persistent sequential workflow', 'instruction': 'Mock workflow; no models.',
+              'provider': 'codex', 'cwd': '/workspace/projects/sample',
+              'schedule': 'manual', 'paused': False, 'intervalMinutes': None, 'firstRunAt': None,
+              'steps': [{'workerId': worker['id'], 'title': title, 'instruction': title + ' in mock mode.'}
+                        for worker, title in zip(workers, ['Design', 'Implement', 'Test'])],
+          })
+          request('/api/tasks/' + workflow['id'] + '/run', {})
+          deadline = time.monotonic() + 30
+          while time.monotonic() < deadline:
+              checklist = request('/api/tasks/' + workflow['id'])
+              if checklist['runs'][0]['status'] == 'completed':
+                  break
+              time.sleep(.25)
+          else:
+              raise AssertionError(checklist)
+          run = checklist['runs'][0]
+          assert run['mock'] is True and len(checklist['runs']) == 1
+          assert [step['status'] for step in run['steps']] == ['completed'] * 3
+          assert [step['worker']['name'] for step in run['steps']] == ['Designer', 'Implementer', 'Tester']
+          assert len({step['sessionId'] for step in run['steps']}) == 3
+          assert all(len(step['attempts']) == 1 and step['summary'] for step in run['steps'])
+          assert all(left['finishedAt'] <= right['startedAt'] for left, right in zip(run['steps'], run['steps'][1:]))
+          assert run['instructions'] == [{key: instruction[key] for key in ('id', 'title', 'body')}]
+          with open(os.environ['RUNNER_TEMP'] + '/brigd-workflow-smoke.json', 'w') as f:
+              json.dump({'taskId': workflow['id'], 'run': run}, f)
           PY
       - name: Recreate the container and verify database and CLI-home persistence
         run: |
@@ -118,6 +148,11 @@ jobs:
           with urllib.request.urlopen('http://127.0.0.1:4310/api/instructions', timeout=10) as r:
               instructions = json.load(r)
           assert len(instructions) == 1 and instructions[0]['id'] == snapshot[0]['id'] and instructions[0]['enabled']
+          with open(os.environ['RUNNER_TEMP'] + '/brigd-workflow-smoke.json') as f:
+              workflow = json.load(f)
+          with urllib.request.urlopen('http://127.0.0.1:4310/api/tasks/' + workflow['taskId'], timeout=10) as r:
+              checklist = json.load(r)
+          assert len(checklist['runs']) == 1 and checklist['runs'][0] == workflow['run']
           PY
       - name: Recover the same database after an abrupt container kill
         run: |
@@ -133,6 +168,11 @@ jobs:
           assert len(detail['runs']) == 1 and detail['runs'][0]['status'] == 'completed'
           assert detail['runs'][0]['mock'] is True and detail['comments']
           assert detail['runs'][0]['instructions'][0]['body'] == 'Report only verified checks.'
+          with open(os.environ['RUNNER_TEMP'] + '/brigd-workflow-smoke.json') as f:
+              workflow = json.load(f)
+          with urllib.request.urlopen('http://127.0.0.1:4310/api/tasks/' + workflow['taskId'], timeout=10) as r:
+              checklist = json.load(r)
+          assert len(checklist['runs']) == 1 and checklist['runs'][0] == workflow['run']
           PYCODE
       - name: Diagnostics on failure
         if: failure()

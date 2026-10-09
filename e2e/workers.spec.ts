@@ -83,7 +83,7 @@ test('profile avatar, task assignment and immutable identity through edit and re
   await expect(profile.locator('img')).toHaveAttribute('src', worker.avatarUrl!);
   await page.screenshot({ path: testInfo.outputPath('brigd-workers-with-avatar.png'), fullPage: true });
 
-  await page.getByRole('button', { name: 'Все задачи', exact: true }).click();
+  await page.getByRole('button', { name: 'Задачи', exact: true }).click();
   await page.getByRole('button', { name: 'Новая задача', exact: true }).click();
   const taskEditor = page.getByRole('dialog', { name: 'Новая задача', exact: true });
   await taskEditor.locator('[name="title"]').fill(title);
@@ -116,7 +116,7 @@ test('profile avatar, task assignment and immutable identity through edit and re
   await workerEditor.getByRole('button', { name: 'Убрать аватар', exact: true }).click();
   await workerEditor.getByRole('button', { name: 'Сохранить профиль', exact: true }).click();
   await expect(workerEditor).not.toBeVisible();
-  await page.getByRole('button', { name: 'Все задачи', exact: true }).click();
+  await page.getByRole('button', { name: 'Задачи', exact: true }).click();
   const taskCard = page.getByRole('button', { name: `Открыть задачу: ${title}`, exact: true });
   await expect(taskCard.locator('.worker-identity')).toContainText(name);
   await expect(taskCard.locator('.worker-identity')).not.toContainText(renamed);
@@ -162,7 +162,7 @@ test('archive preserves assigned scheduled task, disallows new assignment, and r
   expect(saved.task.workerId).toBe(worker.id);
   expect(saved.task.paused).toBe(false);
   expect(saved.task.nextRunAt).toBe(task.nextRunAt);
-  await page.getByRole('button', { name: 'Все задачи', exact: true }).click();
+  await page.getByRole('button', { name: 'Задачи', exact: true }).click();
   await page.getByRole('button', { name: `Открыть задачу: ${title}`, exact: true }).click();
   const drawer = page.getByRole('dialog', { name: title, exact: true });
   await drawer.getByRole('button', { name: 'Изменить', exact: true }).click();

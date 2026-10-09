@@ -6,6 +6,7 @@ import type { AgentCallbacks, AgentInput, AgentOutcome } from '../server/adapter
 import { Engine, type AgentFactory } from '../server/engine';
 import { createHandler } from '../server/http';
 import { Store } from '../server/store';
+import { TASK_JSON_LIMIT } from '../server/workflows';
 import type { Run, Task, TaskDetail, TaskInput } from '../src/lib/types';
 
 const PORT = 4310;
@@ -188,14 +189,14 @@ describe('bounded JSON and task validation', () => {
   });
 
   test('rejects an oversized declared length before validation', async () => {
-    expect((await request('/api/tasks', 'POST', valid(), { 'content-length': '32769' })).status).toBe(413);
+    expect((await request('/api/tasks', 'POST', valid(), { 'content-length': String(TASK_JSON_LIMIT + 1) })).status).toBe(413);
     expect(store.listTasks()).toEqual([]);
   });
 
   test.each([undefined, '1'])('counts actual bytes with absent or dishonest content-length %s', async contentLength => {
     const headers: Record<string, string> = { origin: ORIGIN, 'content-type': 'application/json' };
     if (contentLength !== undefined) headers['content-length'] = contentLength;
-    const body = JSON.stringify({ ...valid(), instruction: 'é'.repeat(17_000) });
+    const body = JSON.stringify(valid()) + ' '.repeat(TASK_JSON_LIMIT);
     const response = await handler(new Request(ORIGIN + '/api/tasks', { method: 'POST', headers, body }));
     expect(response.status).toBe(413);
     expect(store.listTasks()).toEqual([]);
@@ -204,7 +205,7 @@ describe('bounded JSON and task validation', () => {
   test('streamed bodies are bounded across chunks and cancelled once the limit is crossed', async () => {
     let cancelled = false;
     const stream = new ReadableStream<Uint8Array>({
-      start(controller) { controller.enqueue(new Uint8Array(16_384)); controller.enqueue(new Uint8Array(16_384)); controller.enqueue(new Uint8Array(1)); },
+      start(controller) { controller.enqueue(new Uint8Array(Math.floor(TASK_JSON_LIMIT / 2))); controller.enqueue(new Uint8Array(Math.ceil(TASK_JSON_LIMIT / 2))); controller.enqueue(new Uint8Array(1)); },
       cancel() { cancelled = true; },
     });
     const response = await handler(new Request(ORIGIN + '/api/tasks', {
@@ -214,10 +215,10 @@ describe('bounded JSON and task validation', () => {
     expect(cancelled).toBe(true);
   });
 
-  test('exactly the 32768-byte body boundary is accepted with harmless JSON whitespace', async () => {
+  test('exactly the task-specific byte boundary is accepted with harmless JSON whitespace', async () => {
     const value = JSON.stringify(valid());
-    const body = value + ' '.repeat(32_768 - Buffer.byteLength(value));
-    expect(Buffer.byteLength(body)).toBe(32_768);
+    const body = value + ' '.repeat(TASK_JSON_LIMIT - Buffer.byteLength(value));
+    expect(Buffer.byteLength(body)).toBe(TASK_JSON_LIMIT);
     const response = await handler(new Request(ORIGIN + '/api/tasks', { method: 'POST', headers: { origin: ORIGIN, 'content-type': 'application/json' }, body }));
     expect(response.status).toBe(201);
   });
