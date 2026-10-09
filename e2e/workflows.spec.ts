@@ -58,8 +58,17 @@ async function createWorkers(request: APIRequestContext) {
   }));
 }
 async function noOverflow(page: Page, dialog: Locator) {
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBe(true);
-  expect(await dialog.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+  const documentSize = await page.evaluate(() => ({ width: document.documentElement.clientWidth, contentWidth: document.documentElement.scrollWidth }));
+  expect(documentSize.contentWidth, 'document content must fit the viewport').toBeLessThanOrEqual(documentSize.width + 1);
+  const size = await dialog.evaluate(node => {
+    const bounds = node.getBoundingClientRect();
+    const overflow = [...node.querySelectorAll<HTMLElement>('*')].filter(element => {
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && (rect.right > bounds.right + 1 || rect.left < bounds.left - 1);
+    }).slice(0, 8).map(element => `${element.tagName.toLowerCase()}.${element.className}`);
+    return { width: node.clientWidth, contentWidth: node.scrollWidth, overflow };
+  });
+  expect(size.contentWidth, `dialog contents must fit; overflowing descendants: ${size.overflow.join(', ')}`).toBeLessThanOrEqual(size.width + 1);
 }
 
 test.beforeEach(async ({ request }) => {
@@ -125,8 +134,13 @@ test('complex editor orders named workers, resumes exact middle session and free
   await expect(edit.getByText(/Изменения применятся к следующему запуску/)).toBeVisible();
   await edit.locator('[name="step-instruction-2"]').fill('Изменённое задание для будущего запуска.');
   await edit.getByRole('button', { name: 'Сохранить изменения', exact: true }).click();
+  // The underlying drawer is visible while the nested editor is still modal.
+  // Wait for successful dismissal before typing into its otherwise inert textarea.
+  await expect(edit).not.toBeVisible();
   await expect(drawer.locator('.resume-panel')).toContainText(workers[1].name);
   await drawer.getByLabel('Ответ агенту', { exact: true }).fill('Выбираю первый вариант.');
+  await expect(drawer.getByLabel('Ответ агенту', { exact: true })).toHaveValue('Выбираю первый вариант.');
+  await expect(drawer.getByRole('button', { name: 'Продолжить работу', exact: true })).toBeEnabled();
   let attempts = 0;
   await page.route(`**/api/runs/${original.id}/resume`, async route => {
     if (++attempts === 1) await route.fulfill({ status: 503, json: { error: 'Временная ошибка отправки ответа.' } });
@@ -322,6 +336,12 @@ for (const theme of ['light', 'dark']) {
       await page.addStyleTag({ content: `html { font-size: ${size.font}px !important; }` });
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await noOverflow(page, drawer);
+      // Frozen worker names also appear below the checklist in comment authors.
+      // Verify that area directly rather than only the top of the drawer.
+      const author = drawer.locator('.comment-question .comment-meta strong');
+      await author.scrollIntoViewIfNeeded();
+      await expect(author).toBeInViewport();
+      await noOverflow(page, drawer);
       await drawer.locator('.current-workflow .workflow-step-snapshot').nth(1).locator('summary').click();
       await noOverflow(page, drawer);
       await drawer.getByRole('button', { name: 'Повторить текущий этап', exact: true }).scrollIntoViewIfNeeded();
@@ -341,3 +361,33 @@ for (const theme of ['light', 'dark']) {
     });
   }
 }
+
+
+test('waiting workflow wraps valid unbroken step and worker names on narrow mobile at 200% text', async ({ page }, testInfo) => {
+  const detail = fixtureDetail('waiting_input');
+  const longTitle = 'Э'.repeat(140);
+  const longName = 'Р'.repeat(80);
+  detail.runs[0].steps[1].title = longTitle;
+  detail.runs[0].steps[1].worker.name = longName;
+  detail.task.steps[1].title = longTitle;
+  await fixtures(page, detail);
+  await page.setViewportSize({ width: 320, height: 640 });
+  await page.addInitScript(() => localStorage.setItem('brigd.theme', 'dark'));
+  const drawer = await openFixture(page, detail);
+  await page.addStyleTag({ content: 'html { font-size: 26px !important; }' });
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await noOverflow(page, drawer);
+  const context = drawer.locator('.resume-panel .current-step-context');
+  await expect(context).toContainText(longTitle);
+  await expect(context).toContainText(longName);
+  await context.scrollIntoViewIfNeeded();
+  await expect(context).toBeInViewport();
+  await noOverflow(page, drawer);
+  await drawer.getByLabel('Ответ агенту', { exact: true }).fill('Продолжай с первым вариантом.');
+  const resume = drawer.getByRole('button', { name: 'Продолжить работу', exact: true });
+  await expect(resume).toBeEnabled();
+  await resume.scrollIntoViewIfNeeded();
+  await expect(resume).toBeInViewport();
+  await noOverflow(page, drawer);
+  await drawer.screenshot({ path: testInfo.outputPath('workflow-waiting-dark-320-26.png') });
+});
