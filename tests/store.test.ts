@@ -25,6 +25,21 @@ beforeEach(() => {
 });
 afterEach(() => { store.close(); rmSync(folder, { recursive: true, force: true }); });
 
+test('worker logs survive reopening in insertion order and cannot refer to another task run', () => {
+  const task = store.createTask(input(), BASE);
+  const run = store.startManual(task.id, true, BASE);
+  const before = store.detail(task.id).comments;
+  const first = store.log(task.id, run.id, { kind: 'command', summary: 'Run tests', details: ['bun test', 'tests/engine.test.ts'] }, BASE + 2);
+  const second = store.log(task.id, run.id, { kind: 'file', summary: 'Saved source', details: ['src/App.svelte'] }, BASE + 1);
+  const another = store.createTask(input(), BASE);
+  expectAppError(() => store.log(another.id, run.id, { kind: 'command', summary: 'Wrong task', details: [] }), 409);
+  store.close();
+  store = new Store(join(folder, 'trackt.sqlite'));
+  expect(store.detail(task.id).logs).toEqual([first, second]);
+  expect(store.detail(task.id).comments).toEqual(before);
+  expect(store.detail(another.id).logs).toEqual([]);
+});
+
 describe('recurrence and durable scheduling', () => {
   test.each([
     [BASE, 5, BASE, BASE, BASE + 5 * MINUTE],

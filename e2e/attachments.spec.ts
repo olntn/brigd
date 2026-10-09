@@ -238,7 +238,7 @@ test('attachment-only note survives a failed save, binds once, and is visible af
   const [staged] = await selectFiles(page, region, [file]);
   await drawer.getByLabel('Заметка к задаче', { exact: true }).fill('Черновик для переключения вкладок.');
   await drawer.getByRole('tab', { name: /Запуски/ }).click();
-  await drawer.getByRole('tab', { name: /Обсуждение/ }).click();
+  await drawer.getByRole('tab', { name: /Комментарии/ }).click();
   await expect(attachmentName(region, staged.name)).toBeVisible();
   await expect(drawer.getByLabel('Заметка к задаче', { exact: true })).toHaveValue('Черновик для переключения вкладок.');
   await drawer.getByLabel('Заметка к задаче', { exact: true }).fill('');

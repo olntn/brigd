@@ -10,6 +10,8 @@
   import WorkerAvatar from './lib/WorkerAvatar.svelte';
   import WorkflowEditor from './lib/WorkflowEditor.svelte';
   import WorkflowChecklist from './lib/WorkflowChecklist.svelte';
+  import TaskLogs from './lib/TaskLogs.svelte';
+  import { taskActivity } from './lib/activity';
   import { WORKFLOW_MIN_STEPS, WORKFLOW_MAX_STEPS, WORKFLOW_TEXT_LIMIT, WORKFLOW_BYTES_LIMIT } from './lib/workflows';
   import { effortLabel, modelLabel } from './lib/workers';
   import { followupTargets, followupFingerprint, followupStage, runWorkflowSteps, taskHasCompletedRun, resolveFollowupTarget, followupSessionKey, type FollowupTarget } from './lib/followups';
@@ -41,7 +43,8 @@
   let selectedId = $state<string | null>(null);
   let detail = $state<TaskDetail | null>(null);
   let detailError = $state('');
-  let detailTab = $state<'conversation' | 'history'>('conversation');
+  let detailTab = $state<'conversation' | 'logs' | 'history'>('conversation');
+  let activity = $derived(taskActivity(detail));
   let comment = $state('');
   let followupTargetKey = $state('');
   let followupRecipientSession = $state('');
@@ -569,7 +572,9 @@
   function tabKey(event: KeyboardEvent) {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
-    detailTab = event.key === 'Home' ? 'conversation' : event.key === 'End' ? 'history' : detailTab === 'conversation' ? 'history' : 'conversation';
+    const tabs = ['conversation', 'logs', 'history'] as const;
+    const next = (tabs.indexOf(detailTab) + (event.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length;
+    detailTab = event.key === 'Home' ? 'conversation' : event.key === 'End' ? 'history' : tabs[next];
     drawer.querySelector<HTMLButtonElement>(`#${detailTab}-tab`)?.focus();
   }
   function backdropClick(event: MouseEvent, dialog: HTMLDialogElement, close: () => void) {
@@ -703,6 +708,8 @@
   <div class="drawer-content">
     <header class="drawer-topbar"><span><Icon name="terminal" size={16} />Задача <span class="detail-ref">{selectedId?.slice(0, 8).toUpperCase()}</span></span><button class="icon-button" aria-label="Закрыть задачу" disabled={followupSending} onclick={closeDrawer}><Icon name="close" size={20} /></button></header>
     {#if selectedTask}
+      <div class="task-detail-layout">
+      <section class="task-information" aria-label="Информация о задаче">
       <div class="drawer-heading">
         <div class="drawer-badges">{@render statusBadge(selectedTask.status)}{#if currentRun?.followup}<span class="followup-type-badge">Дополнительный запрос</span>{/if}{#if visibleWorker(selectedTask)}{@render workerBadge(visibleWorker(selectedTask)!)}{:else}{@render providerBadge(visibleProvider(selectedTask), true)}{/if}{#if selectedTask.latestRun?.mock}<span class="demo-badge">MOCK</span>{/if}{#if workflowSteps(selectedTask).length}<span class="workflow-type-badge">Сложная задача</span>{/if}</div>
         <h2 id="detail-title">{selectedTask.title}</h2><p class="detail-created">Создано {dateTime(selectedTask.createdAt)}</p>
@@ -739,19 +746,6 @@
       {#if currentRun}<div class="current-run-instructions">{@render instructionSnapshot(currentRun)}</div>{/if}
       {#if currentRun?.error}<div class="run-error"><Icon name="alert" size={17} /><div><strong>{labels[currentRun.status]}</strong><p>{currentRun.error}</p></div></div>{/if}
       {#if currentRun?.status === 'interrupted' && currentRun.steps?.slice((currentRun.currentStepIndex ?? -1) + 1).some(step => step.status === 'cancelled')}<div class="cancelling-note" role="status"><Icon name="alert" size={16} /><span>Отмена уже запрошена. Продолжение касается только текущего этапа; остальные этапы отменены.</span></div>{/if}
-      {#if runCanResume && !interruptedWithoutSession}
-        <form class="resume-panel" onpaste={(event) => answerComposer?.handlePaste(event)} onsubmit={(event) => { event.preventDefault(); if (selectedTask && (answer.trim() || answerAttachmentCount || currentRun?.status === 'interrupted')) void act(selectedTask, 'resume', answer); }}>
-          <div class="resume-title"><Icon name={currentRun?.status === 'interrupted' ? 'alert' : 'message'} size={18} /><strong>{currentRun?.status === 'interrupted' ? 'Запуск был прерван' : 'Агенту нужен ваш ответ'}</strong></div>
-          {#if currentStep}<p class="current-step-context">Этап {(currentRun?.currentStepIndex ?? 0) + 1}: {currentStep.title} · {currentStep.worker.name}{#if currentStep.worker.description?.trim()}<small class="worker-description">{currentStep.worker.description}</small>{/if}</p>{/if}
-          <p>{currentRun?.status === 'interrupted' ? 'Прежний процесс CLI мог остаться запущенным после сбоя. Остановите его перед продолжением. Уже выполненные действия и изменения файлов не откатываются.' : currentStep ? 'Ответ получит работник текущего этапа в той же сессии. Следующие этапы ждут его завершения.' : 'Ответ будет передан агенту в ту же сессию, и работа продолжится.'}</p>
-            {#if currentRun?.status === 'interrupted'}<label class="interruption-confirm"><input type="checkbox" bind:checked={acknowledgeInterruption} disabled={taskBusy} /><span>Я проверил(а), что предыдущий процесс CLI остановлен</span></label>{/if}
-          {#if !currentRun?.sessionId && (!currentRun?.mock || currentRun?.followup)}<div class="resume-warning">Идентификатор сессии не сохранён. {taskHasCompletedRun(selectedTask) ? 'Продолжение недоступно. Для работы в новой сессии создайте отдельную задачу.' : 'Продолжение недоступно; отмените запуск, чтобы начать заново.'}</div>
-          {:else}<label class="sr-only" for="resume-answer">Ответ агенту</label><textarea id="resume-answer" bind:value={answer} maxlength="8000" rows="3" placeholder={currentRun?.status === 'interrupted' ? 'Что учесть при продолжении? (необязательно)' : 'Напишите ответ или уточнение…'} required={currentRun?.status === 'waiting_input' && !answerAttachmentCount} disabled={taskBusy}></textarea>
-            {#key `${drawerContext}:${inputRunKey}`}<AttachmentComposer bind:this={answerComposer} label="Файлы ответа" disabled={taskBusy} bind:count={answerAttachmentCount} bind:uploading={answerUploading} bind:invalid={answerAttachmentInvalid} />{/key}
-            <button class="button primary" type="submit" disabled={taskBusy || answerUploading || answerAttachmentInvalid || (currentRun?.status === 'waiting_input' && !answer.trim() && !answerAttachmentCount) || (currentRun?.status === 'interrupted' && !acknowledgeInterruption)}><Icon name="arrow" size={15} />{taskBusy ? 'Отправляем…' : 'Продолжить работу'}</button>
-          {/if}
-        </form>
-      {/if}
       {#if runCanRetry && currentStep}
         <section class="workflow-retry-panel" aria-label="Повтор текущего этапа">
           <h3><Icon name="alert" size={18} />{interruptedWithoutSession ? 'Сессия прерванного этапа не сохранена' : 'Текущий этап остановлен'}</h3>
@@ -764,11 +758,32 @@
           <button class="button primary" disabled={taskBusy || (interruptedWithoutSession && !acknowledgeInterruption)} onclick={() => selectedTask && act(selectedTask, 'retry')}><Icon name="refresh" size={15} />{taskBusy ? 'Запускаем…' : 'Повторить текущий этап'}</button>
         </section>
       {/if}
-      <div class="detail-tabs" role="tablist" aria-label="История задачи"><button id="conversation-tab" role="tab" tabindex={detailTab === 'conversation' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'conversation'} aria-controls="conversation-panel" class:active={detailTab === 'conversation'} onclick={() => detailTab = 'conversation'}><Icon name="message" size={15} />Обсуждение<span>{detail?.comments.length ?? 0}</span></button><button id="history-tab" role="tab" tabindex={detailTab === 'history' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'history'} aria-controls="history-panel" class:active={detailTab === 'history'} onclick={() => detailTab = 'history'}><Icon name="history" size={15} />Запуски<span>{detail?.runs.length ?? selectedTask.runCount}</span></button></div>
+      </section>
+      <section class="task-activity" aria-label="Комментарии и логи задачи">
+      <div class="detail-tabs" role="tablist" aria-label="История задачи">
+        <button id="conversation-tab" role="tab" tabindex={detailTab === 'conversation' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'conversation'} aria-controls="conversation-panel" class:active={detailTab === 'conversation'} onclick={() => detailTab = 'conversation'}><Icon name="message" size={15} />Комментарии<span>{activity.comments.length}</span>{#if currentRun?.status === 'waiting_input'}<span class="tab-attention" aria-label="Нужен ответ">!</span>{/if}</button>
+        <button id="logs-tab" role="tab" tabindex={detailTab === 'logs' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'logs'} aria-controls="logs-panel" class:active={detailTab === 'logs'} onclick={() => detailTab = 'logs'}><Icon name="terminal" size={15} />Логи<span>{activity.logs.length}</span></button>
+        <button id="history-tab" role="tab" tabindex={detailTab === 'history' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'history'} aria-controls="history-panel" class:active={detailTab === 'history'} onclick={() => detailTab = 'history'}><Icon name="history" size={15} />Запуски<span>{detail?.runs.length ?? selectedTask.runCount}</span></button>
+      </div>
       {#if !detail}<div class="detail-loading"><Icon name="refresh" class="spin" size={19} />Загружаем историю…</div>{:else if detailTab === 'conversation'}
-        <div id="conversation-panel" tabindex="0" role="tabpanel" aria-labelledby="conversation-tab" class="conversation-panel">{#each detail.comments as entry (entry.id)}<article class="comment-entry comment-{entry.kind}">{#if commentWorker(entry)}<WorkerAvatar name={commentWorker(entry)!.name} avatarUrl={commentWorker(entry)!.avatarUrl} size={40} />{:else}<span class="comment-avatar">{#if entry.kind === 'user'}Я{:else if entry.kind === 'system'}<Icon name="terminal" size={14} />{:else if entry.kind === 'question'}<Icon name="message" size={14} />{:else}<Icon name="spark" size={14} />{/if}</span>{/if}<div class="comment-main"><div class="comment-meta"><span class="comment-author"><strong>{commentAuthor(entry)}</strong>{#if commentWorker(entry)?.description?.trim()}<small class="worker-description">{commentWorker(entry)!.description}</small>{/if}</span>{#if commentRun(entry)?.followup}<span class="comment-step-label">Дополнительный запрос{#if followupStage(commentRun(entry)!)} · Этап {followupStage(commentRun(entry)!)!.index + 1}{/if}</span>{:else if entry.stepIndex != null}<span class="comment-step-label">Этап {entry.stepIndex + 1}</span>{/if}<time datetime={new Date(entry.createdAt).toISOString()}>{dateTime(entry.createdAt)}</time></div>{#if entry.body}<p>{entry.body}</p>{/if}<AttachmentList attachments={entry.attachments ?? []} taskId={selectedTask.id} label="Вложения сообщения" author={attachmentAuthor} /></div></article>{:else}<div class="conversation-empty"><Icon name="message" size={25} /><strong>У каждой задачи своя история</strong><p>Здесь появятся сообщения агента, вопросы и результат.<br />Можно оставить заметку уже сейчас.</p></div>{/each}</div>
+        <div id="conversation-panel" tabindex="0" role="tabpanel" aria-labelledby="conversation-tab" class="conversation-panel">{#each activity.comments as entry (entry.id)}<article class="comment-entry comment-{entry.kind}">{#if commentWorker(entry)}<WorkerAvatar name={commentWorker(entry)!.name} avatarUrl={commentWorker(entry)!.avatarUrl} size={40} />{:else}<span class="comment-avatar">{#if entry.kind === 'user'}Я{:else if entry.kind === 'system'}<Icon name="terminal" size={14} />{:else if entry.kind === 'question'}<Icon name="message" size={14} />{:else}<Icon name="spark" size={14} />{/if}</span>{/if}<div class="comment-main"><div class="comment-meta"><span class="comment-author"><strong>{commentAuthor(entry)}</strong>{#if commentWorker(entry)?.description?.trim()}<small class="worker-description">{commentWorker(entry)!.description}</small>{/if}</span>{#if commentRun(entry)?.followup}<span class="comment-step-label">Дополнительный запрос{#if followupStage(commentRun(entry)!)} · Этап {followupStage(commentRun(entry)!)!.index + 1}{/if}</span>{:else if entry.stepIndex != null}<span class="comment-step-label">Этап {entry.stepIndex + 1}</span>{/if}<time datetime={new Date(entry.createdAt).toISOString()}>{dateTime(entry.createdAt)}</time></div>{#if entry.body}<p>{entry.body}</p>{/if}<AttachmentList attachments={entry.attachments ?? []} taskId={selectedTask.id} label="Вложения сообщения" author={attachmentAuthor} /></div></article>{:else}<div class="conversation-empty"><Icon name="message" size={25} /><strong>У каждой задачи своя история</strong><p>Здесь появятся сообщения агента, вопросы и результат.<br />Можно оставить заметку уже сейчас.</p></div>{/each}</div>
+      {:else if detailTab === 'logs'}
+        <div id="logs-panel" tabindex="0" role="tabpanel" aria-labelledby="logs-tab" class="logs-panel"><TaskLogs logs={activity.logs} runs={detail.runs} taskId={selectedTask.id} author={attachmentAuthor} /></div>
       {:else}
         <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name={run.followup ? "message" : "play"} size={14} />{run.followup ? "Дополнительный запрос" : "Запуск"} {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{#if run.worker}{@render workerBadge(run.worker, true)}{:else}{@render providerBadge(run.provider, true)}{/if}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'followup' ? 'Из обсуждения' : run.trigger === 'schedule' ? 'По расписанию' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.followup}<div class="run-followup-request"><strong>Запрос{#if followupStage(run)} · Этап {followupStage(run)!.index + 1}: {followupStage(run)!.title}{/if}</strong><p>{run.followup.request || 'Запрос с вложениями'}</p></div>{/if}{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}{#if run.steps?.length}<WorkflowChecklist {run} />{:else if run.followup?.workflow?.steps.length}<WorkflowChecklist {run} historical />{/if}{@render instructionSnapshot(run)}<div class="run-details">Ход {run.turn}{#if run.worker}<span> · Усилия: {effortLabel(run.worker.effort)}</span>{/if}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
+      {/if}
+      {#if runCanResume && !interruptedWithoutSession}
+        <form class="resume-panel" hidden={detailTab !== 'conversation'} onpaste={(event) => answerComposer?.handlePaste(event)} onsubmit={(event) => { event.preventDefault(); if (selectedTask && (answer.trim() || answerAttachmentCount || currentRun?.status === 'interrupted')) void act(selectedTask, 'resume', answer); }}>
+          <div class="resume-title"><Icon name={currentRun?.status === 'interrupted' ? 'alert' : 'message'} size={18} /><strong>{currentRun?.status === 'interrupted' ? 'Запуск был прерван' : 'Агенту нужен ваш ответ'}</strong></div>
+          {#if currentStep}<p class="current-step-context">Этап {(currentRun?.currentStepIndex ?? 0) + 1}: {currentStep.title} · {currentStep.worker.name}{#if currentStep.worker.description?.trim()}<small class="worker-description">{currentStep.worker.description}</small>{/if}</p>{/if}
+          <p>{currentRun?.status === 'interrupted' ? 'Прежний процесс CLI мог остаться запущенным после сбоя. Остановите его перед продолжением. Уже выполненные действия и изменения файлов не откатываются.' : currentStep ? 'Ответ получит работник текущего этапа в той же сессии. Следующие этапы ждут его завершения.' : 'Ответ будет передан агенту в ту же сессию, и работа продолжится.'}</p>
+            {#if currentRun?.status === 'interrupted'}<label class="interruption-confirm"><input type="checkbox" bind:checked={acknowledgeInterruption} disabled={taskBusy} /><span>Я проверил(а), что предыдущий процесс CLI остановлен</span></label>{/if}
+          {#if !currentRun?.sessionId && (!currentRun?.mock || currentRun?.followup)}<div class="resume-warning">Идентификатор сессии не сохранён. {taskHasCompletedRun(selectedTask) ? 'Продолжение недоступно. Для работы в новой сессии создайте отдельную задачу.' : 'Продолжение недоступно; отмените запуск, чтобы начать заново.'}</div>
+          {:else}<label class="sr-only" for="resume-answer">Ответ агенту</label><textarea id="resume-answer" bind:value={answer} maxlength="8000" rows="3" placeholder={currentRun?.status === 'interrupted' ? 'Что учесть при продолжении? (необязательно)' : 'Напишите ответ или уточнение…'} required={currentRun?.status === 'waiting_input' && !answerAttachmentCount} disabled={taskBusy}></textarea>
+            {#key `${drawerContext}:${inputRunKey}`}<AttachmentComposer bind:this={answerComposer} label="Файлы ответа" disabled={taskBusy} bind:count={answerAttachmentCount} bind:uploading={answerUploading} bind:invalid={answerAttachmentInvalid} />{/key}
+            <button class="button primary" type="submit" disabled={taskBusy || answerUploading || answerAttachmentInvalid || (currentRun?.status === 'waiting_input' && !answer.trim() && !answerAttachmentCount) || (currentRun?.status === 'interrupted' && !acknowledgeInterruption)}><Icon name="arrow" size={15} />{taskBusy ? 'Отправляем…' : 'Продолжить работу'}</button>
+          {/if}
+        </form>
       {/if}
       {#if detail}<form class="comment-form" hidden={detailTab !== 'conversation'} onpaste={(event) => commentComposer?.handlePaste(event)} onsubmit={sendComment}>
         <label for="task-comment">Заметка к задаче</label>
@@ -793,6 +808,8 @@
         </div>
         <p id="comment-actions-help">«Сохранить заметку» только добавляет запись в историю. {runCanResume ? 'Для ответа на текущий вопрос используйте «Продолжить работу» выше.' : recipientOptions.length ? '«Отправить агенту» запускает дополнительный запрос в выбранной сессии.' : 'После завершения запуска появится отправка дополнительного запроса агенту.'}</p>
       </form>{/if}
+      </section>
+      </div>
     {:else}<div class="detail-loading"><Icon name="refresh" class="spin" />Загружаем задачу…</div>{/if}
   </div>
 </dialog>

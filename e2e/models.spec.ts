@@ -571,7 +571,7 @@ test('catalog rename, model ID edit and deletion preserve worker and live/histor
   const resumed = await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail;
   expect(resumed.runs[0]).toMatchObject({ id: originalRun.id, sessionId: originalRun.sessionId, turn: 2 });
   await expect(drawer.getByRole('button', { name: 'Запустить снова', exact: true })).toHaveCount(0);
-  await drawer.getByRole('tab', { name: /Обсуждение/ }).click();
+  await drawer.getByRole('tab', { name: /Комментарии/ }).click();
   await drawer.getByLabel('Заметка к задаче', { exact: true }).fill('[ask] Уточни результат с прежней моделью.');
   await drawer.getByRole('button', { name: 'Отправить агенту', exact: true }).click();
   await expect(drawer.getByText('Агенту нужен ваш ответ', { exact: true })).toBeVisible();

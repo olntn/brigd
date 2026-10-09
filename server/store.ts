@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunStatus, RunStep, StepAttempt, Task, TaskDetail, TaskInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot } from '../src/lib/types';
+import type { Attachment, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunStatus, RunStep, StepAttempt, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot } from '../src/lib/types';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { validateInstruction, validateInstructionPatch, validateInstructionSnapshots } from './instructions';
 import { AppError } from './errors';
@@ -185,6 +185,12 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS task_runs ON runs(task_id, started_at DESC);
       CREATE INDEX IF NOT EXISTS task_comments ON comments(task_id, seq);
+      CREATE TABLE IF NOT EXISTS task_logs (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id),
+        run_id TEXT REFERENCES runs(id), step_index INTEGER, kind TEXT NOT NULL, summary TEXT NOT NULL,
+        details TEXT NOT NULL, created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS ordered_task_logs ON task_logs(task_id, seq);
       CREATE TABLE IF NOT EXISTS service_lease (singleton INTEGER PRIMARY KEY CHECK(singleton=1), pid INTEGER NOT NULL, owner TEXT NOT NULL, identity TEXT);
     `);
     if (!(this.db.query('PRAGMA table_info(service_lease)').all() as Row[]).some(row => row.name === 'identity')) this.db.exec('ALTER TABLE service_lease ADD COLUMN identity TEXT');
@@ -692,6 +698,10 @@ export class Store {
   }
   detail(id: string): TaskDetail {
     return { task: this.getTask(id), attachments: this.listTaskAttachments(id), runs: (this.db.query('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC').all(id) as Row[]).map(r => this.mapRun(r)),
+      logs: (this.db.query('SELECT * FROM task_logs WHERE task_id = ? ORDER BY seq').all(id) as Row[]).map(row => ({
+        id: row.id, taskId: row.task_id, runId: row.run_id, stepIndex: row.step_index, kind: row.kind,
+        summary: row.summary, details: JSON.parse(row.details), createdAt: row.created_at,
+      })),
       comments: (this.db.query('SELECT * FROM comments WHERE task_id = ? ORDER BY seq').all(id) as Row[]).map(r => this.mapComment(r)) };
   }
   private taskSteps(value: unknown, previous: TaskStepInput[] = []): TaskStepInput[] {
@@ -745,6 +755,16 @@ export class Store {
       bound.forEach((attachmentId, position) => this.db.query('INSERT INTO comment_attachment_links(comment_id,attachment_id,position) VALUES (?,?,?)').run(id, attachmentId, position));
       return this.mapComment(this.db.query('SELECT * FROM comments WHERE id=?').get(id) as Row);
     }).immediate();
+  }
+  log(taskId: string, runId: string | null, entry: TaskLogInput, now = Date.now(), stepIndex?: number | null): TaskLog {
+    this.getTask(taskId);
+    const run = runId ? this.getRun(runId) : null;
+    if (run && run.taskId !== taskId) throw new AppError('Запуск относится к другой задаче', 409);
+    const log: TaskLog = { id: crypto.randomUUID(), taskId, runId, stepIndex: stepIndex === undefined && run ? run.currentStepIndex : stepIndex ?? null,
+      kind: entry.kind.slice(0, 40), summary: entry.summary.slice(0, 500), details: entry.details.slice(0, 40).map(line => line.slice(0, 1000)), createdAt: now };
+    this.db.query('INSERT INTO task_logs(id,task_id,run_id,step_index,kind,summary,details,created_at) VALUES (?,?,?,?,?,?,?,?)')
+      .run(log.id, taskId, runId, log.stepIndex, log.kind, log.summary, JSON.stringify(log.details), now);
+    return log;
   }
   private insertRun(task: Task, trigger: Run['trigger'], scheduledFor: number | null, mock: boolean, now: number): Run {
     if (this.activeRun(task.id)) throw new AppError('У задачи уже есть активный запуск. Ответьте агенту, повторите текущий этап или отмените запуск.', 409);

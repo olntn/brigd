@@ -171,7 +171,18 @@ export interface Comment {
   body: string;
   createdAt: number;
 }
-export interface TaskDetail { task: Task; runs: Run[]; comments: Comment[]; attachments?: Attachment[]; }
+export interface TaskLog {
+  id: string;
+  taskId: string;
+  runId: string | null;
+  stepIndex: number | null;
+  kind: string;
+  summary: string;
+  details: string[];
+  createdAt: number;
+}
+export type TaskLogInput = Pick<TaskLog, 'kind' | 'summary' | 'details'>;
+export interface TaskDetail { task: Task; runs: Run[]; comments: Comment[]; logs?: TaskLog[]; attachments?: Attachment[]; }
 export interface AppInfo {
   mode: 'mock' | 'cli';
   cwd: string;

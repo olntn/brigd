@@ -76,6 +76,24 @@ describe('agent lifecycle orchestration', () => {
     expect(store.detail(task.id).comments[1]?.body).toBe('Reading files');
   });
 
+  test('action logs persist separately from agent answers and late logs cannot cross a run fence', async () => {
+    const task = store.createTask(input(folder));
+    const run = engine.start(task.id);
+    const first = agent.calls[0]!;
+    first.callbacks.onLog?.({ kind: 'command', summary: 'Выполняет команду: bun test', details: ['Файл или папка: tests/engine.test.ts'] });
+    first.resolve(outcome('needs_input'));
+    await flush();
+    expect(store.detail(task.id).logs?.[0]).toMatchObject({ taskId: task.id, runId: run.id, stepIndex: null, kind: 'command', details: ['Файл или папка: tests/engine.test.ts'] });
+    expect(store.detail(task.id).comments.some(comment => comment.body.includes('bun test'))).toBe(false);
+    engine.resume(run.id, 'Use server/engine.ts', false);
+    const before = store.detail(task.id).logs;
+    first.callbacks.onLog?.({ kind: 'command', summary: 'Stale action', details: [] });
+    expect(store.detail(task.id).logs).toEqual(before);
+    engine.cancel(run.id);
+    agent.calls[1]!.callbacks.onLog?.({ kind: 'command', summary: 'Cancelled action', details: [] });
+    expect(store.detail(task.id).logs).toEqual(before);
+  });
+
   test('needs_input creates visible questions and answer resumes the exact session/run', async () => {
     const task = store.createTask(input(folder));
     const run = engine.start(task.id);

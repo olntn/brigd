@@ -1,4 +1,5 @@
-import type { Envelope, Provider } from '../src/lib/types';
+import type { Envelope, Provider, TaskLogInput } from '../src/lib/types';
+import { claudeToolLog, codexActionLog } from './worker-logs';
 
 export const MAX_JSONL_LINE_BYTES = 1024 * 1024;
 export const MAX_PROTOCOL_EVENTS = 50000;
@@ -63,6 +64,7 @@ function errorText(value: unknown): string {
 export interface ProtocolCallbacks {
   onSession: (id: string) => void;
   onComment: (body: string) => void;
+  onLog?: (entry: TaskLogInput) => void;
 }
 
 /** The same parser is used by live subprocesses and recorded-event tests. */
@@ -72,7 +74,8 @@ export class AgentProtocol {
   private failure = false;
   private finalResponse: unknown;
   private nativeBlock = false;
-  private seenComments = new Set<string>();
+  private seenLogs = new Set<string>();
+  private pendingTools = new Map<string, TaskLogInput>();
   private pending = '';
   private eventCount = 0;
   readonly maxLineBytes = MAX_JSONL_LINE_BYTES;
@@ -124,10 +127,10 @@ export class AgentProtocol {
     }
   }
 
-  private comment(key: string, body: string): void {
-    if (this.seenComments.has(key) || this.seenComments.size >= 6) return;
-    this.seenComments.add(key);
-    this.callbacks.onComment(body);
+  private log(key: string, entry: TaskLogInput): void {
+    if (this.seenLogs.has(key) || this.seenLogs.size >= 1000) return;
+    this.seenLogs.add(key);
+    this.callbacks.onLog?.(entry);
   }
 
   accept(event: unknown): void {
@@ -153,15 +156,14 @@ export class AgentProtocol {
       if (event.type === 'turn.completed') this.terminal = true;
       if ((event.type === 'item.started' || event.type === 'item.completed') && record(event.item)) {
         const item = event.item;
+        const log = codexActionLog(item, event.type === 'item.completed');
+        if (log) this.log(`${event.type}:${typeof item.id === 'string' ? item.id : JSON.stringify(log)}`, log);
         if (item.status === 'failed' && isPermissionDenial(errorText(item.error))) this.nativeBlock = true;
         if (event.type === 'item.completed' && item.type === 'agent_message') this.finalResponse = item.text;
         if (item.type === 'command_execution') {
-          this.comment('tools', 'Agent is working with local tools.');
           if ((item.status === 'failed' || (typeof item.exit_code === 'number' && item.exit_code !== 0)) &&
               isPermissionDenial(errorText(item.aggregated_output) || errorText(item.error))) this.nativeBlock = true;
         }
-        if (item.type === 'file_change') this.comment('files', 'Agent is working on project files.');
-        if (item.type === 'mcp_tool_call' || item.type === 'web_search') this.comment('lookup', 'Agent is checking an external source.');
         if (item.type === 'error') {
           if (isPermissionDenial(errorText(item.message))) this.nativeBlock = true;
           else this.failure = true;
@@ -169,10 +171,28 @@ export class AgentProtocol {
       }
     } else {
       if (event.type === 'assistant' && record(event.message) && Array.isArray(event.message.content)) {
-        if (event.message.content.some(c => record(c) && c.type === 'tool_use')) this.comment('tools', 'Agent is working with local tools.');
+        for (const content of event.message.content) {
+          if (!record(content) || content.type !== 'tool_use') continue;
+          const log = claudeToolLog(content.name, content.input);
+          if (typeof content.id === 'string' && this.pendingTools.size < 500) this.pendingTools.set(content.id, log);
+          this.log(`started:${typeof content.id === 'string' ? content.id : JSON.stringify(log)}`, log);
+        }
       }
       if (event.type === 'user' && record(event.message) && Array.isArray(event.message.content)) {
         for (const content of event.message.content) {
+          if (record(content) && content.type === 'tool_result') {
+            const prior = typeof content.tool_use_id === 'string' ? this.pendingTools.get(content.tool_use_id) : undefined;
+            const log = claudeToolLog(undefined, undefined, true, content.is_error === true);
+            if (prior) {
+              log.summary = prior.summary.replace('Вызывает инструмент', content.is_error === true ? 'Ошибка инструмента' : 'Инструмент завершён');
+              log.details.push(...prior.details.filter(line => !line.startsWith('Состояние:') && !line.startsWith('Инструмент:')));
+              log.details[0] = prior.details[0]!;
+            }
+            if (typeof content.content === 'string') log.details.push(`Объём результата: ${new TextEncoder().encode(content.content).byteLength} байт.`);
+            else if (Array.isArray(content.content)) log.details.push(`Блоков результата: ${content.content.length}.`);
+            this.log(`completed:${typeof content.tool_use_id === 'string' ? content.tool_use_id : JSON.stringify(log)}`, log);
+            if (typeof content.tool_use_id === 'string') this.pendingTools.delete(content.tool_use_id);
+          }
           if (record(content) && content.type === 'tool_result' && content.is_error === true) {
             const text = typeof content.content === 'string' ? content.content :
               Array.isArray(content.content) ? content.content.filter(record).map(c => errorText(c.text)).join('\n') : '';

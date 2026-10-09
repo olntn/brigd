@@ -115,6 +115,11 @@ export class Engine {
           this.store.db.transaction(() => {
             if (isCurrent()) this.store.comment(run.taskId, run.id, 'agent', body.slice(0, 16_000), Date.now(), run.currentStepIndex);
           }).immediate();
+        },
+        onLog: entry => {
+          this.store.db.transaction(() => {
+            if (isCurrent()) this.store.log(run.taskId, run.id, entry, Date.now(), run.currentStepIndex);
+          }).immediate();
         }
       });
       launch.handle = handle;
@@ -136,6 +141,13 @@ export class Engine {
         this.store.setSession(run.id, sessionId, fence);
         const status = envelope.status === 'needs_input' ? 'waiting_input' : envelope.status;
         const result = this.store.finish(run.id, status, envelope.summary, status === 'blocked' ? envelope.summary : null, Date.now(), fence);
+        this.store.log(run.taskId, run.id, { kind: 'lifecycle',
+          summary: status === 'completed' ? 'Работник завершил выполнение' : status === 'waiting_input' ? 'Работник ожидает ответа пользователя' : 'Выполнение заблокировано',
+          details: [`Статус: ${status}.`, `Ход сессии: ${run.turn}.`,
+            ...(run.currentStepIndex !== null ? [`Этап: ${run.currentStepIndex + 1} из ${run.steps.length}.`] : []),
+            ...(envelope.questions.length ? [`Вопросов пользователю: ${envelope.questions.length}.`] : []),
+            result.status === 'running' ? 'Результат сохранён. Начинается следующий этап.' : 'Ответ работника сохранён в комментариях.'],
+        }, Date.now(), run.currentStepIndex);
         this.store.comment(run.taskId, run.id, status === 'completed' ? 'result' : 'agent', envelope.summary, Date.now(), run.currentStepIndex);
         for (const question of envelope.questions) this.store.comment(run.taskId, run.id, 'question', question, Date.now(), run.currentStepIndex);
         if (result.status === 'running' && result.turn !== run.turn) next = result;

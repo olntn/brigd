@@ -4,15 +4,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentProtocol, ProtocolError, validateEnvelope } from '../server/protocol';
 import { AgentRunError, buildArgv, buildPrompt, capabilitiesFromHelp, runBoundedProcess, startAgent, type AgentInput } from '../server/adapter';
-import type { Envelope, Provider } from '../src/lib/types';
+import type { Envelope, Provider, TaskLogInput } from '../src/lib/types';
 import { effortOptions, modelLabel, modelPresets, normalizeModel } from '../src/lib/workers';
 
 const sid = '0199a213-81c0-7800-8aa1-bbab2a035a53';
 const completed: Envelope = { status: 'completed', summary: 'Task finished.', questions: [] };
 const asks: Envelope = { status: 'needs_input', summary: 'Need a task detail.', questions: ['Which project?'] };
 const capture = () => {
-  const sessions: string[] = [], comments: string[] = [];
-  return { sessions, comments, onSession: (id: string) => { sessions.push(id); }, onComment: (body: string) => { comments.push(body); } };
+  const sessions: string[] = [], comments: string[] = [], logs: TaskLogInput[] = [];
+  return { sessions, comments, logs, onSession: (id: string) => { sessions.push(id); }, onComment: (body: string) => { comments.push(body); }, onLog: (entry: TaskLogInput) => { logs.push(entry); } };
 };
 const codex = (envelope: unknown = completed) => [
   { type: 'thread.started', thread_id: sid },
@@ -130,10 +130,49 @@ describe('provider protocol', () => {
     const denied = { type: 'user', message: { content: [{ type: 'tool_result', is_error: true, content: 'Permission was denied.' }] } };
     expect(parse('claude', [...claude(), denied]).outcome.envelope.status).toBe('blocked');
   });
-  test('progress is sparse and does not leak tool output or reasoning', () => {
+  test('duplicate tool actions become logs and never leak arbitrary commands, tool output, or reasoning into conversation', () => {
     const events = Array(25).fill({ type: 'item.started', item: { type: 'command_execution', command: 'SECRET', aggregated_output: 'SECRET' } });
     const result = parse('codex', [...codex(), ...events, { type: 'item.completed', item: { type: 'reasoning', text: 'PRIVATE REASONING' } }]);
-    expect(result.callbacks.comments).toEqual(['Agent is working with local tools.']);
+    expect(result.callbacks.comments).toEqual([]);
+    expect(result.callbacks.logs).toHaveLength(1);
+    expect(result.callbacks.logs[0]?.kind).toBe('command');
+    expect(JSON.stringify(result.callbacks.logs)).not.toContain('SECRET');
+    expect(JSON.stringify(result.callbacks.logs)).not.toContain('PRIVATE REASONING');
+  });
+  test('Codex logs explain commands and file changes with lifecycle, filenames, and exit status', () => {
+    const command = { id: 'cmd-1', type: 'command_execution', command: '/bin/bash -lc "bun test tests/engine.test.ts"' };
+    const result = parse('codex', [codex()[0],
+      { type: 'item.started', item: { ...command, status: 'in_progress' } },
+      { type: 'item.completed', item: { ...command, status: 'completed', exit_code: 0, aggregated_output: 'PRIVATE_OUTPUT' } },
+      { type: 'item.completed', item: { id: 'patch-1', type: 'file_change', status: 'completed', changes: [{ path: 'src/App.svelte', kind: 'update', diff: 'PRIVATE_DIFF' }] } },
+      ...codex().slice(1),
+    ]);
+    expect(result.callbacks.comments).toEqual([]);
+    expect(result.callbacks.logs).toHaveLength(3);
+    expect(result.callbacks.logs[0]?.summary).toContain('bun test');
+    expect(result.callbacks.logs[0]?.details).toContain('Файл или папка: tests/engine.test.ts');
+    expect(result.callbacks.logs[1]?.details).toContain('Код завершения: 0.');
+    expect(result.callbacks.logs[2]?.details).toContain('Изменение: src/App.svelte');
+    expect(JSON.stringify(result.callbacks.logs)).not.toContain('PRIVATE_');
+  });
+  test('Claude tool results retain safe operation context while omitting secrets and source content', () => {
+    const result = parse('claude', [claude()[0],
+      { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'read-1', name: 'Read', input: { file_path: 'server/engine.ts', offset: 10, limit: 40, token: 'PRIVATE_TOKEN' } }, { type: 'thinking', thinking: 'PRIVATE_REASONING' }] } },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'read-1', content: 'PRIVATE_SOURCE' }] } },
+      claude()[1],
+    ]);
+    expect(result.callbacks.comments).toEqual([]);
+    expect(result.callbacks.logs).toHaveLength(2);
+    expect(result.callbacks.logs[0]?.details).toContain('Файл или папка: server/engine.ts');
+    expect(result.callbacks.logs[1]?.summary).toBe('Инструмент завершён: Read');
+    expect(result.callbacks.logs[1]?.details).toContain('Файл или папка: server/engine.ts');
+    expect(JSON.stringify(result.callbacks.logs)).not.toContain('PRIVATE_');
+  });
+  test('MCP logs include tool, safe targets, and response size without arbitrary argument values', () => {
+    const result = parse('codex', [...codex(), { type: 'item.completed', item: { id: 'mcp-1', type: 'mcp_tool_call', server: 'project', tool: 'read_file', status: 'completed',
+      arguments: { path: 'src/main.ts', token: 'PRIVATE_TOKEN', url: 'https://example.com/read?token=PRIVATE_TOKEN' }, result: { content: [{ type: 'text', text: 'PRIVATE_SOURCE' }] } } }]);
+    expect(result.callbacks.logs[0]?.details).toEqual(['Состояние: завершено.', 'Сервер: project.', 'Инструмент: read_file.', 'Файл или папка: src/main.ts', 'Источник: example.com', 'Параметров инструмента: 3.', 'Блоков результата: 1.']);
+    expect(JSON.stringify(result.callbacks.logs)).not.toContain('PRIVATE_');
   });
   test('nested Claude results cannot replace the parent session or result', () => {
     const events = [...claude(), { type: 'result', parent_tool_use_id: 'tool-1', session_id: 'other', subtype: 'success', structured_output: asks }];
