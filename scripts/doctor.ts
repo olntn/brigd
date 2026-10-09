@@ -1,7 +1,7 @@
 import { capabilitiesFromHelp, runBoundedProcess } from '../server/adapter';
 import type { Provider } from '../src/lib/types';
 
-console.log(`Trackt • Bun ${Bun.version} • ${process.platform}/${process.arch}`);
+console.log(`brigd • Bun ${Bun.version} • ${process.platform}/${process.arch}`);
 console.log(`Рабочая папка: ${process.cwd()}\n`);
 let available = 0;
 for (const provider of ['codex', 'claude'] as Provider[]) {

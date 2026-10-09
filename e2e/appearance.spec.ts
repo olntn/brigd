@@ -120,8 +120,63 @@ async function expectWrapped(element: Locator) {
 
 test.afterEach(async ({ page }, testInfo) => {
   if (!page.isClosed()) {
-    await page.screenshot({ path: testInfo.outputPath('trackt-appearance.png'), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('brigd-appearance.png'), fullPage: true });
   }
+});
+
+test('brigd branding appears in the title, navigation and workspace', async ({ page }) => {
+  await fixtureApi(page, 'cli');
+  await openApp(page);
+  await expect(page).toHaveTitle('brigd · Задачи для ваших агентов');
+  await expect(page.getByRole('link', { name: 'brigd — главная', exact: true })).toHaveText('brigd.');
+  await expect(page.getByText('brigd · MVP', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Trackt|trackt/)).toHaveCount(0);
+});
+
+for (const legacy of ['light', 'dark'] as const) {
+  test(`legacy ${legacy} theme survives the rename and reload`, async ({ page }) => {
+    await page.addInitScript(theme => localStorage.setItem('trackt.theme', theme), legacy);
+    await fixtureApi(page);
+    await openApp(page);
+    await expect(page.locator('html')).toHaveAttribute('data-theme', legacy);
+    expect(await page.evaluate(() => localStorage.getItem('brigd.theme'))).toBe(legacy);
+    expect(await page.evaluate(() => localStorage.getItem('trackt.theme'))).toBe(legacy);
+    await page.reload();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', legacy);
+    const { toggle } = await openSettings(page);
+    await toggle.setChecked(legacy !== 'dark');
+    await page.reload();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', legacy === 'dark' ? 'light' : 'dark');
+  });
+}
+
+test('readable legacy dark theme survives a blocked migration write', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('trackt.theme', 'dark');
+    Storage.prototype.setItem = () => { throw new DOMException('Storage full', 'QuotaExceededError'); };
+  });
+  await fixtureApi(page);
+  await openApp(page);
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  expect(await page.evaluate(() => localStorage.getItem('brigd.theme'))).toBeNull();
+  const { toggle } = await openSettings(page);
+  await expect(toggle).toBeChecked();
+  await toggle.uncheck();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+});
+
+test('new theme preference synchronizes across tabs', async ({ page, context }) => {
+  await fixtureApi(page);
+  await openApp(page);
+  const other = await context.newPage();
+  await fixtureApi(other);
+  await openApp(other);
+  const { toggle } = await openSettings(page);
+  await toggle.check();
+  await expect(other.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await toggle.uncheck();
+  await expect(other.locator('html')).toHaveAttribute('data-theme', 'light');
+  await other.close();
 });
 
 test('CLI workspace is uncluttered and demo safety warning is preserved', async ({ page }) => {
@@ -151,19 +206,19 @@ test('theme settings persist both choices and return focus after Escape or Close
   await openApp(page);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   const lightBackground = await page.locator('html').evaluate(node => getComputedStyle(node).backgroundColor);
-  await page.screenshot({ path: testInfo.outputPath('trackt-light-board.png'), fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath('brigd-light-board.png'), fullPage: true });
   let settings = await openSettings(page);
   await expect(settings.toggle).not.toBeChecked();
   await settings.toggle.check();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
-  expect(await page.evaluate(() => localStorage.getItem('trackt.theme'))).toBe('dark');
+  expect(await page.evaluate(() => localStorage.getItem('brigd.theme'))).toBe('dark');
   const darkBackground = await page.locator('html').evaluate(node => getComputedStyle(node).backgroundColor);
   expect(darkBackground).not.toBe(lightBackground);
-  await page.screenshot({ path: testInfo.outputPath('trackt-dark-settings.png'), fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath('brigd-dark-settings.png'), fullPage: true });
   await page.keyboard.press('Escape');
   await expect(settings.dialog).not.toBeVisible();
   await expect(settings.trigger).toBeFocused();
-  await page.screenshot({ path: testInfo.outputPath('trackt-dark-board.png'), fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath('brigd-dark-board.png'), fullPage: true });
 
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
@@ -171,7 +226,7 @@ test('theme settings persist both choices and return focus after Escape or Close
   await expect(settings.toggle).toBeChecked();
   await settings.toggle.uncheck();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-  expect(await page.evaluate(() => localStorage.getItem('trackt.theme'))).toBe('light');
+  expect(await page.evaluate(() => localStorage.getItem('brigd.theme'))).toBe('light');
   await settings.dialog.getByRole('button', { name: 'Закрыть настройки', exact: true }).click();
   await expect(settings.dialog).not.toBeVisible();
   await expect(settings.trigger).toBeFocused();
@@ -181,7 +236,7 @@ test('theme settings persist both choices and return focus after Escape or Close
 
 test('an invalid saved theme does not prevent startup', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'light' });
-  await page.addInitScript(() => localStorage.setItem('trackt.theme', 'unexpected-theme'));
+  await page.addInitScript(() => localStorage.setItem('brigd.theme', 'unexpected-theme'));
   await fixtureApi(page);
   await openApp(page);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');

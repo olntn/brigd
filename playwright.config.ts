@@ -16,7 +16,7 @@ export default defineConfig({
     command: 'bun server/index.ts',
     url: 'http://127.0.0.1:4318/api/info',
     reuseExistingServer: false,
-    env: { PORT: '4318', TRACKT_MODE: 'mock', TRACKT_DB: 'test-results/browser.sqlite' },
+    env: { PORT: '4318', BRIGD_MODE: 'mock', BRIGD_DB: 'test-results/browser.sqlite', BRIGD_HOST: '127.0.0.1', BRIGD_ALLOWED_HOSTS: '127.0.0.1:4318,localhost:4318', BRIGD_ALLOWED_ORIGINS: 'http://127.0.0.1:4318,http://localhost:4318', BRIGD_DEV: '0' },
     timeout: 15_000,
   },
 });

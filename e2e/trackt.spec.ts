@@ -16,7 +16,7 @@ test.beforeEach(async ({ page }) => {
   await expect(page.getByText('Демонстрационный режим', { exact: true })).toBeVisible();
 });
 test.afterEach(async ({ page }, testInfo) => {
-  if (!page.isClosed()) await page.screenshot({ path: testInfo.outputPath('trackt-ui.png'), fullPage: true });
+  if (!page.isClosed()) await page.screenshot({ path: testInfo.outputPath('brigd-ui.png'), fullPage: true });
 });
 
 test('create, note, clarify, resume exact session, history and reload', async ({ page, request }, testInfo) => {
@@ -49,7 +49,7 @@ test('create, note, clarify, resume exact session, history and reload', async ({
   await expect(drawer).not.toBeVisible();
   await page.getByLabel('Поиск задач', { exact: true }).fill(title);
   await expect(page.getByRole('button', { name: `Открыть задачу: ${title}`, exact: true })).toBeVisible();
-  await page.screenshot({ path: testInfo.outputPath('trackt-board.png'), fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath('brigd-board.png'), fullPage: true });
   await page.reload();
   await page.getByLabel('Поиск задач', { exact: true }).fill(title);
   await page.getByRole('button', { name: `Открыть задачу: ${title}`, exact: true }).click();

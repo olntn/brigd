@@ -1,3 +1,5 @@
+# Legacy identifiers are intentional: brigd reuses existing containers and data.
+# Keep the project/service/volumes stable, even when the checkout is named brigd.
 name: trackt
 services:
   trackt:

@@ -1,5 +1,5 @@
 {
-  "name": "trackt",
+  "name": "brigd",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -8,10 +8,10 @@
   },
   "scripts": {
     "dev": "bun scripts/dev.ts",
-    "dev:demo": "TRACKT_MODE=mock bun scripts/dev.ts",
+    "dev:demo": "BRIGD_MODE=mock bun scripts/dev.ts",
     "build": "vite build",
     "start": "bun server/index.ts",
-    "demo": "TRACKT_MODE=mock TRACKT_DB=data/demo.sqlite bun server/index.ts",
+    "demo": "BRIGD_MODE=mock BRIGD_DB=data/demo.sqlite bun server/index.ts",
     "check": "svelte-check --tsconfig ./tsconfig.json && tsc --noEmit -p tsconfig.server.json",
     "test": "bun test tests",
     "verify": "bun run check && bun test tests && bun run build",

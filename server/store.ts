@@ -66,7 +66,7 @@ export class Store {
         const currentIdentity = processIdentity(existing.pid);
         if (existing.identity && currentIdentity && existing.identity !== currentIdentity) alive = false;
         // Missing identity or inaccessible /proc fails closed, unless the PID is confirmed dead.
-        if (alive) throw new AppError(`База уже занята процессом PID ${existing.pid}. Остановите второй Trackt перед запуском.`, 409);
+        if (alive) throw new AppError(`База уже занята процессом PID ${existing.pid}. Остановите второй brigd перед запуском.`, 409);
       }
       const owner = crypto.randomUUID();
       this.db.query('INSERT OR REPLACE INTO service_lease (singleton,pid,owner,identity) VALUES (1,?,?,?)').run(pid, owner, processIdentity(pid));

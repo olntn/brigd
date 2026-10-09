@@ -86,7 +86,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
       if (filePath !== dist && !filePath.startsWith(dist + sep)) throw new AppError('Недопустимый путь', 403);
       const file = Bun.file(filePath);
       const candidate = await file.exists() && (await file.stat()).isFile() ? file : Bun.file(resolve(dist, 'index.html'));
-      if (!(await candidate.exists())) return new Response('Trackt: выполните bun run build или запустите bun run dev (http://127.0.0.1:5173).', { status: 503, headers: securityHeaders });
+      if (!(await candidate.exists())) return new Response('brigd: выполните bun run build или запустите bun run dev (http://127.0.0.1:5173).', { status: 503, headers: securityHeaders });
       return new Response(method === 'HEAD' ? null : candidate, { headers: { ...securityHeaders, 'Content-Type': candidate.type } });
     } catch (error) {
       if (error instanceof AppError) return json({ error: error.message }, error.status);

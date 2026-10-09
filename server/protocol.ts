@@ -199,7 +199,7 @@ export class AgentProtocol {
     if (this.failure) throw new ProtocolError('The CLI reported a failed turn. No successful result was accepted.');
     if (this.nativeBlock) return {
       sessionId: this.sessionId,
-      envelope: { status: 'blocked', summary: 'The CLI requires native permission approval. Trackt cannot grant tool permissions from task comments. Review the session in the provider’s terminal.', questions: [] },
+      envelope: { status: 'blocked', summary: 'The CLI requires native permission approval. brigd cannot grant tool permissions from task comments. Review the session in the provider’s terminal.', questions: [] },
     };
     if (exitCode !== 0) throw new ProtocolError(`The CLI exited with code ${exitCode}. No successful result was accepted.`);
     if (!this.terminal) throw new ProtocolError('The CLI exited without a completed turn event.');

@@ -58,7 +58,7 @@ export function capabilitiesFromHelp(provider: Provider, help: string, resumeHel
 
 export function buildPrompt(input: AgentInput): string {
   return [
-    'TRACKT TASK PROTOCOL',
+    'brigd TASK PROTOCOL',
     'Work on the user task below in the current project. Honor the provider’s native security and permission rules.',
     'Your final response must be ONLY a JSON object with exactly status, summary, and questions.',
     'status must be "completed", "needs_input", or "blocked". summary must be a nonempty string.',

@@ -1,6 +1,6 @@
 // One parent process controls both children; Ctrl-C stops the scheduler too.
 const children = [
-  Bun.spawn([process.execPath, 'server/index.ts'], { env: { ...process.env, TRACKT_DEV: '1' }, stdout: 'inherit', stderr: 'inherit' }),
+  Bun.spawn([process.execPath, 'server/index.ts'], { env: { ...process.env, BRIGD_DEV: '1' }, stdout: 'inherit', stderr: 'inherit' }),
   Bun.spawn([process.execPath, 'x', 'vite'], { stdout: 'inherit', stderr: 'inherit' })
 ];
 let exiting = false;

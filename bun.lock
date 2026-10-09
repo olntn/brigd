@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "trackt",
+      "name": "brigd",
       "dependencies": {
         "svelte": "5.57.2",
       },
