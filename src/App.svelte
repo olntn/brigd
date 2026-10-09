@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import Icon from './lib/Icon.svelte';
+  import { applyTheme, readTheme, saveTheme, themeStorageKey, type Theme } from './lib/theme';
   import type { AppInfo, Comment, Provider, Run, Task, TaskDetail, TaskInput, TaskStatus } from './lib/types';
 
   type Scope = 'all' | 'scheduled' | 'attention' | 'completed';
@@ -25,6 +26,10 @@
   let toast = $state<{ text: string; type: 'success' | 'error' } | null>(null);
   let drawer: HTMLDialogElement;
   let editor: HTMLDialogElement;
+  let settings: HTMLDialogElement;
+  let settingsOpen = $state(false);
+  let theme = $state<Theme>(readTheme());
+  let themeSaveError = $state(false);
   let editorOpen = $state(false);
   let editingId = $state<string | null>(null);
   let formTitle = $state('');
@@ -121,6 +126,15 @@
   }
 
   onMount(() => {
+    applyTheme(theme);
+    const onThemeStorage = (event: StorageEvent) => {
+      if (event.key === themeStorageKey || event.key === null) {
+        theme = readTheme();
+        applyTheme(theme);
+        themeSaveError = false;
+      }
+    };
+    window.addEventListener('storage', onThemeStorage);
     void loadInfo();
     void refresh();
     const interval = setInterval(() => {
@@ -128,8 +142,24 @@
     }, 2000);
     const onVisible = () => { if (document.visibilityState === 'visible') void refresh(); };
     document.addEventListener('visibilitychange', onVisible);
-    return () => { clearInterval(interval); clearTimeout(toastTimer); document.removeEventListener('visibilitychange', onVisible); };
+    return () => { clearInterval(interval); clearTimeout(toastTimer); document.removeEventListener('visibilitychange', onVisible); window.removeEventListener('storage', onThemeStorage); };
   });
+
+  function openSettings() {
+    settingsOpen = true;
+    settings.showModal();
+  }
+
+  function closeSettings() {
+    settings.close();
+    settingsOpen = false;
+  }
+
+  function toggleTheme(dark: boolean) {
+    theme = dark ? 'dark' : 'light';
+    applyTheme(theme);
+    themeSaveError = !saveTheme(theme);
+  }
 
   async function openTask(task: Task) {
     selectedId = task.id;
@@ -270,7 +300,7 @@
   function resetFilters() { search = ''; provider = 'all'; scope = 'all'; }
   function setScope(value: Scope) { scope = value; showArchived = value === 'attention'; }
   function globalKey(event: KeyboardEvent) {
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !editorOpen && !selectedId) {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !editorOpen && !selectedId && !settingsOpen) {
       event.preventDefault(); searchInput?.focus();
     }
   }
@@ -323,7 +353,7 @@
     <a class="brand" href="/" aria-label="Trackt — главная"><span class="brand-symbol"><Icon name="check" size={24} stroke={2.6} /></span><span>trackt<span class="brand-dot">.</span></span></a>
     <div class="workspace-label"><span class="workspace-icon"><Icon name="folder" size={16} /></span><div><strong>Моё пространство</strong><span>Локальный workspace</span></div><span class="local-light"></span></div>
     <div class="nav-label">РАБОЧЕЕ ПРОСТРАНСТВО</div>
-    <nav class="main-nav">
+    <nav class="main-nav" aria-label="Задачи">
       <button class:active={scope === 'all'} aria-label="Все задачи" onclick={() => setScope('all')}><Icon name="board" /><span>Все задачи</span><span class="nav-count">{tasks.length}</span></button>
       <button class:active={scope === 'attention'} aria-label="Требуют внимания" onclick={() => setScope('attention')}><Icon name="inbox" /><span>Требуют внимания</span>{#if waitingCount}<span class="nav-count attention-count">{waitingCount}</span>{/if}</button>
       <button class:active={scope === 'scheduled'} aria-label="По расписанию" onclick={() => setScope('scheduled')}><Icon name="clock" /><span>По расписанию</span>{#if scheduledCount}<span class="nav-count">{scheduledCount}</span>{/if}</button>
@@ -340,24 +370,22 @@
       {/each}
     </div>
     <div class="sidebar-bottom">
+      <button class="settings-button" onclick={openSettings} aria-haspopup="dialog"><Icon name="sliders" /><span>Настройки</span></button>
       <div class="private-note"><span class="private-icon"><Icon name="terminal" size={17} /></span><div><strong>Всё на вашем компьютере</strong><p>Локальная база и агенты.<br />Ваши задачи под контролем.</p></div></div>
       <div class="workspace-footer"><span class="avatar">Я</span><div><strong>Личное пространство</strong><span>Trackt · MVP</span></div><span class="version">v0.1</span></div>
     </div>
   </aside>
 
   <main class="main-content">
-    <header class="topbar"><div class="breadcrumb"><span>Workspace</span><Icon name="chevron" size={12} /><strong>Задачи</strong></div><div class="connection-indicator" title={connectionError || 'Автообновление каждые 2 секунды'}><span class:offline={!!connectionError || !info}></span>{connectionError ? 'Нет соединения' : info ? 'Локально · синхронизировано' : 'Подключаемся…'}</div></header>
     <div class="workspace-content">
       <section class="page-heading"><div><div class="eyebrow">МЕНЬШЕ РУТИНЫ. БОЛЬШЕ СДЕЛАННОГО.</div><h1>{scopeTitles[scope]}<span>{scope === 'all' ? tasks.length : filtered.length}</span></h1><p>Дайте агентам задачу. Остальное держите в поле зрения.</p></div><button class="button primary create-button" onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={17} />Новая задача</button></section>
 
       {#if info?.mode === 'mock'}
         <div class="mode-banner"><span class="mode-icon"><Icon name="spark" size={17} /></span><div><strong>Демонстрационный режим</strong><span>Запуски симулируются. Codex и Claude CLI не вызываются, файлы не изменяются.</span></div><span class="demo-badge">MOCK</span></div>
-      {:else if info?.mode === 'cli'}
-        <div class="live-banner"><Icon name="terminal" size={15} /><span>CLI-режим: агенты работают с файлами в указанной папке. Проверяйте инструкции перед запуском.</span></div>
       {/if}
       {#if connectionError}<div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{connectionError}</span><button onclick={() => { void loadInfo(); void refresh(); }}>Повторить</button></div>{/if}
 
-      <section class="overview" aria-label="Сводка задач"><div class="overview-intro"><span class="overview-symbol"><Icon name="spark" size={23} /></span><div><strong>Ваш фокус — на важном.</strong><span>Агенты позаботятся об остальном</span></div></div><div class="overview-stats"><button onclick={() => { setScope('all'); search = ''; provider = 'all'; }}><span class="stat-value">{runningCount}<span class="stat-dot running-dot"></span></span><span class="stat-label">в работе</span></button><button onclick={() => setScope('attention')}><span class="stat-value">{waitingCount}<span class="stat-dot waiting-dot"></span></span><span class="stat-label">ждут внимания</span></button><button onclick={() => setScope('completed')}><span class="stat-value">{completedCount}<span class="stat-dot completed-dot"></span></span><span class="stat-label">завершено</span></button></div></section>
+      <section class="overview" aria-label="Сводка задач"><div class="overview-stats"><button onclick={() => { setScope('all'); search = ''; provider = 'all'; }}><span class="stat-value">{runningCount}<span class="stat-dot running-dot"></span></span><span class="stat-label">в работе</span></button><button onclick={() => setScope('attention')}><span class="stat-value">{waitingCount}<span class="stat-dot waiting-dot"></span></span><span class="stat-label">ждут внимания</span></button><button onclick={() => setScope('completed')}><span class="stat-value">{completedCount}<span class="stat-dot completed-dot"></span></span><span class="stat-label">завершено</span></button></div></section>
 
       <div class="toolbar"><div class="view-toggle" aria-label="Вид задач"><button class:selected={view === 'board'} aria-pressed={view === 'board'} onclick={() => view = 'board'}><Icon name="board" size={15} />Доска</button><button class:selected={view === 'list'} aria-pressed={view === 'list'} onclick={() => view = 'list'}><Icon name="list" size={16} />Список</button></div><div class="toolbar-filters"><label class="search-box"><Icon name="search" size={16} /><input bind:this={searchInput} bind:value={search} type="search" placeholder="Найти задачу…" aria-label="Поиск задач" /><span class="key-hint">⌘ K</span></label><label class="provider-filter"><Icon name="sliders" size={15} /><select bind:value={provider} aria-label="Фильтр по агенту"><option value="all">Все агенты</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select><Icon name="down" size={13} /></label></div></div>
 
@@ -387,7 +415,6 @@
           <div class="task-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>ЗАПУСК</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{shortPath(task.cwd)}</small></span></button><div>{@render providerBadge(task.provider, true)}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{task.paused ? 'На паузе' : task.schedule === 'interval' ? intervalLabel(task.intervalMinutes) : 'Вручную'}</span><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>Новые задачи появятся здесь</span></div>{/each}</div>
         {/if}
       {/if}
-      <footer class="board-footer"><span><span class="tiny-dot"></span>Данные хранятся локально</span><span>{info?.mode === 'mock' ? 'Демо-запуски · без вызовов CLI' : 'Bun + Svelte 5 · Codex и Claude Code'}</span></footer>
     </div>
   </main>
 </div>
@@ -414,6 +441,14 @@
         <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name="play" size={14} />Запуск {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{@render providerBadge(run.provider, true)}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'schedule' ? 'По расписанию' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}<div class="run-details">Ход {run.turn}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
       {/if}
     {:else}<div class="detail-loading"><Icon name="refresh" class="spin" />Загружаем задачу…</div>{/if}
+  </div>
+</dialog>
+
+<dialog class="settings-dialog" bind:this={settings} aria-labelledby="settings-title" oncancel={(event) => { event.preventDefault(); closeSettings(); }} onclick={(event) => backdropClick(event, settings, closeSettings)}>
+  <header class="settings-header"><h2 id="settings-title">Настройки</h2><button class="icon-button" aria-label="Закрыть настройки" onclick={closeSettings}><Icon name="close" size={21} /></button></header>
+  <div class="settings-body">
+    <label class="theme-setting"><Icon name="moon" size={22} /><span><strong>Тёмная тема</strong><small id="theme-description">Выбор сохраняется в этом браузере.</small></span><input type="checkbox" role="switch" checked={theme === 'dark'} onchange={(event) => toggleTheme(event.currentTarget.checked)} aria-label="Тёмная тема" aria-describedby="theme-description" /></label>
+    {#if themeSaveError}<p class="settings-warning" role="status">Тема изменена, но браузер не разрешил сохранить выбор. После перезагрузки выберите тему снова.</p>{/if}
   </div>
 </dialog>
 
