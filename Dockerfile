@@ -48,7 +48,13 @@ RUN bun install --frozen-lockfile --ignore-scripts
 COPY --chown=trackt:node index.html vite.config.ts svelte.config.js tsconfig.json tsconfig.server.json ./
 COPY --chown=trackt:node src ./src
 COPY --chown=trackt:node public ./public
+COPY --chown=trackt:node server ./server
 RUN bun run build
+
+FROM runtime-base AS production-deps
+COPY --chown=trackt:node package.json bun.lock ./
+RUN bun install --frozen-lockfile --production --ignore-scripts \
+    && bun -e 'import sharp from "sharp"; await sharp({create:{width:1,height:1,channels:4,background:"black"}}).png().toBuffer()'
 
 FROM runtime-base AS runtime
 ENV NODE_ENV=production \
@@ -59,6 +65,7 @@ ENV NODE_ENV=production \
     TRACKT_DEFAULT_CWD=/workspace/projects \
     TRACKT_DB=/var/lib/trackt/trackt.sqlite
 COPY --from=build /app/dist ./dist
+COPY --from=production-deps /app/node_modules ./node_modules
 COPY package.json bun.lock ./
 COPY server ./server
 COPY src/lib ./src/lib

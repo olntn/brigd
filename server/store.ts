@@ -1,15 +1,18 @@
 import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import type { Comment, Instruction, InstructionInput, InstructionSnapshot, Run, RunStatus, RunStep, StepAttempt, Task, TaskDetail, TaskInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot } from '../src/lib/types';
+import type { Attachment, Comment, Instruction, InstructionInput, InstructionSnapshot, Run, RunStatus, RunStep, StepAttempt, Task, TaskDetail, TaskInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot } from '../src/lib/types';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { validateInstruction, validateInstructionPatch, validateInstructionSnapshots } from './instructions';
 import { AppError } from './errors';
 import { validateWorkflowSteps } from './workflows';
 import { validateSessionId } from './protocol';
 import { effortOptions } from '../src/lib/workers';
+import { attachmentIds, preparedAttachmentPayload, type PreparedAttachment } from './attachments';
+import { ATTACHMENT_MAX_COUNT, ATTACHMENT_TASK_MAX_COUNT, ATTACHMENT_TASK_MAX_BYTES, ATTACHMENT_STAGING_MAX_COUNT, ATTACHMENT_STAGING_MAX_BYTES, ATTACHMENT_TOTAL_MAX_BYTES, ATTACHMENT_STAGING_TTL_MS } from '../src/lib/attachments';
 export { AppError } from './errors';
 type Row = Record<string, any>;
+const ATTACHMENT_COLUMNS = 'a.id,a.task_id,a.comment_id,a.run_id,a.step_index,a.attempt_id,a.source,a.name,a.mime,a.size,a.sha256,a.previewable,a.created_at';
 const OPEN = "'running','cancelling','waiting_input','interrupted'";
 const OCCUPIED = `(status IN (${OPEN}) OR (steps_snapshot != '[]' AND status IN ('failed','blocked')))`;
 export interface RunFence { turn: number; currentStepIndex: number | null; attemptId: string | null; }
@@ -127,6 +130,44 @@ export class Store {
         }
       }
     }).immediate();
+    this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS attachments (
+          id TEXT PRIMARY KEY, task_id TEXT REFERENCES tasks(id), comment_id TEXT REFERENCES comments(id),
+          run_id TEXT REFERENCES runs(id), step_index INTEGER, attempt_id TEXT, created_turn INTEGER,
+          source TEXT NOT NULL CHECK(source IN ('user','agent')), name TEXT NOT NULL, mime TEXT NOT NULL,
+          size INTEGER NOT NULL CHECK(size>=0), sha256 TEXT NOT NULL, previewable INTEGER NOT NULL CHECK(previewable IN (0,1)),
+          created_at INTEGER NOT NULL, expires_at INTEGER, data BLOB NOT NULL, preview BLOB, preview_size INTEGER NOT NULL DEFAULT 0,
+          CHECK(length(data)=size), CHECK((preview IS NULL AND preview_size=0 AND previewable=0) OR (preview IS NOT NULL AND preview_size=length(preview) AND previewable=1)),
+          CHECK((task_id IS NULL AND expires_at IS NOT NULL AND source='user') OR (task_id IS NOT NULL AND expires_at IS NULL))
+        );
+        CREATE INDEX IF NOT EXISTS task_attachment_metadata ON attachments(task_id,created_at);
+        CREATE INDEX IF NOT EXISTS attachment_staging_expiry ON attachments(expires_at) WHERE task_id IS NULL;
+        CREATE INDEX IF NOT EXISTS attachment_run_output ON attachments(run_id,created_turn);
+        CREATE TABLE IF NOT EXISTS task_attachment_links (
+          task_id TEXT NOT NULL REFERENCES tasks(id), attachment_id TEXT NOT NULL REFERENCES attachments(id), position INTEGER NOT NULL,
+          PRIMARY KEY(task_id,attachment_id)
+        );
+        CREATE TABLE IF NOT EXISTS comment_attachment_links (
+          comment_id TEXT NOT NULL REFERENCES comments(id), attachment_id TEXT NOT NULL REFERENCES attachments(id), position INTEGER NOT NULL,
+          PRIMARY KEY(comment_id,attachment_id)
+        );
+        CREATE INDEX IF NOT EXISTS task_attachment_reverse ON task_attachment_links(attachment_id);
+        CREATE INDEX IF NOT EXISTS comment_attachment_reverse ON comment_attachment_links(attachment_id);
+        CREATE TABLE IF NOT EXISTS run_attachment_inputs (
+          run_id TEXT NOT NULL REFERENCES runs(id), turn INTEGER NOT NULL, attachment_id TEXT NOT NULL REFERENCES attachments(id),
+          PRIMARY KEY(run_id,turn,attachment_id)
+        );
+        CREATE TABLE IF NOT EXISTS attachment_publications (
+          key TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), fingerprint TEXT NOT NULL, result_id TEXT NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS attachments_immutable BEFORE UPDATE ON attachments
+          WHEN OLD.task_id IS NOT NULL OR NEW.id IS NOT OLD.id OR NEW.source IS NOT OLD.source OR NEW.name IS NOT OLD.name
+          OR NEW.mime IS NOT OLD.mime OR NEW.size IS NOT OLD.size OR NEW.sha256 IS NOT OLD.sha256 OR NEW.previewable IS NOT OLD.previewable
+          OR NEW.created_at IS NOT OLD.created_at OR NEW.data IS NOT OLD.data OR NEW.preview IS NOT OLD.preview OR NEW.preview_size IS NOT OLD.preview_size
+          BEGIN SELECT RAISE(ABORT, 'Committed attachment content and metadata are immutable'); END;
+      `);
+    }).immediate();
     // Upgrade the occupancy index without leaving an unguarded migration window.
     this.db.transaction(() => {
       this.db.exec(`DROP INDEX IF EXISTS one_open_run; CREATE UNIQUE INDEX one_open_run ON runs(task_id) WHERE ${OCCUPIED}`);
@@ -242,6 +283,180 @@ export class Store {
     if (!row) throw new AppError('Аватар не найден', 404);
     return row;
   }
+  private mapAttachment(row: Row): Attachment {
+    return { id: row.id, taskId: row.task_id, commentId: row.comment_id, runId: row.run_id,
+      stepIndex: row.step_index, attemptId: row.attempt_id, source: row.source,
+      name: row.name, mime: row.mime, size: row.size, sha256: row.sha256, previewable: !!row.previewable, createdAt: row.created_at };
+  }
+  private attachmentRows(sql: string, ...params: (string | number)[]): Attachment[] {
+    return (this.db.query(sql).all(...params) as Row[]).map(row => this.mapAttachment(row));
+  }
+  /** This explicit metadata projection must never include original or preview BLOBs. */
+  private taskAttachments(taskId: string): Attachment[] {
+    return this.attachmentRows(`SELECT ${ATTACHMENT_COLUMNS} FROM attachments a JOIN task_attachment_links l ON l.attachment_id=a.id WHERE l.task_id=? ORDER BY l.position,a.created_at,a.id`, taskId);
+  }
+  private commentAttachments(commentId: string): Attachment[] {
+    return this.attachmentRows(`SELECT ${ATTACHMENT_COLUMNS} FROM attachments a JOIN comment_attachment_links l ON l.attachment_id=a.id WHERE l.comment_id=? ORDER BY l.position,a.created_at,a.id`, commentId);
+  }
+  listTaskAttachments(taskId: string): Attachment[] {
+    this.getTask(taskId);
+    return this.attachmentRows(`SELECT ${ATTACHMENT_COLUMNS} FROM attachments a WHERE a.task_id=? AND (EXISTS(SELECT 1 FROM task_attachment_links l WHERE l.attachment_id=a.id) OR EXISTS(SELECT 1 FROM comment_attachment_links c WHERE c.attachment_id=a.id)) ORDER BY a.created_at,a.id`, taskId);
+  }
+  getAttachment(taskId: string, id: string): Attachment {
+    const row = this.db.query(`SELECT ${ATTACHMENT_COLUMNS} FROM attachments a WHERE a.id=? AND a.task_id=?`).get(id, taskId) as Row | null;
+    if (!row) throw new AppError('Вложение не найдено в этой задаче', 404);
+    return this.mapAttachment(row);
+  }
+  readAttachment(taskId: string, id: string): { attachment: Attachment; data: Uint8Array } {
+    const attachment = this.getAttachment(taskId, id);
+    const row = this.db.query('SELECT data FROM attachments WHERE id=? AND task_id=?').get(id, taskId) as Row;
+    return { attachment, data: row.data };
+  }
+  attachmentPreviewSize(taskId: string, id: string): number {
+    const attachment = this.getAttachment(taskId, id);
+    if (!attachment.previewable) throw new AppError('У этого файла нет безопасного предпросмотра', 415);
+    return (this.db.query('SELECT preview_size FROM attachments WHERE id=? AND task_id=?').get(id, taskId) as Row).preview_size;
+  }
+  readAttachmentPreview(taskId: string, id: string): { attachment: Attachment; data: Uint8Array; mime: string } {
+    const attachment = this.getAttachment(taskId, id);
+    if (!attachment.previewable) throw new AppError('У этого файла нет безопасного предпросмотра', 415);
+    const row = this.db.query('SELECT preview FROM attachments WHERE id=? AND task_id=?').get(id, taskId) as Row;
+    if (!row.preview) throw new AppError('Предпросмотр недоступен', 404);
+    return { attachment, data: row.preview, mime: 'image/png' };
+  }
+  private inputAttachments(runId: string, turn: number): Attachment[] {
+    return this.attachmentRows(`SELECT ${ATTACHMENT_COLUMNS} FROM attachments a JOIN run_attachment_inputs i ON i.attachment_id=a.id WHERE i.run_id=? AND i.turn=? ORDER BY a.created_at,a.id`, runId, turn);
+  }
+  private assertPublicationRun(runId: string, fence: RunFence): Run {
+    const run = this.getRun(runId);
+    if (run.status !== 'running' || !matchesFence(run, fence)) throw new AppError('Этот вызов агента уже завершён или заменён', 409);
+    return run;
+  }
+  listRunAttachments(runId: string, fence: RunFence): Attachment[] {
+    const run = this.assertPublicationRun(runId, fence);
+    return this.attachmentRows(`SELECT ${ATTACHMENT_COLUMNS} FROM attachments a WHERE a.task_id=? AND (EXISTS(SELECT 1 FROM run_attachment_inputs i WHERE i.attachment_id=a.id AND i.run_id=? AND i.turn=?) OR (a.run_id=? AND a.created_turn=?)) ORDER BY a.created_at,a.id`, run.taskId, runId, run.turn, runId, run.turn);
+  }
+  private advanceAttachmentInputs(run: Run, nextTurn: number, extraIds: string[] = []) {
+    this.db.query('INSERT OR IGNORE INTO run_attachment_inputs(run_id,turn,attachment_id) SELECT run_id,?,attachment_id FROM run_attachment_inputs WHERE run_id=? AND turn=?').run(nextTurn, run.id, run.turn);
+    this.db.query('INSERT OR IGNORE INTO run_attachment_inputs(run_id,turn,attachment_id) SELECT ?,?,id FROM attachments WHERE task_id=? AND run_id=?').run(run.id, nextTurn, run.taskId, run.id);
+    for (const id of extraIds) this.db.query('INSERT OR IGNORE INTO run_attachment_inputs(run_id,turn,attachment_id) VALUES (?,?,?)').run(run.id, nextTurn, id);
+  }
+  /** Bounded cleanup never touches committed files, including files retained by old run snapshots. */
+  cleanupAttachments(now = Date.now(), limit = 100): number {
+    const bound = Math.max(1, Math.min(100, Math.floor(limit) || 100));
+    return this.db.query('DELETE FROM attachments WHERE id IN (SELECT id FROM attachments WHERE task_id IS NULL AND expires_at<=? ORDER BY expires_at LIMIT ?)').run(now, bound).changes;
+  }
+  private assertAttachmentQuota(size: number, previewSize: number, taskId: string | null) {
+    const total = this.db.query('SELECT COALESCE(sum(size+preview_size),0) AS bytes FROM attachments').get() as Row;
+    if (total.bytes + size + previewSize > ATTACHMENT_TOTAL_MAX_BYTES) throw new AppError('Достигнут общий лимит вложений (1 ГиБ)', 413);
+    if (taskId === null) {
+      const usage = this.db.query('SELECT count(*) AS n,COALESCE(sum(size),0) AS bytes FROM attachments WHERE task_id IS NULL').get() as Row;
+      if (usage.n >= ATTACHMENT_STAGING_MAX_COUNT || usage.bytes + size > ATTACHMENT_STAGING_MAX_BYTES) throw new AppError('Слишком много незавершённых загрузок. Удалите лишние файлы или сохраните их в задачу.', 413);
+    } else this.assertTaskAttachmentQuota(taskId, 1, size);
+  }
+  private assertTaskAttachmentQuota(taskId: string, count: number, size: number) {
+    const usage = this.db.query('SELECT count(*) AS n,COALESCE(sum(size),0) AS bytes FROM attachments WHERE task_id=?').get(taskId) as Row;
+    if (usage.n + count > ATTACHMENT_TASK_MAX_COUNT || usage.bytes + size > ATTACHMENT_TASK_MAX_BYTES) throw new AppError('Лимит вложений задачи: 200 файлов и 200 МиБ, включая историю запусков', 413);
+  }
+  private insertAttachment(prepared: PreparedAttachment, now: number, identity?: { run: Run; fence: RunFence; commentId: string | null }): Attachment {
+    const payload = preparedAttachmentPayload(prepared);
+    const taskId = identity?.run.taskId ?? null;
+    this.assertAttachmentQuota(prepared.size, payload.preview?.byteLength ?? 0, taskId);
+    const id = crypto.randomUUID();
+    this.db.query(`INSERT INTO attachments (id,task_id,comment_id,run_id,step_index,attempt_id,created_turn,source,name,mime,size,sha256,previewable,created_at,expires_at,data,preview,preview_size) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, taskId, identity?.commentId ?? null, identity?.run.id ?? null, identity?.fence.currentStepIndex ?? null, identity?.fence.attemptId ?? null, identity?.run.turn ?? null,
+        identity ? 'agent' : 'user', prepared.name, prepared.mime, prepared.size, prepared.sha256, +prepared.previewable, now, identity ? null : now + ATTACHMENT_STAGING_TTL_MS, payload.data, payload.preview, payload.preview?.byteLength ?? 0);
+    return this.mapAttachment(this.db.query(`SELECT ${ATTACHMENT_COLUMNS} FROM attachments a WHERE a.id=?`).get(id) as Row);
+  }
+  stageAttachment(prepared: PreparedAttachment, now = Date.now()): Attachment {
+    return this.db.transaction(() => { this.cleanupAttachments(now); return this.insertAttachment(prepared, now); }).immediate();
+  }
+  deleteStagedAttachment(id: string): void {
+    this.db.transaction(() => {
+      const row = this.db.query('SELECT task_id FROM attachments WHERE id=?').get(id) as Row | null;
+      if (!row) throw new AppError('Загрузка не найдена', 404);
+      if (row.task_id !== null) throw new AppError('Сохранённое вложение нельзя удалить как временную загрузку', 409);
+      this.db.query('DELETE FROM attachments WHERE id=? AND task_id IS NULL').run(id);
+    }).immediate();
+  }
+  private bindAttachments(taskId: string, idsValue: unknown, now: number, commentId: string | null = null, run: Run | null = null, allowBound = false): string[] {
+    const ids = attachmentIds(idsValue);
+    const staged: Attachment[] = [];
+    for (const id of ids) {
+      const row = this.db.query(`SELECT ${ATTACHMENT_COLUMNS},a.expires_at FROM attachments a WHERE a.id=?`).get(id) as Row | null;
+      if (!row || (row.task_id === null && row.expires_at <= now)) throw new AppError('Загрузка не найдена или срок её хранения истёк. Загрузите файл снова.', 404);
+      if (row.task_id !== null && (row.task_id !== taskId || !allowBound)) throw new AppError('Вложение уже сохранено в другой записи', 409);
+      if (row.task_id === null) staged.push(this.mapAttachment(row));
+    }
+    this.assertTaskAttachmentQuota(taskId, staged.length, staged.reduce((sum, item) => sum + item.size, 0));
+    for (const item of staged) this.db.query('UPDATE attachments SET task_id=?,comment_id=?,run_id=?,step_index=?,attempt_id=?,created_turn=?,expires_at=NULL WHERE id=? AND task_id IS NULL')
+      .run(taskId, commentId, run?.id ?? null, run?.currentStepIndex ?? null, run ? runFence(run).attemptId : null, run?.turn ?? null, item.id);
+    return ids;
+  }
+  private replaceTaskAttachments(taskId: string, value: unknown, now: number) {
+    if (value === undefined) return;
+    const ids = this.bindAttachments(taskId, value, now, null, null, true);
+    // Existing comment attachments are not moved or re-parented by task editing.
+    for (const id of ids) {
+      const original = this.getAttachment(taskId, id);
+      if (original.commentId !== null) throw new AppError('Для задачи выберите отдельную загрузку, а не файл комментария', 409);
+    }
+    this.db.query('DELETE FROM task_attachment_links WHERE task_id=?').run(taskId);
+    ids.forEach((id, position) => this.db.query('INSERT INTO task_attachment_links(task_id,attachment_id,position) VALUES (?,?,?)').run(taskId, id, position));
+  }
+  private publicationKey(run: Run, fence: RunFence, requestId: string): string {
+    if (typeof requestId !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(requestId)) throw new AppError('Некорректный requestId');
+    return JSON.stringify([run.id, run.turn, fence.currentStepIndex, fence.attemptId, requestId]);
+  }
+  private readPublication(key: string, fingerprint: string): string | null {
+    const row = this.db.query('SELECT fingerprint,result_id FROM attachment_publications WHERE key=?').get(key) as Row | null;
+    if (!row) return null;
+    if (row.fingerprint !== fingerprint) throw new AppError('requestId уже использован для другого содержимого', 409);
+    return row.result_id;
+  }
+  publishAgentAttachment(runId: string, fence: RunFence, requestId: string, prepared: PreparedAttachment, caption?: string, now = Date.now()): Attachment {
+    if (caption !== undefined && (typeof caption !== 'string' || caption.length > 16_000 || caption.includes('\0'))) throw new AppError('Подпись: не больше 16000 символов');
+    const cleanCaption = caption?.trim() || null;
+    preparedAttachmentPayload(prepared);
+    return this.db.transaction(() => {
+      const run = this.assertPublicationRun(runId, fence);
+      const key = this.publicationKey(run, fence, requestId);
+      const fingerprint = createHash('sha256').update(JSON.stringify(['add_attachment', prepared.name, prepared.mime, prepared.sha256, cleanCaption])).digest('hex');
+      const prior = this.readPublication(key, fingerprint);
+      if (prior) return this.getAttachment(run.taskId, prior);
+      const comment = cleanCaption ? this.comment(run.taskId, runId, 'agent', cleanCaption, now, run.currentStepIndex) : null;
+      const result = this.insertAttachment(prepared, now, { run, fence, commentId: comment?.id ?? null });
+      if (comment) this.db.query('INSERT INTO comment_attachment_links(comment_id,attachment_id,position) VALUES (?,?,0)').run(comment.id, result.id);
+      else {
+        const count = (this.db.query('SELECT count(*) AS n FROM task_attachment_links WHERE task_id=?').get(run.taskId) as Row).n;
+        if (count >= ATTACHMENT_MAX_COUNT) throw new AppError('У задачи уже 20 прямых вложений. Добавьте файл с подписью в комментарий.', 413);
+        this.db.query('INSERT INTO task_attachment_links(task_id,attachment_id,position) VALUES (?,?,?)').run(run.taskId, result.id, count);
+      }
+      this.db.query('INSERT INTO attachment_publications(key,run_id,fingerprint,result_id) VALUES (?,?,?,?)').run(key, runId, fingerprint, result.id);
+      return result;
+    }).immediate();
+  }
+  publishAgentComment(runId: string, fence: RunFence, requestId: string, value: { body: string; attachmentIds?: string[] }, now = Date.now()): Comment {
+    const ids = attachmentIds(value.attachmentIds);
+    if (typeof value.body !== 'string' || value.body.length > 16_000 || value.body.includes('\0') || (!value.body.trim() && !ids.length)) throw new AppError('Комментарий: введите текст или приложите файл');
+    const body = value.body.trim();
+    return this.db.transaction(() => {
+      const run = this.assertPublicationRun(runId, fence);
+      const key = this.publicationKey(run, fence, requestId);
+      const fingerprint = createHash('sha256').update(JSON.stringify(['add_comment', body, ids])).digest('hex');
+      const prior = this.readPublication(key, fingerprint);
+      if (prior) return this.mapComment(this.db.query('SELECT * FROM comments WHERE id=?').get(prior) as Row);
+      const visible = new Set(this.listRunAttachments(runId, fence).map(item => item.id));
+      if (ids.some(id => !visible.has(id))) throw new AppError('Вложение недоступно этому вызову агента', 404);
+      const comment = this.comment(run.taskId, run.id, 'agent', body, now, run.currentStepIndex);
+      ids.forEach((id, position) => this.db.query('INSERT INTO comment_attachment_links(comment_id,attachment_id,position) VALUES (?,?,?)').run(comment.id, id, position));
+      this.db.query('INSERT INTO attachment_publications(key,run_id,fingerprint,result_id) VALUES (?,?,?,?)').run(key, runId, fingerprint, comment.id);
+      return this.mapComment(this.db.query('SELECT * FROM comments WHERE id=?').get(comment.id) as Row);
+    }).immediate();
+  }
+  private mapComment(row: Row): Comment {
+    return { stepIndex: row.step_index ?? null, id: row.id, taskId: row.task_id, runId: row.run_id, kind: row.kind, body: row.body, createdAt: row.created_at, attachments: this.commentAttachments(row.id) };
+  }
   private assignedWorker(id: string | null | undefined, currentId?: string | null): Worker | null {
     if (id == null) return null;
     const worker = this.getWorker(id);
@@ -283,7 +498,7 @@ export class Store {
         }
       }
     } else invalid();
-    return { steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: row.worker_snapshot ? JSON.parse(row.worker_snapshot) as WorkerSnapshot : null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
+    return { inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: row.worker_snapshot ? JSON.parse(row.worker_snapshot) as WorkerSnapshot : null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
       trigger: row.trigger, scheduledFor: row.scheduled_for, status: row.status, sessionId: row.session_id,
       startedAt: row.started_at, updatedAt: row.updated_at, finishedAt: row.finished_at, summary: row.summary,
       error: row.error, turn: row.turn, mock: !!row.mock };
@@ -291,7 +506,7 @@ export class Store {
   private mapTask(row: Row): Task {
     const latest = this.db.query('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1').get(row.id) as Row | null;
     const worker = row.worker_id ? this.getWorker(row.worker_id) : null;
-    return { steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd,
+    return { attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd,
       schedule: row.schedule, intervalMinutes: row.interval_minutes, firstRunAt: row.first_run_at,
       nextRunAt: row.next_run_at, paused: !!row.paused, createdAt: row.created_at, updatedAt: row.updated_at,
       status: latest?.status ?? 'ready', latestRun: latest ? this.mapRun(latest) : null,
@@ -313,8 +528,8 @@ export class Store {
     return row ? this.mapRun(row) : null;
   }
   detail(id: string): TaskDetail {
-    return { task: this.getTask(id), runs: (this.db.query('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC').all(id) as Row[]).map(r => this.mapRun(r)),
-      comments: (this.db.query('SELECT * FROM comments WHERE task_id = ? ORDER BY seq').all(id) as Row[]).map(r => ({ stepIndex: r.step_index ?? null, id: r.id, taskId: r.task_id, runId: r.run_id, kind: r.kind, body: r.body, createdAt: r.created_at })) };
+    return { task: this.getTask(id), attachments: this.listTaskAttachments(id), runs: (this.db.query('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC').all(id) as Row[]).map(r => this.mapRun(r)),
+      comments: (this.db.query('SELECT * FROM comments WHERE task_id = ? ORDER BY seq').all(id) as Row[]).map(r => this.mapComment(r)) };
   }
   private taskSteps(value: unknown, previous: TaskStepInput[] = []): TaskStepInput[] {
     const steps = validateWorkflowSteps(value);
@@ -336,6 +551,7 @@ export class Store {
       this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
         input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt,
         input.schedule === 'interval' ? (input.firstRunAt ?? now) : null, +input.paused, now, now, worker?.id ?? null, JSON.stringify(steps));
+      this.replaceTaskAttachments(id, input.attachmentIds, now);
       return this.getTask(id);
     }).immediate();
   }
@@ -350,15 +566,22 @@ export class Store {
       if (changedSchedule) next = input.schedule === 'interval' ? (input.firstRunAt ?? now) : null;
       this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=? WHERE id=?`)
         .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), id);
+      this.replaceTaskAttachments(id, input.attachmentIds, now);
       return this.getTask(id);
     }).immediate();
   }
-  comment(taskId: string, runId: string | null, kind: Comment['kind'], body: string, now = Date.now(), stepIndex?: number | null): Comment {
-    this.getTask(taskId);
-    const result = { id: crypto.randomUUID(), taskId, runId, kind, body, createdAt: now,
-      stepIndex: stepIndex === undefined && runId ? this.getRun(runId).currentStepIndex : stepIndex ?? null };
-    this.db.query('INSERT INTO comments (id,task_id,run_id,kind,body,created_at,step_index) VALUES (?,?,?,?,?,?,?)').run(result.id, taskId, runId, kind, body, now, result.stepIndex);
-    return result;
+  comment(taskId: string, runId: string | null, kind: Comment['kind'], body: string, now = Date.now(), stepIndex?: number | null, ids?: string[]): Comment {
+    return this.db.transaction(() => {
+      this.getTask(taskId);
+      const run = runId ? this.getRun(runId) : null;
+      if (run && run.taskId !== taskId) throw new AppError('Запуск относится к другой задаче', 409);
+      const id = crypto.randomUUID();
+      const index = stepIndex === undefined && run ? run.currentStepIndex : stepIndex ?? null;
+      this.db.query('INSERT INTO comments (id,task_id,run_id,kind,body,created_at,step_index) VALUES (?,?,?,?,?,?,?)').run(id, taskId, runId, kind, body, now, index);
+      const bound = this.bindAttachments(taskId, ids, now, id, run);
+      bound.forEach((attachmentId, position) => this.db.query('INSERT INTO comment_attachment_links(comment_id,attachment_id,position) VALUES (?,?,?)').run(id, attachmentId, position));
+      return this.mapComment(this.db.query('SELECT * FROM comments WHERE id=?').get(id) as Row);
+    }).immediate();
   }
   private insertRun(task: Task, trigger: Run['trigger'], scheduledFor: number | null, mock: boolean, now: number): Run {
     if (this.activeRun(task.id)) throw new AppError('У задачи уже есть активный запуск. Ответьте агенту, повторите текущий этап или отмените запуск.', 409);
@@ -371,6 +594,7 @@ export class Store {
     this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,scheduled_for,status,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,steps_snapshot,current_step_index,workflow_version) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?,?,?,?,?)`)
       .run(id, task.id, worker?.provider ?? task.provider, task.cwd, task.instruction, trigger, scheduledFor, now, now, +mock, worker?.id ?? null,
         worker ? JSON.stringify(worker) : null, JSON.stringify(instructions), JSON.stringify(steps), steps.length ? 0 : null, steps.length ? 1 : 0);
+    for (const attachment of this.listTaskAttachments(task.id)) this.db.query('INSERT INTO run_attachment_inputs(run_id,turn,attachment_id) VALUES (?,1,?)').run(id, attachment.id);
     this.comment(task.id, id, 'system', mock ? 'Демо-запуск: используется тестовый агент, реальные CLI не вызываются.' : `Запуск ${worker?.provider === 'claude' || (!worker && task.provider === 'claude') ? 'Claude Code' : 'Codex'} через CLI.`, now);
     return this.getRun(id);
   }
@@ -430,6 +654,7 @@ export class Store {
           const next = run.steps[index]!;
           if (next.status !== 'pending') throw new AppError('Следующий этап уже был запущен', 409);
           beginAttempt(next, run.turn + 1, now);
+          this.advanceAttachmentInputs(run, run.turn + 1);
           this.persistSteps(run);
           this.db.query(`UPDATE runs SET current_step_index=?,provider=?,worker_id=?,worker_snapshot=?,session_id=NULL,turn=turn+1,updated_at=?,summary=NULL,error=NULL,finished_at=NULL WHERE id=?`)
             .run(index, next.worker.provider, next.workerId, JSON.stringify(next.worker), now, id);
@@ -443,7 +668,7 @@ export class Store {
       return this.getRun(id);
     }).immediate();
   }
-  resume(id: string, answer: string, acknowledgeInterruption = false, now = Date.now()): Run {
+  resume(id: string, answer: string, acknowledgeInterruption = false, now = Date.now(), ids?: string[]): Run {
     return this.db.transaction(() => {
       const run = this.getRun(id);
       if (!['waiting_input', 'interrupted'].includes(run.status)) throw new AppError('Этот запуск нельзя продолжить', 409);
@@ -454,7 +679,8 @@ export class Store {
         updateStep(run.steps[run.currentStepIndex]!, { status: 'running', turn: run.turn + 1, updatedAt: now, finishedAt: null, error: null });
         this.persistSteps(run);
       }
-      this.comment(run.taskId, id, 'user', answer, now);
+      this.comment(run.taskId, id, 'user', answer, now, undefined, ids);
+      this.advanceAttachmentInputs(run, run.turn + 1, attachmentIds(ids));
       return this.getRun(id);
     }).immediate();
   }
@@ -467,6 +693,7 @@ export class Store {
       } else if (!['failed', 'blocked'].includes(run.status)) throw new AppError('Этот этап нельзя повторить. Сохранённую прерванную сессию нужно продолжить.', 409);
       const step = run.steps[run.currentStepIndex]!;
       beginAttempt(step, run.turn + 1, now);
+      this.advanceAttachmentInputs(run, run.turn + 1);
       this.persistSteps(run);
       this.db.query("UPDATE runs SET status='running',session_id=NULL,turn=turn+1,updated_at=?,finished_at=NULL,summary=NULL,error=NULL WHERE id=?").run(now, id);
       this.comment(run.taskId, id, 'system', 'Повтор текущего этапа в новой сессии. Предыдущие попытки сохранены; выполненные действия не откатываются. Разрешения CLI не изменены.', now);

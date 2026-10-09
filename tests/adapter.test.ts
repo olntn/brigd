@@ -387,3 +387,91 @@ describe('clearly labelled mock adapter', () => {
     await expect(startAgent({ ...input, answer: 'Yes' }, capture()).result).rejects.toThrow('original session');
   });
 });
+
+describe('ephemeral task attachment CLI configuration', () => {
+  const bridge = {
+    name: 'brigd_task_0123456789abcdef', command: '/usr/local/bin/bun', args: ['/app/dist/task-mcp-stdio.js'],
+    env: { BRIGD_TASK_SOCKET: '/tmp/private-app-socket/broker.sock', BRIGD_TASK_CAPABILITY: 'a'.repeat(64) },
+    context: { taskId: 'task-1', runId: 'run-1', turn: 3, stepIndex: 0, attachments: [{ id: 'file-1', name: 'image.png', mime: 'image/png', size: 200, previewable: true }], outputDirectory: '/workspace/.brigd-outbox-1234' },
+  };
+  const tools = ['list_attachments', 'read_attachment', 'view_attachment', 'add_comment', 'add_attachment'];
+  const input: AgentInput = { provider: 'codex', cwd: '/workspace', instruction: 'Inspect inputs and publish a report.', taskBridge: bridge };
+  const caps = { schema: true, permissionPrompts: true, taskMcp: true };
+  test.each([undefined, sid])('Codex exact per-tool config preserves workspace/on-request on new and resumed invocations', sessionId => {
+    const args = buildArgv({ ...input, sessionId, ...(sessionId ? { answer: 'Proceed with those inputs.' } : {}) }, 'codex', caps);
+    expect(args.slice(0, 6)).toEqual(['codex', 'exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="on-request"']);
+    expect(args).toContain('--strict-config');
+    const settings = args.flatMap((value, index) => value === '-c' ? [args[index + 1]!] : []);
+    expect(settings).toContain(`mcp_servers.${bridge.name}.required=true`);
+    expect(settings).toContain(`mcp_servers.${bridge.name}.env_vars=["BRIGD_TASK_SOCKET","BRIGD_TASK_CAPABILITY"]`);
+    expect(settings).toContain(`mcp_servers.${bridge.name}.enabled_tools=${JSON.stringify(tools)}`);
+    for (const tool of tools) expect(settings).toContain(`mcp_servers.${bridge.name}.tools.${tool}.approval_mode="approve"`);
+    expect(settings.filter(s => s.includes('.approval_mode='))).toHaveLength(5);
+    expect(settings.some(s => s.includes('default_tools_approval'))).toBe(false);
+    expect(JSON.stringify(args)).not.toContain(bridge.env.BRIGD_TASK_CAPABILITY); expect(JSON.stringify(args)).not.toContain(bridge.env.BRIGD_TASK_SOCKET);
+    expect(args).not.toContain('--dangerously-bypass-approvals-and-sandbox'); expect(args).not.toContain('--full-auto');
+    if (sessionId) expect(args.slice(-2, -1)).toEqual([sid]);
+  });
+  test.each([undefined, sid])('Claude adds only exact task tool allows with env interpolation and default permissions', sessionId => {
+    const args = buildArgv({ ...input, provider: 'claude', sessionId }, 'claude', caps);
+    expect(args[args.indexOf('--permission-mode') + 1]).toBe('default');
+    expect(args[args.indexOf('--permission-prompts') + 1]).toBe('none');
+    const names = args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--mcp-config'));
+    expect(names).toEqual(tools.map(tool => `mcp__${bridge.name}__${tool}`));
+    expect(names.some(name => name.includes('*') || name.startsWith('Bash') || name.startsWith('Read'))).toBe(false);
+    const config = JSON.parse(args[args.indexOf('--mcp-config') + 1]!);
+    expect(Object.keys(config.mcpServers)).toEqual([bridge.name]);
+    expect(config.mcpServers[bridge.name]).toEqual({ type: 'stdio', command: bridge.command, args: bridge.args,
+      env: { BRIGD_TASK_SOCKET: '${BRIGD_TASK_SOCKET}', BRIGD_TASK_CAPABILITY: '${BRIGD_TASK_CAPABILITY}' } });
+    expect(JSON.stringify(args)).not.toContain(bridge.env.BRIGD_TASK_CAPABILITY); expect(JSON.stringify(args)).not.toContain(bridge.env.BRIGD_TASK_SOCKET);
+    expect(args).not.toContain('--strict-mcp-config'); expect(args).not.toContain('--dangerously-skip-permissions');
+    if (sessionId) expect(args[args.indexOf('--resume') + 1]).toBe(sid);
+  });
+  test('prompt contains bounded untrusted metadata, outbox instructions, no credentials and unchanged final envelope', () => {
+    const prompt = buildPrompt({ ...input, taskBridge: { ...bridge, context: { ...bridge.context, attachments: Array.from({ length: 200 }, (_, i) => ({ ...bridge.context.attachments[0]!, id: `file-${i}`, name: `file-${i}.png` })) } } });
+    expect(prompt).toContain('"attachmentCount":200'); expect(prompt).toContain('file-9.png'); expect(prompt).not.toContain('file-10.png');
+    expect(prompt).toContain(bridge.context.outputDirectory); expect(prompt).toContain('UNTRUSTED METADATA');
+    expect(prompt).toContain('exactly status, summary, and questions'); expect(prompt).toContain('idempotency_key');
+    expect(prompt).not.toContain(bridge.env.BRIGD_TASK_CAPABILITY); expect(prompt).not.toContain(bridge.env.BRIGD_TASK_SOCKET);
+    expect(prompt).toContain('Do not commit them unless the user explicitly asks');
+  });
+  test('unsupported CLI tool config fails closed rather than silently ignoring per-task capabilities', () => {
+    for (const provider of ['codex', 'claude'] as const) expect(() => buildArgv({ ...input, provider }, provider, { ...caps, taskMcp: false })).toThrow('cannot safely configure');
+    expect(capabilitiesFromHelp('codex', '--json --sandbox --config --strict-config', '--json --config --strict-config SESSION_ID').taskMcp).toBe(true);
+    expect(capabilitiesFromHelp('codex', '--json --sandbox --config', '--json --config SESSION_ID').taskMcp).toBe(false);
+    expect(capabilitiesFromHelp('claude', '--print --output-format stream-json --verbose --resume --permission-mode --permission-prompts --mcp-config --allowedTools').taskMcp).toBe(true);
+    expect(capabilitiesFromHelp('claude', '--print --output-format stream-json --verbose --resume --permission-mode --mcp-config --allowedTools').taskMcp).toBe(false);
+    expect(() => buildPrompt({ ...input, taskBridge: { ...bridge, name: 'someone_else.tools.shell' } })).toThrow('Invalid ephemeral');
+  });
+  test('child-only environment forwarding reaches a synthetic CLI without changing process globals', async () => {
+    const folder = mkdtempSync(join(tmpdir(), 'brigd-mcp-cli-')), oldPath = process.env.PATH;
+    const oldCapability = process.env.BRIGD_TASK_CAPABILITY;
+    const mockBridge = { ...bridge, command: process.execPath };
+    writeFileSync(join(folder, 'claude'), `#!${process.execPath}\nif(process.argv.includes('--help')) console.log('--print --output-format stream-json --verbose --resume --permission-mode --permission-prompts --mcp-config --allowedTools'); else {
+      if(process.env.BRIGD_TASK_CAPABILITY !== ${JSON.stringify(mockBridge.env.BRIGD_TASK_CAPABILITY)} || process.argv.some(x=>x.includes(process.env.BRIGD_TASK_CAPABILITY))) process.exit(9);
+      console.log(JSON.stringify({type:'system',subtype:'init',session_id:${JSON.stringify(sid)}}));
+      console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,session_id:${JSON.stringify(sid)},result:JSON.stringify(${JSON.stringify(completed)})}));
+    }`, { mode: 0o700 });
+    try {
+      process.env.PATH = folder + ':' + oldPath;
+      expect((await startAgent({ ...input, provider: 'claude', cwd: folder, taskBridge: mockBridge }, capture()).result).envelope).toEqual(completed);
+      expect(process.env.BRIGD_TASK_CAPABILITY).toBe(oldCapability);
+    } finally { process.env.PATH = oldPath; rmSync(folder, { recursive: true, force: true }); }
+  });
+  test.each(['codex', 'claude'] as const)('%s native image tool results cannot replace or weaken the final envelope', provider => {
+    const image = { type: 'image', data: Buffer.alloc(256 * 1024, 42).toString('base64'), mimeType: 'image/png' };
+    const events = provider === 'codex' ? [
+      { type: 'thread.started', thread_id: sid },
+      { type: 'item.completed', item: { id: 'image-tool', type: 'mcp_tool_call', server: bridge.name, tool: 'view_attachment', status: 'completed', result: { content: [image], isError: false } } },
+      ...codex(completed).slice(1),
+    ] : [
+      { type: 'system', subtype: 'init', session_id: sid },
+      { type: 'user', session_id: sid, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'image-tool', content: [image] }] } },
+      ...claude(completed).slice(1),
+    ];
+    const callbacks = capture(), protocol = new AgentProtocol(provider, callbacks);
+    protocol.push(events.map(e => JSON.stringify(e)).join('\n') + '\n');
+    expect(protocol.finish(0).envelope).toEqual(completed);
+    expect(JSON.stringify(callbacks.comments)).not.toContain(image.data);
+  });
+});

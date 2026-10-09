@@ -5,6 +5,8 @@ import { AppError } from './store';
 import { MAX_AVATAR_BYTES, validateAvatar } from './avatars';
 import { textField, validateTask, validateWorker } from './validation';
 import { TASK_JSON_LIMIT } from './workflows';
+import { ATTACHMENT_MAX_BYTES } from '../src/lib/attachments';
+import { attachmentIds, attachmentDisposition, prepareAttachment } from './attachments';
 import { INSTRUCTION_JSON_LIMIT, validateInstruction, validateInstructionPatch } from './instructions';
 
 export interface HttpOptions { port: number; dev?: boolean; root?: string; startedAt?: number; allowedHosts?: string[]; allowedOrigins?: string[]; defaultCwd?: string; }
@@ -45,6 +47,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
   if (options.dev) { origins.add('http://127.0.0.1:5173'); origins.add('http://localhost:5173'); }
   const dist = resolve(options.root ?? process.cwd(), 'dist');
   const startedAt = options.startedAt ?? Date.now();
+  let uploading = 0;
   return async (req: Request): Promise<Response> => {
     try {
       const url = new URL(req.url);
@@ -59,6 +62,35 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         const info: AppInfo = { mode: engine.mock ? 'mock' : 'cli', cwd: options.defaultCwd ?? process.cwd(), scheduler: 'running', startedAt,
           providers: [{ id: 'codex', available: engine.mock || !!Bun.which('codex'), label: 'Codex' }, { id: 'claude', available: engine.mock || !!Bun.which('claude'), label: 'Claude Code' }] };
         return json(info);
+      }
+      if (path === '/api/uploads' && method === 'POST') {
+        if (uploading >= 4) throw new AppError('Слишком много одновременных загрузок. Повторите через несколько секунд.', 429);
+        uploading++;
+        try {
+          const name = url.searchParams.get('name') ?? '';
+          const data = await readBody(req, ATTACHMENT_MAX_BYTES);
+          const prepared = await prepareAttachment(data, req.headers.get('content-type') ?? 'application/octet-stream', name);
+          return json(engine.store.stageAttachment(prepared), 201);
+        } finally { uploading--; }
+      }
+      const uploadMatch = path.match(/^\/api\/uploads\/([a-zA-Z0-9-]+)$/);
+      if (uploadMatch && method === 'DELETE') { engine.store.deleteStagedAttachment(uploadMatch[1]!); return json({ ok: true }); }
+      const attachmentMatch = path.match(/^\/api\/tasks\/([a-zA-Z0-9-]+)\/attachments\/([a-zA-Z0-9-]+)$/);
+      if (attachmentMatch && (method === 'GET' || method === 'HEAD')) {
+        const [, taskId, attachmentId] = attachmentMatch;
+        const metadata = engine.store.getAttachment(taskId!, attachmentId!);
+        const preview = url.searchParams.get('preview') === '1' && url.searchParams.get('download') !== '1';
+        if (preview && !metadata.previewable) throw new AppError('У этого файла нет безопасного предпросмотра', 415);
+        const value = method === 'HEAD' ? null : preview ? engine.store.readAttachmentPreview(taskId!, attachmentId!) : engine.store.readAttachment(taskId!, attachmentId!);
+        const inline = preview;
+        return new Response(method === 'HEAD' ? null : value!.data as BodyInit, { headers: {
+          ...securityHeaders,
+          'Content-Type': preview ? 'image/png' : metadata.mime,
+          'Content-Length': String(preview ? method === 'HEAD' ? engine.store.attachmentPreviewSize(taskId!, attachmentId!) : value!.data.byteLength : metadata.size),
+          'Content-Disposition': attachmentDisposition(metadata.name, inline),
+          'Content-Security-Policy': "default-src 'none'; sandbox; frame-ancestors 'none'",
+          'Cross-Origin-Resource-Policy': 'same-origin'
+        } });
       }
       if (path === '/api/avatars' && method === 'POST') {
         const mime = req.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? '';
@@ -106,13 +138,22 @@ export function createHandler(engine: Engine, options: HttpOptions) {
           return json(engine.store.updateTask(id, await validateTask({ ...current, ...patch })));
         }
         if (action === 'run' && method === 'POST') { await body(req); return json(engine.start(id), 201); }
-        if (action === 'comments' && method === 'POST') return json(engine.store.comment(id, null, 'user', textField((await body(req)).body, 'Комментарий', 8_000)), 201);
+        if (action === 'comments' && method === 'POST') {
+          const value = await body(req);
+          const ids = attachmentIds(value.attachmentIds);
+          const text = (value.body === undefined || value.body === '') && ids.length ? '' : textField(value.body, 'Комментарий', 8_000);
+          return json(engine.store.comment(id, null, 'user', text, Date.now(), undefined, ids), 201);
+        }
       }
       const runMatch = path.match(/^\/api\/runs\/([a-zA-Z0-9-]+)\/(resume|cancel|retry)$/);
       if (runMatch && method === 'POST') {
         const [, id, action] = runMatch;
         const value = await body(req);
-        return json(action === 'cancel' ? engine.cancel(id, value.acknowledgeInterruption === true) : action === 'retry' ? engine.retry(id, value.acknowledgeInterruption === true) : engine.resume(id, textField(value.answer, 'Ответ', 8_000), value.acknowledgeInterruption === true));
+        if (action === 'cancel') return json(engine.cancel(id, value.acknowledgeInterruption === true));
+        if (action === 'retry') return json(engine.retry(id, value.acknowledgeInterruption === true));
+        const ids = attachmentIds(value.attachmentIds);
+        const answer = (value.answer === undefined || value.answer === '') && ids.length ? 'Ответ приложен во вложениях.' : textField(value.answer, 'Ответ', 8_000);
+        return json(engine.resume(id, answer, value.acknowledgeInterruption === true, ids));
       }
       if (path.startsWith('/api/')) throw new AppError('Маршрут не найден', 404);
       if (method !== 'GET' && method !== 'HEAD') throw new AppError('Метод не поддерживается', 405);

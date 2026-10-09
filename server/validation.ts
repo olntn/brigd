@@ -3,6 +3,7 @@ import { isAbsolute } from 'node:path';
 import type { Effort, TaskInput, WorkerInput } from '../src/lib/types';
 import { AppError } from './store';
 import { validateWorkflowSteps } from './workflows';
+import { attachmentIds } from './attachments';
 import { effortOptions } from '../src/lib/workers';
 
 export function textField(value: unknown, label: string, max: number): string {
@@ -36,7 +37,7 @@ export async function validateTask(value: unknown): Promise<TaskInput> {
       firstRunAt = v.firstRunAt;
     }
   }
-  return { steps: validateWorkflowSteps(v.steps), workerId, title, instruction, provider: v.provider, cwd, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
+  return { ...(v.attachmentIds !== undefined ? { attachmentIds: attachmentIds(v.attachmentIds) } : {}), steps: validateWorkflowSteps(v.steps), workerId, title, instruction, provider: v.provider, cwd, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
 }
 
 export function validateWorker(value: unknown): WorkerInput & { archived?: boolean } {

@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import sharp from 'sharp';
 
 // Real HTTP + real service processes, but strictly mock agents and a disposable DB.
 const directory = mkdtempSync(join(tmpdir(), 'brigd-smoke-'));
@@ -32,7 +33,12 @@ async function request(path: string, value?: unknown, method = value === undefin
   if (!response.ok) throw new Error(`${path}: ${response.status} ${await response.text()}`);
   return response.json();
 }
-const create = (title: string, workerId: string | null = null) => request('/api/tasks', { workerId, title, instruction: '[ask] Mock smoke only.', provider: 'codex', cwd: directory, schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false });
+const create = (title: string, workerId: string | null = null, attachmentIds: string[] = []) => request('/api/tasks', { workerId, attachmentIds, title, instruction: '[ask] Mock smoke only.', provider: 'codex', cwd: directory, schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false });
+async function uploadFile(name: string, bytes: Uint8Array, mime: string) {
+  const response = await fetch(`${origin}/api/uploads?name=${encodeURIComponent(name)}`, { method: 'POST', headers: { Origin: origin, 'Content-Type': mime }, body: new Uint8Array(bytes) });
+  assert(response.status === 201, `Attachment upload failed: ${response.status} ${await response.clone().text()}`);
+  return response.json();
+}
 try {
   await start('TRACKT');
   assert((await fetch(origin)).status === 200, 'Production UI must be built');
@@ -47,7 +53,15 @@ try {
   assert(upload.status === 201, 'Avatar upload failed');
   const { avatarUrl } = await upload.json();
   const worker = await request('/api/workers', { name: 'Smoke reviewer', provider: 'codex', effort: 'high', communicationStyle: 'Кратко и по-русски.', avatarUrl });
-  const task = await create('Waiting state survives restart', worker.id);
+  // This file exceeds the unrelated avatar limit: exercise Bun.serve's real
+  // request-size ceiling as well as the attachment route's own bounded reader.
+  const largeFileBytes = Buffer.alloc(384 * 1024, 'a');
+  const largeFile = await uploadFile('beyond-avatar-limit.txt', largeFileBytes, 'text/plain');
+  const screenshotBytes = await sharp({ create: { width: 16, height: 16, channels: 4, background: '#6f54dc' } }).png().toBuffer();
+  const screenshot = await uploadFile('input-screen.png', screenshotBytes, 'image/png');
+  const task = await create('Waiting state survives restart', worker.id, [largeFile.id, screenshot.id]);
+  const attachmentPreview = await fetch(`${origin}/api/tasks/${task.id}/attachments/${screenshot.id}?preview=1`);
+  assert(attachmentPreview.ok && attachmentPreview.headers.get('content-type') === 'image/png', 'Safe raster preview missing');
   await request(`/api/tasks/${task.id}/run`, {});
   const waiting = await poll(() => request(`/api/tasks/${task.id}`), value => value.task.status === 'waiting_input');
   const session = waiting.runs[0].sessionId;
@@ -56,6 +70,9 @@ try {
   await request(`/api/instructions/${laterGuidance.id}`, { enabled: true }, 'PATCH');
   await request(`/api/instructions/${guidance.id}`, {}, 'DELETE');
   assert(waiting.runs[0].worker?.effort === 'high' && waiting.runs[0].worker?.avatarUrl === avatarUrl, 'Worker snapshot was not captured');
+  assert(waiting.runs[0].inputAttachments.length === 2, 'Run did not freeze staged attachments atomically with task creation');
+  const lateFile = await uploadFile('late-note.txt', Buffer.from('Next run only.'), 'text/plain');
+  await request(`/api/tasks/${task.id}/comments`, { body: 'Saved after the run started.', attachmentIds: [lateFile.id] });
   await request(`/api/workers/${worker.id}`, { name: 'Edited reviewer', provider: 'claude', effort: 'max', communicationStyle: 'Новый стиль', avatarUrl: null }, 'PATCH');
   await request(`/api/workers/${worker.id}`, {}, 'DELETE');
   await stop();
@@ -69,11 +86,15 @@ try {
   assert(restored.runs[0].provider === 'codex' && restored.runs[0].worker.name === 'Smoke reviewer' && restored.runs[0].worker.communicationStyle === 'Кратко и по-русски.', 'Editing profile changed an existing session');
   const persistedAvatar = await fetch(origin + avatarUrl);
   assert(persistedAvatar.ok && Buffer.from(await persistedAvatar.arrayBuffer()).equals(avatarBytes), 'Snapshot avatar bytes did not persist');
-  await request(`/api/runs/${restored.runs[0].id}/resume`, { answer: 'Keep the same test session.' });
+  const persistedFile = await fetch(`${origin}/api/tasks/${task.id}/attachments/${largeFile.id}?download=1`);
+  assert(persistedFile.ok && Buffer.from(await persistedFile.arrayBuffer()).equals(largeFileBytes), 'Attachment original did not persist byte-exact across service restart');
+  const clarificationFile = await uploadFile('clarification.txt', Buffer.from('Use the original target.'), 'text/plain');
+  await request(`/api/runs/${restored.runs[0].id}/resume`, { answer: 'Keep the same test session.', attachmentIds: [clarificationFile.id] });
   const done = await poll(() => request(`/api/tasks/${task.id}`), value => value.task.status === 'completed');
   assert(done.runs[0].sessionId === session && done.runs[0].turn === 2, 'Resume did not use exact session');
   assert(done.runs[0].worker.effort === 'high' && done.runs[0].worker.avatarUrl === avatarUrl, 'Resume lost worker snapshot');
   assert(JSON.stringify(done.runs[0].instructions) === JSON.stringify(frozenInstructions), 'Resume lost immutable instruction snapshot');
+  assert(done.runs[0].inputAttachments.length === 3 && done.runs[0].inputAttachments.some((file: any) => file.id === clarificationFile.id) && !done.runs[0].inputAttachments.some((file: any) => file.id === lateFile.id), 'Resume did not preserve immutable attachment inputs and explicit clarification');
   const workflowCrew = await Promise.all([
     request('/api/workers', { name: 'Workflow planner', provider: 'codex', effort: 'high', communicationStyle: 'Plan precisely.' }),
     request('/api/workers', { name: 'Workflow builder', provider: 'claude', effort: 'max', communicationStyle: 'Show changes.' }),

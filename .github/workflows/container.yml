@@ -45,6 +45,10 @@ jobs:
           grep -q '✓ claude:' "$RUNNER_TEMP/trackt-doctor.txt"
       - name: Verify every worker effort against pinned native CLI parsers without model calls
         run: docker compose exec -T trackt bun scripts/check-cli.ts
+      - name: Verify packaged task attachment MCP without model calls
+        run: docker compose exec -T trackt bun run test:attachments-runtime
+      - name: Verify packaged HTTP attachment uploads and service restart
+        run: docker compose exec -T trackt bun run test:smoke
       - name: Exercise the API with the mock agent only
         run: |
           python3 - <<'PY'

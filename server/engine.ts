@@ -3,14 +3,16 @@ import { startAgent, buildPrompt, type AgentHandle, type AgentInput, type AgentC
 import { AppError, Store, runFence, type RunFence } from './store';
 import { validateEnvelope, validateSessionId } from './protocol';
 import { workflowContext } from './workflows';
+import { createTaskBridge } from './task-mcp';
 
 export type AgentFactory = (input: AgentInput, callbacks: AgentCallbacks) => AgentHandle;
-interface Launch { handle: AgentHandle | null; fence: RunFence; cancelRequested: boolean; settled?: Promise<void>; }
+export type TaskBridgeFactory = (store: Store, run: Run, fence: RunFence) => ReturnType<typeof createTaskBridge>;
+interface Launch { handle: AgentHandle | null; fence: RunFence; cancelRequested: boolean; bridge?: ReturnType<typeof createTaskBridge>; settled?: Promise<void>; }
 export class Engine {
   private handles = new Map<string, Launch>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private closing = false;
-  constructor(readonly store: Store, readonly mock = false, private factory: AgentFactory = startAgent) {}
+  constructor(readonly store: Store, readonly mock = false, private factory: AgentFactory = startAgent, private bridgeFactory?: TaskBridgeFactory) {}
   startScheduler() {
     if (this.timer || this.closing) return;
     this.store.reconcile();
@@ -27,10 +29,10 @@ export class Engine {
     this.launch(run);
     return this.store.getRun(run.id);
   }
-  resume(runId: string, answer: string, acknowledgement: boolean): Run {
+  resume(runId: string, answer: string, acknowledgement: boolean, attachmentIds: string[] = []): Run {
     if (this.closing) throw new AppError('Сервис останавливается', 503);
     if (this.handles.has(runId)) throw new AppError('Предыдущий CLI-процесс ещё завершается', 409);
-    const run = this.store.resume(runId, answer, acknowledgement);
+    const run = this.store.resume(runId, answer, acknowledgement, Date.now(), attachmentIds);
     this.launch(run, answer);
     return this.store.getRun(run.id);
   }
@@ -46,6 +48,7 @@ export class Engine {
     const result = this.store.cancel(runId, Date.now(), !!launch, acknowledgement);
     if (launch) {
       launch.cancelRequested = true;
+      launch.bridge?.close();
       launch.handle?.cancel();
     }
     return result;
@@ -58,11 +61,20 @@ export class Engine {
     const launch: Launch = { handle: null, fence, cancelRequested: false };
     this.handles.set(run.id, launch);
     const isCurrent = () => this.store.isCurrent(run.id, fence);
-    const release = () => { if (this.handles.get(run.id) === launch) this.handles.delete(run.id); };
+    const release = () => {
+      launch.bridge?.close();
+      if (this.handles.get(run.id) === launch) this.handles.delete(run.id);
+    };
     let handle: AgentHandle;
     try {
       const workflow = workflowContext(run);
+      // Mock and injected factories need no transport or filesystem authority.
+      // An explicit bridge factory lets integration tests exercise the lifecycle.
+      if (!run.mock && (this.factory === startAgent || this.bridgeFactory)) {
+        launch.bridge = (this.bridgeFactory ?? createTaskBridge)(this.store, run, fence);
+      }
       const input: AgentInput = { provider: run.provider, cwd: run.cwd, instruction: run.instruction, instructions: run.instructions,
+        ...(run.inputAttachments?.length ? { attachments: run.inputAttachments } : {}), ...(launch.bridge ? { taskBridge: launch.bridge.agentConfig } : {}),
         effort: run.worker?.effort ?? 'default', communicationStyle: run.worker?.communicationStyle ?? '',
         sessionId: run.sessionId ?? undefined, answer, mock: run.mock, ...(workflow ? { workflow } : {}) };
       buildPrompt(input); // Enforce the complete UTF-8 bound before even a custom factory.
@@ -73,7 +85,11 @@ export class Engine {
       }
       handle = this.factory(input, {
         onSession: id => { if (isCurrent()) this.store.setSession(run.id, id, fence); },
-        onComment: body => { if (isCurrent()) this.store.comment(run.taskId, run.id, 'agent', body.slice(0, 16_000), Date.now(), run.currentStepIndex); }
+        onComment: body => {
+          this.store.db.transaction(() => {
+            if (isCurrent()) this.store.comment(run.taskId, run.id, 'agent', body.slice(0, 16_000), Date.now(), run.currentStepIndex);
+          }).immediate();
+        }
       });
       launch.handle = handle;
       if (launch.cancelRequested || this.closing || !isCurrent()) handle.cancel();
@@ -84,6 +100,7 @@ export class Engine {
       return;
     }
     launch.settled = handle.result.then(({ envelope: rawEnvelope, sessionId: rawSessionId }) => {
+      launch.bridge?.close();
       if (!isCurrent()) return;
       const envelope = validateEnvelope(rawEnvelope);
       const sessionId = validateSessionId(rawSessionId);
@@ -110,6 +127,7 @@ export class Engine {
     if (!this.store.isCurrent(run.id, fence)) return;
     const message = error instanceof Error ? error.message : String(error);
     this.store.db.transaction(() => {
+      if (!this.store.isCurrent(run.id, fence)) return;
       this.store.finish(run.id, 'failed', null, message.slice(0, 16_000), Date.now(), fence);
       this.store.comment(run.taskId, run.id, 'system', message.slice(0, 16_000), Date.now(), run.currentStepIndex);
     }).immediate();
@@ -120,7 +138,7 @@ export class Engine {
     // Persist uncertainty before terminating. No automatic replay after restart.
     this.store.reconcile();
     const launches = [...this.handles.values()];
-    for (const launch of launches) { launch.cancelRequested = true; launch.handle?.cancel(); }
+    for (const launch of launches) { launch.cancelRequested = true; launch.bridge?.close(); launch.handle?.cancel(); }
     await Promise.allSettled(launches.map(launch => launch.settled ?? launch.handle?.result ?? Promise.resolve()));
   }
 }

@@ -3,6 +3,8 @@
   import Icon from './lib/Icon.svelte';
   import Workers from './lib/Workers.svelte';
   import Instructions from './lib/Instructions.svelte';
+  import AttachmentComposer from './lib/AttachmentComposer.svelte';
+  import AttachmentList from './lib/AttachmentList.svelte';
   import BrigLogo from './lib/BrigLogo.svelte';
   import WorkerAvatar from './lib/WorkerAvatar.svelte';
   import WorkflowEditor from './lib/WorkflowEditor.svelte';
@@ -10,7 +12,7 @@
   import { WORKFLOW_MIN_STEPS, WORKFLOW_MAX_STEPS, WORKFLOW_TEXT_LIMIT, WORKFLOW_BYTES_LIMIT } from './lib/workflows';
   import { effortLabel } from './lib/workers';
   import { applyTheme, readTheme, saveTheme, themeStorageKey, type Theme } from './lib/theme';
-  import type { AppInfo, Comment, Provider, Run, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
+  import type { AppInfo, Attachment, Comment, Provider, Run, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
 
   type Scope = 'all' | 'scheduled' | 'attention' | 'completed';
   type View = 'board' | 'list';
@@ -52,7 +54,21 @@
   let formComplex = $state(false);
   let formSteps = $state<{ key: string; workerId: string; title: string; instruction: string }[]>([]);
   let formOriginalStepWorkers = $state<string[]>([]);
-  let drawerContext = 0;
+  let drawerContext = $state(0);
+  let editorContext = $state(0);
+  let formAttachments = $state<Attachment[]>([]);
+  let formAttachmentCount = $state(0);
+  let formUploading = $state(false);
+  let formAttachmentInvalid = $state(false);
+  let commentAttachmentCount = $state(0);
+  let commentUploading = $state(false);
+  let commentAttachmentInvalid = $state(false);
+  let answerAttachmentCount = $state(0);
+  let answerUploading = $state(false);
+  let answerAttachmentInvalid = $state(false);
+  let formComposer = $state<AttachmentComposer>();
+  let commentComposer = $state<AttachmentComposer>();
+  let answerComposer = $state<AttachmentComposer>();
   let formOriginalWorker = $state<Worker | null>(null);
   let formCwd = $state('');
   let formSchedule = $state<'manual' | 'interval'>('manual');
@@ -93,7 +109,7 @@
   let scheduledCount = $derived(tasks.filter(task => task.schedule === 'interval').length);
   let selectedTask = $derived(detail?.task ?? tasks.find(task => task.id === selectedId) ?? null);
   let currentRun = $derived(selectedTask?.latestRun ?? null);
-  let inputRunKey = '';
+  let inputRunKey = $state('');
   $effect(() => {
     const next = `${currentRun?.id ?? ''}:${currentRun?.currentStepIndex ?? ''}:${currentRun?.turn ?? ''}:${currentRun?.steps?.[currentRun?.currentStepIndex ?? -1]?.attempts?.at(-1)?.id ?? ''}:${currentRun?.status === 'interrupted'}`;
     if (next !== inputRunKey) { inputRunKey = next; answer = ''; acknowledgeInterruption = false; }
@@ -121,7 +137,7 @@
   }
 
   function notifyForTask(taskId: string, context: number, text: string, type: 'success' | 'error' = 'success') {
-    if (selectedId && (selectedId !== taskId || context !== drawerContext)) return;
+    if (context !== drawerContext || (selectedId && selectedId !== taskId)) return;
     notify(text, type);
   }
 
@@ -246,6 +262,12 @@
   }
 
   async function openEditor(task?: Task) {
+    if (submitting) return;
+    editorContext++;
+    formAttachments = [...(task?.attachments ?? [])];
+    formAttachmentCount = formAttachments.length;
+    formUploading = false;
+    formAttachmentInvalid = false;
     editingId = task?.id ?? null;
     formTitle = task?.title ?? '';
     formInstruction = task?.instruction ?? '';
@@ -272,11 +294,12 @@
     if (submitting) return;
     editor.close();
     editorOpen = false;
+    editorContext++;
   }
 
   async function saveTask(event: SubmitEvent) {
     event.preventDefault();
-    if (submitting) return;
+    if (submitting || formUploading || formAttachmentInvalid) return;
     formError = '';
     if (!formTitle.trim() || !formInstruction.trim() || !formCwd.trim()) {
       formError = 'Укажите название, инструкцию и рабочую папку.'; return;
@@ -300,9 +323,13 @@
       firstRunAt, paused: formPaused,
     };
     const savedEditingId = editingId;
+    const context = editorContext;
+    let attachments: ReturnType<AttachmentComposer['prepareSubmission']> | undefined;
+    try { attachments = formComposer?.prepareSubmission(); } catch (error) { formError = error instanceof Error ? error.message : 'Проверьте загрузку файлов.'; return; }
     submitting = true;
     try {
-      const saved = await api<Task>(savedEditingId ? `/api/tasks/${encodeURIComponent(savedEditingId)}` : '/api/tasks', { method: savedEditingId ? 'PATCH' : 'POST', body: JSON.stringify(payload) });
+      const saved = await api<Task>(savedEditingId ? `/api/tasks/${encodeURIComponent(savedEditingId)}` : '/api/tasks', { method: savedEditingId ? 'PATCH' : 'POST', body: JSON.stringify({ ...payload, attachmentIds: attachments?.attachmentIds ?? [] }) });
+      attachments?.finish(true);
       notify(savedEditingId ? 'Изменения сохранены' : 'Задача создана');
       submitting = false;
       closeEditor();
@@ -312,7 +339,7 @@
       if (detail?.task.id === saved.id) detail = { ...detail, task: saved };
       if (!savedEditingId) await openTask(saved);
       void refresh();
-    } catch (error) { formError = error instanceof Error ? error.message : 'Не удалось сохранить задачу'; }
+    } catch (error) { attachments?.finish(false); if (context === editorContext) formError = error instanceof Error ? error.message : 'Не удалось сохранить задачу'; }
     finally { submitting = false; }
   }
 
@@ -323,6 +350,11 @@
     if (action === 'resume' && task.latestRun?.status === 'interrupted' && !acknowledgeInterruption) return;
     if (action === 'retry' && (!task.latestRun?.steps?.length || (!['failed', 'blocked'].includes(task.latestRun.status) && !(task.latestRun.status === 'interrupted' && !task.latestRun.sessionId && acknowledgeInterruption)))) return;
     const context = drawerContext;
+    let attachments: ReturnType<AttachmentComposer['prepareSubmission']> | undefined;
+    if (action === 'resume') {
+      if (answerUploading || answerAttachmentInvalid) return;
+      try { attachments = answerComposer?.prepareSubmission(); } catch (error) { notifyForTask(task.id, context, error instanceof Error ? error.message : 'Проверьте загрузку файлов.', 'error'); return; }
+    }
     pending = [...pending, task.id];
     try {
       if (action === 'run') {
@@ -332,12 +364,13 @@
         await api<Task>(`/api/tasks/${encodeURIComponent(task.id)}`, { method: 'PATCH', body: JSON.stringify({ paused: !task.paused }) });
         notifyForTask(task.id, context, task.paused ? 'Расписание возобновлено' : 'Расписание приостановлено');
       } else if (task.latestRun) {
-        const updatedRun = await api<Run>(`/api/runs/${encodeURIComponent(task.latestRun.id)}/${action}`, { method: 'POST', body: JSON.stringify(action === 'resume' ? { answer: response?.trim() || 'Продолжи выполнение задачи с того места, где остановился.', ...(task.latestRun.status === 'interrupted' ? { acknowledgeInterruption: true } : {}) } : ['retry', 'cancel'].includes(action) && task.latestRun.steps?.length && task.latestRun.status === 'interrupted' ? { acknowledgeInterruption: true } : {}) });
+        const updatedRun = await api<Run>(`/api/runs/${encodeURIComponent(task.latestRun.id)}/${action}`, { method: 'POST', body: JSON.stringify(action === 'resume' ? { answer: response?.trim() || (attachments?.attachmentIds.length ? '' : 'Продолжи выполнение задачи с того места, где остановился.'), attachmentIds: attachments?.attachmentIds ?? [], ...(task.latestRun.status === 'interrupted' ? { acknowledgeInterruption: true } : {}) } : ['retry', 'cancel'].includes(action) && task.latestRun.steps?.length && task.latestRun.status === 'interrupted' ? { acknowledgeInterruption: true } : {}) });
+        attachments?.finish(true);
         if (['resume', 'retry', 'cancel'].includes(action) && selectedId === task.id && context === drawerContext) { answer = ''; acknowledgeInterruption = false; }
         notifyForTask(task.id, context, action === 'resume' ? 'Ответ отправлен, агент продолжает работу' : action === 'retry' ? 'Текущий этап запущен заново. Завершённые этапы сохранены.' : updatedRun.status === 'cancelling' ? 'Останавливаем процесс агента…' : 'Запуск отменён');
       }
       await refresh();
-    } catch (error) { notifyForTask(task.id, context, error instanceof Error ? error.message : 'Не удалось выполнить действие', 'error'); }
+    } catch (error) { attachments?.finish(false); notifyForTask(task.id, context, error instanceof Error ? error.message : 'Не удалось выполнить действие', 'error'); }
     finally { pending = pending.filter(id => id !== task.id); }
   }
 
@@ -346,12 +379,15 @@
     const task = selectedTask;
     const body = comment.trim();
     const context = drawerContext;
-    if (!task || !body || taskBusy) return;
+    if (!task || (!body && !commentAttachmentCount) || taskBusy || commentUploading || commentAttachmentInvalid) return;
+    let attachments: ReturnType<AttachmentComposer['prepareSubmission']> | undefined;
+    try { attachments = commentComposer?.prepareSubmission(); } catch (error) { notifyForTask(task.id, context, error instanceof Error ? error.message : 'Проверьте загрузку файлов.', 'error'); return; }
     pending = [...pending, task.id];
     try {
-      await api<Comment>(`/api/tasks/${encodeURIComponent(task.id)}/comments`, { method: 'POST', body: JSON.stringify({ body }) });
+      await api<Comment>(`/api/tasks/${encodeURIComponent(task.id)}/comments`, { method: 'POST', body: JSON.stringify({ body, attachmentIds: attachments?.attachmentIds ?? [] }) });
+      attachments?.finish(true);
       if (selectedId === task.id && context === drawerContext) { comment = ''; await loadDetail(task.id); }
-    } catch (error) { notifyForTask(task.id, context, error instanceof Error ? error.message : 'Не удалось сохранить заметку', 'error'); }
+    } catch (error) { attachments?.finish(false); notifyForTask(task.id, context, error instanceof Error ? error.message : 'Не удалось сохранить заметку', 'error'); }
     finally { pending = pending.filter(id => id !== task.id); }
   }
 
@@ -373,6 +409,11 @@
   function visibleWorker(task: Task) { return (taskIsOccupied(task) || !!task.latestRun?.steps?.length) && task.latestRun ? task.latestRun.worker : task.worker ?? workers.find(worker => worker.id === task.steps?.[0]?.workerId) ?? null; }
   function taskProviders(task: Task): Provider[] { return [visibleProvider(task), ...(task.steps ?? []).flatMap(step => { const worker = workers.find(item => item.id === step.workerId); return worker ? [worker.provider] : []; }), ...(task.latestRun?.steps ?? []).map(step => step.worker.provider)]; }
   function visibleProvider(task: Task) { return (taskIsOccupied(task) || !!task.latestRun?.steps?.length) && task.latestRun ? task.latestRun.provider : task.provider; }
+  function attachmentAuthor(file: Attachment) {
+    if (file.source === 'user') return 'Вы';
+    const run = detail?.runs.find(item => item.id === file.runId);
+    return (file.stepIndex != null ? run?.steps?.[file.stepIndex]?.worker.name : run?.worker?.name) ?? (run ? providerName(run.provider) : 'Агент');
+  }
   function commentRun(entry: Comment) { return entry.runId ? detail?.runs.find(run => run.id === entry.runId) ?? null : null; }
   function commentWorker(entry: Comment) { const run = commentRun(entry); return ['agent', 'question', 'result'].includes(entry.kind) ? (entry.stepIndex != null ? run?.steps?.[entry.stepIndex]?.worker : run?.steps?.length ? null : run?.worker) ?? null : null; }
   function commentAuthor(entry: Comment) {
@@ -430,6 +471,7 @@
     <p class="snapshot-help">Копия на момент старта. При продолжении этого запуска используются те же правила.</p>
     <section class="snapshot-instruction"><h4>Общее задание запуска</h4><p>{run.instruction}</p></section>
     <section class="snapshot-instruction"><h4>Рабочая папка запуска</h4><p>{run.cwd}</p></section>
+    {#if run.inputAttachments?.length}<section class="snapshot-instruction"><h4>Файлы на момент запуска</h4><AttachmentList attachments={run.inputAttachments} taskId={run.taskId} label="Файлы запуска" author={attachmentAuthor} /></section>{/if}
     {#each run.instructions ?? [] as instruction (instruction.id)}
       <section class="snapshot-instruction"><h4>{instruction.title}</h4><p>{instruction.body}</p></section>
     {:else}<p class="snapshot-empty">В этом запуске нет общих инструкций.</p>{/each}
@@ -447,6 +489,7 @@
       {#if task.status === 'waiting_input'}<div class="card-signal"><Icon name="message" size={13} /> Агент ждёт вашего ответа</div>{/if}
       {#if task.status === 'interrupted'}<div class="card-signal"><Icon name="alert" size={13} /> Проверьте прерванный запуск</div>{/if}
       {#if task.latestRun?.error && ['failed', 'blocked'].includes(task.status)}<div class="card-error">{task.latestRun.error}</div>{/if}
+      {#if task.attachments?.length}<div class="card-attachment-count"><Icon name="folder" size={13} /><span>Файлов: {task.attachments.length}</span></div>{/if}
       <div class="card-folder" title={task.cwd}><Icon name="folder" size={13} /><span>{shortPath(task.cwd)}</span></div>
     </button>
     <div class="card-footer">
@@ -548,6 +591,8 @@
       {#if detailError}<div class="detail-error" role="alert">{detailError}</div>{/if}
       <div class="task-properties">{#if !selectedTask.steps?.length && (selectedTask.worker || activeStatuses.includes(selectedTask.status))}<div><span><Icon name="spark" size={14} />{activeStatuses.includes(selectedTask.status) ? 'Следующий запуск' : 'Работник'}</span><div>{#if selectedTask.worker}{@render workerBadge(selectedTask.worker, true)}{:else}<strong>Без работника · {providerName(selectedTask.provider)}</strong>{/if}</div></div>{/if}<div><span><Icon name="folder" size={14} />Рабочая папка</span><code title={selectedTask.cwd}>{selectedTask.cwd}</code></div><div><span><Icon name="clock" size={14} />Расписание</span><strong>{selectedTask.schedule === 'interval' ? intervalLabel(selectedTask.intervalMinutes) : 'Ручной запуск'}{#if selectedTask.paused}<span class="paused-label">На паузе</span>{/if}</strong></div>{#if selectedTask.nextRunAt && !selectedTask.paused}<div><span><Icon name="arrow" size={14} />Следующий запуск</span><strong>{dateTime(selectedTask.nextRunAt)}</strong></div>{/if}<div><span><Icon name="history" size={14} />Всего запусков</span><strong>{selectedTask.runCount}</strong></div></div>
       <section class="instruction-section"><h3>{selectedTask.steps?.length ? 'ОБЩАЯ ЦЕЛЬ ЗАДАЧИ' : 'ЗАДАНИЕ ДЛЯ АГЕНТА'}</h3><p>{selectedTask.instruction}</p></section>
+      {#if selectedTask.attachments?.some(file => file.source === 'user')}<section class="task-attachments" aria-label="Файлы задачи"><h3>Файлы задачи</h3><AttachmentList attachments={selectedTask.attachments.filter(file => file.source === 'user')} taskId={selectedTask.id} author={attachmentAuthor} /></section>{/if}
+      {#if detail?.attachments?.some(file => file.source === 'agent' && !file.commentId)}<section class="task-attachments" aria-label="Файлы агента"><h3>Файлы агента</h3><AttachmentList attachments={detail.attachments.filter(file => file.source === 'agent' && !file.commentId)} taskId={selectedTask.id} author={attachmentAuthor} /></section>{/if}
       {#if currentRun?.steps?.length}<div class="current-workflow"><WorkflowChecklist run={currentRun} /></div>{/if}
       {#if selectedTask.steps?.length}
         <details class="workflow-template" open={!currentRun}><summary>{currentRun ? 'План следующего запуска' : 'План задачи'}</summary><p class="workflow-help">Все работники используют общую рабочую папку, цель задачи и общие инструкции. Этапы идут по порядку.</p><ol>{#each selectedTask.steps as step}<li><strong>{step.title}</strong><span>{workers.find(worker => worker.id === step.workerId)?.name ?? 'Работник недоступен'}</span><p>{step.instruction}</p></li>{/each}</ol></details>
@@ -556,14 +601,15 @@
       {#if currentRun?.error}<div class="run-error"><Icon name="alert" size={17} /><div><strong>{labels[currentRun.status]}</strong><p>{currentRun.error}</p></div></div>{/if}
       {#if currentRun?.status === 'interrupted' && currentRun.steps?.slice((currentRun.currentStepIndex ?? -1) + 1).some(step => step.status === 'cancelled')}<div class="cancelling-note" role="status"><Icon name="alert" size={16} /><span>Отмена уже запрошена. Продолжение касается только текущего этапа; остальные этапы отменены.</span></div>{/if}
       {#if runCanResume && !interruptedWithoutSession}
-        <form class="resume-panel" onsubmit={(event) => { event.preventDefault(); if (selectedTask && (answer.trim() || currentRun?.status === 'interrupted')) void act(selectedTask, 'resume', answer); }}>
+        <form class="resume-panel" onpaste={(event) => answerComposer?.handlePaste(event)} onsubmit={(event) => { event.preventDefault(); if (selectedTask && (answer.trim() || answerAttachmentCount || currentRun?.status === 'interrupted')) void act(selectedTask, 'resume', answer); }}>
           <div class="resume-title"><Icon name={currentRun?.status === 'interrupted' ? 'alert' : 'message'} size={18} /><strong>{currentRun?.status === 'interrupted' ? 'Запуск был прерван' : 'Агенту нужен ваш ответ'}</strong></div>
           {#if currentStep}<p class="current-step-context">Этап {(currentRun?.currentStepIndex ?? 0) + 1}: {currentStep.title} · {currentStep.worker.name}</p>{/if}
           <p>{currentRun?.status === 'interrupted' ? 'Прежний процесс CLI мог остаться запущенным после сбоя. Остановите его перед продолжением. Уже выполненные действия и изменения файлов не откатываются.' : currentStep ? 'Ответ получит работник текущего этапа в той же сессии. Следующие этапы ждут его завершения.' : 'Ответ будет передан агенту в ту же сессию, и работа продолжится.'}</p>
           {#if !currentRun?.sessionId && !currentRun?.mock}<div class="resume-warning">Идентификатор сессии не сохранён. Продолжение недоступно; отмените запуск, чтобы начать заново.</div>
-          {:else}<label class="sr-only" for="resume-answer">Ответ агенту</label><textarea id="resume-answer" bind:value={answer} maxlength="8000" rows="3" placeholder={currentRun?.status === 'interrupted' ? 'Что учесть при продолжении? (необязательно)' : 'Напишите ответ или уточнение…'} required={currentRun?.status === 'waiting_input'} disabled={taskBusy}></textarea>
+          {:else}<label class="sr-only" for="resume-answer">Ответ агенту</label><textarea id="resume-answer" bind:value={answer} maxlength="8000" rows="3" placeholder={currentRun?.status === 'interrupted' ? 'Что учесть при продолжении? (необязательно)' : 'Напишите ответ или уточнение…'} required={currentRun?.status === 'waiting_input' && !answerAttachmentCount} disabled={taskBusy}></textarea>
+            {#key `${drawerContext}:${inputRunKey}`}<AttachmentComposer bind:this={answerComposer} label="Файлы ответа" disabled={taskBusy} bind:count={answerAttachmentCount} bind:uploading={answerUploading} bind:invalid={answerAttachmentInvalid} />{/key}
             {#if currentRun?.status === 'interrupted'}<label class="interruption-confirm"><input type="checkbox" bind:checked={acknowledgeInterruption} disabled={taskBusy} /><span>Я проверил(а), что предыдущий процесс CLI остановлен</span></label>{/if}
-            <button class="button primary" type="submit" disabled={taskBusy || (currentRun?.status === 'waiting_input' && !answer.trim()) || (currentRun?.status === 'interrupted' && !acknowledgeInterruption)}><Icon name="arrow" size={15} />{taskBusy ? 'Отправляем…' : 'Продолжить работу'}</button>
+            <button class="button primary" type="submit" disabled={taskBusy || answerUploading || answerAttachmentInvalid || (currentRun?.status === 'waiting_input' && !answer.trim() && !answerAttachmentCount) || (currentRun?.status === 'interrupted' && !acknowledgeInterruption)}><Icon name="arrow" size={15} />{taskBusy ? 'Отправляем…' : 'Продолжить работу'}</button>
           {/if}
         </form>
       {/if}
@@ -581,11 +627,11 @@
       {/if}
       <div class="detail-tabs" role="tablist" aria-label="История задачи"><button id="conversation-tab" role="tab" tabindex={detailTab === 'conversation' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'conversation'} aria-controls="conversation-panel" class:active={detailTab === 'conversation'} onclick={() => detailTab = 'conversation'}><Icon name="message" size={15} />Обсуждение<span>{detail?.comments.length ?? 0}</span></button><button id="history-tab" role="tab" tabindex={detailTab === 'history' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'history'} aria-controls="history-panel" class:active={detailTab === 'history'} onclick={() => detailTab = 'history'}><Icon name="history" size={15} />Запуски<span>{detail?.runs.length ?? selectedTask.runCount}</span></button></div>
       {#if !detail}<div class="detail-loading"><Icon name="refresh" class="spin" size={19} />Загружаем историю…</div>{:else if detailTab === 'conversation'}
-        <div id="conversation-panel" tabindex="0" role="tabpanel" aria-labelledby="conversation-tab" class="conversation-panel">{#each detail.comments as entry (entry.id)}<article class="comment-entry comment-{entry.kind}">{#if commentWorker(entry)}<WorkerAvatar name={commentWorker(entry)!.name} avatarUrl={commentWorker(entry)!.avatarUrl} />{:else}<span class="comment-avatar">{#if entry.kind === 'user'}Я{:else if entry.kind === 'system'}<Icon name="terminal" size={14} />{:else if entry.kind === 'question'}<Icon name="message" size={14} />{:else}<Icon name="spark" size={14} />{/if}</span>{/if}<div class="comment-main"><div class="comment-meta"><strong>{commentAuthor(entry)}</strong>{#if entry.stepIndex != null}<span class="comment-step-label">Этап {entry.stepIndex + 1}</span>{/if}<time datetime={new Date(entry.createdAt).toISOString()}>{dateTime(entry.createdAt)}</time></div><p>{entry.body}</p></div></article>{:else}<div class="conversation-empty"><Icon name="message" size={25} /><strong>У каждой задачи своя история</strong><p>Здесь появятся сообщения агента, вопросы и результат.<br />Можно оставить заметку уже сейчас.</p></div>{/each}</div>
-        <form class="comment-form" onsubmit={sendComment}><label for="task-comment">Заметка к задаче</label><div class="comment-input"><textarea id="task-comment" bind:value={comment} maxlength="8000" placeholder="Добавьте контекст или заметку…" rows="2" disabled={taskBusy}></textarea><button class="icon-button" type="submit" disabled={!comment.trim() || taskBusy} aria-label="Сохранить заметку"><Icon name="send" size={17} /></button></div><p>Заметки сохраняются в истории. Для ответа агенту используйте «Продолжить работу».</p></form>
+        <div id="conversation-panel" tabindex="0" role="tabpanel" aria-labelledby="conversation-tab" class="conversation-panel">{#each detail.comments as entry (entry.id)}<article class="comment-entry comment-{entry.kind}">{#if commentWorker(entry)}<WorkerAvatar name={commentWorker(entry)!.name} avatarUrl={commentWorker(entry)!.avatarUrl} />{:else}<span class="comment-avatar">{#if entry.kind === 'user'}Я{:else if entry.kind === 'system'}<Icon name="terminal" size={14} />{:else if entry.kind === 'question'}<Icon name="message" size={14} />{:else}<Icon name="spark" size={14} />{/if}</span>{/if}<div class="comment-main"><div class="comment-meta"><strong>{commentAuthor(entry)}</strong>{#if entry.stepIndex != null}<span class="comment-step-label">Этап {entry.stepIndex + 1}</span>{/if}<time datetime={new Date(entry.createdAt).toISOString()}>{dateTime(entry.createdAt)}</time></div>{#if entry.body}<p>{entry.body}</p>{/if}<AttachmentList attachments={entry.attachments ?? []} taskId={selectedTask.id} label="Вложения сообщения" author={attachmentAuthor} /></div></article>{:else}<div class="conversation-empty"><Icon name="message" size={25} /><strong>У каждой задачи своя история</strong><p>Здесь появятся сообщения агента, вопросы и результат.<br />Можно оставить заметку уже сейчас.</p></div>{/each}</div>
       {:else}
         <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name="play" size={14} />Запуск {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{#if run.worker}{@render workerBadge(run.worker, true)}{/if}{@render providerBadge(run.provider, true)}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'schedule' ? 'По расписанию' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}{#if run.steps?.length}<WorkflowChecklist {run} />{/if}{@render instructionSnapshot(run)}<div class="run-details">Ход {run.turn}{#if run.worker}<span> · Усилия: {effortLabel(run.worker.effort)}</span>{/if}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
       {/if}
+      {#if detail}<form class="comment-form" hidden={detailTab !== 'conversation'} onpaste={(event) => commentComposer?.handlePaste(event)} onsubmit={sendComment}><label for="task-comment">Заметка к задаче</label><div class="comment-input"><textarea id="task-comment" bind:value={comment} maxlength="8000" placeholder="Добавьте контекст или заметку…" rows="2" disabled={taskBusy}></textarea><button class="icon-button" type="submit" disabled={(!comment.trim() && !commentAttachmentCount) || taskBusy || commentUploading || commentAttachmentInvalid} aria-label="Сохранить заметку"><Icon name="send" size={17} /></button></div>{#key drawerContext}<AttachmentComposer bind:this={commentComposer} label="Файлы заметки" disabled={taskBusy} bind:count={commentAttachmentCount} bind:uploading={commentUploading} bind:invalid={commentAttachmentInvalid} />{/key}<p>Заметки сохраняются в истории. Для ответа агенту используйте «Продолжить работу».</p></form>{/if}
     {:else}<div class="detail-loading"><Icon name="refresh" class="spin" />Загружаем задачу…</div>{/if}
   </div>
 </dialog>
@@ -600,7 +646,7 @@
 
 <dialog class="editor-dialog" bind:this={editor} aria-labelledby="editor-title" oncancel={(event) => { event.preventDefault(); closeEditor(); }} onclick={(event) => backdropClick(event, editor, closeEditor)}>
   {#if editorOpen}
-    <form onsubmit={saveTask} class="editor-form">
+    <form onsubmit={saveTask} class="editor-form" onpaste={(event) => formComposer?.handlePaste(event)}>
       <header class="editor-header"><div><span class="editor-kicker">{editingId ? 'НАСТРОЙКИ ЗАДАЧИ' : 'ПОРУЧИТЕ ЭТО АГЕНТУ'}</span><h2 id="editor-title">{editingId ? 'Редактировать задачу' : 'Новая задача'}</h2></div><button class="icon-button" type="button" aria-label="Закрыть форму" disabled={submitting} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
       <div class="editor-fields">
         {#if formError}<div class="form-error" role="alert"><Icon name="alert" size={17} />{formError}</div>{/if}
@@ -609,6 +655,7 @@
         <div class="task-type-switch" role="group" aria-label="Тип задачи"><button type="button" class:selected={!formComplex} aria-pressed={!formComplex} disabled={submitting} onclick={() => formComplex = false}>Простая задача</button><button type="button" class:selected={formComplex} aria-pressed={formComplex} disabled={submitting} onclick={() => formComplex = true}>Сложная задача</button></div>
         {#if formComplex}<p class="workflow-help">Одна общая цель, несколько работников по очереди. Порядок и задания можно изменить до запуска.</p>{/if}
         <label class="form-field"><span>{formComplex ? 'Общая цель и ограничения' : 'Что нужно сделать?'} <span class="required">*</span></span><textarea bind:value={formInstruction} name="instruction" maxlength="16000" rows="4" placeholder="Опишите результат, важные детали и ограничения. Агент получит эту инструкцию при каждом запуске." required disabled={submitting}></textarea></label>
+        {#key editorContext}<AttachmentComposer bind:this={formComposer} initial={formAttachments} label="Файлы задачи" disabled={submitting} bind:count={formAttachmentCount} bind:uploading={formUploading} bind:invalid={formAttachmentInvalid} />{/key}
         {#if !formComplex}
         <label class="form-field"><span>Работник</span><select name="workerId" aria-label="Работник" bind:value={formWorkerId} disabled={submitting || workersLoading}><option value="">Без работника — выбрать модель вручную</option>{#each workers.filter(worker => !worker.archived || worker.id === formOriginalWorker?.id) as worker (worker.id)}<option value={worker.id}>{worker.name} · {providerName(worker.provider)}{worker.archived ? ' (в архиве)' : ''}</option>{/each}{#if formOriginalWorker && !workers.some(worker => worker.id === formOriginalWorker?.id)}<option value={formOriginalWorker.id}>{formOriginalWorker.name}{formOriginalWorker.archived ? ' (в архиве)' : ''}</option>{/if}</select><small>Профили можно создать и настроить в разделе «Работники».</small></label>
         {#if formWorker}
@@ -624,7 +671,7 @@
         <div class="schedule-section"><div class="schedule-title"><span class="schedule-title-icon"><Icon name="clock" size={18} /></span><div><strong>Когда запускать</strong><span>Один раз вручную или регулярно</span></div></div><div class="schedule-switch"><button type="button" class:selected={formSchedule === 'manual'} aria-pressed={formSchedule === 'manual'} disabled={submitting} onclick={() => formSchedule = 'manual'}><Icon name="play" size={14} />Вручную</button><button type="button" class:selected={formSchedule === 'interval'} aria-pressed={formSchedule === 'interval'} disabled={submitting} onclick={() => formSchedule = 'interval'}><Icon name="clock" size={14} />По расписанию</button></div>{#if formSchedule === 'interval'}<div class="schedule-fields"><label class="form-field"><span>Повторять каждые</span><div class="input-suffix"><input type="number" bind:value={formInterval} name="intervalMinutes" min="1" max="525600" step="1" required disabled={submitting} /><span>минут</span></div></label><label class="form-field"><span>Первый запуск</span><input type="datetime-local" bind:value={formFirstRun} name="firstRunAt" disabled={submitting} /><small>Пусто: сразу после сохранения. Местное время.</small></label></div><label class="pause-option"><input type="checkbox" bind:checked={formPaused} disabled={submitting} /><span>Сохранить расписание на паузе</span></label><p class="schedule-note">Планировщик работает, пока запущен сервер brigd. Активные запуски одной задачи не накладываются.</p>{/if}</div>
         {#if info?.mode === 'mock'}<div class="editor-mode-note"><Icon name="spark" size={14} /><span>Демо-режим: реальные CLI не вызываются.</span></div>{:else}<div class="editor-mode-note"><Icon name="terminal" size={14} /><span>Агент может изменять файлы в рабочей папке согласно инструкции.</span></div>{/if}
       </div>
-      <footer class="editor-footer"><button type="button" class="button secondary" onclick={closeEditor} disabled={submitting}>Отмена</button><button type="submit" class="button primary" disabled={submitting}>{#if submitting}<Icon name="refresh" class="spin" size={16} />{:else}<Icon name={editingId ? 'check' : 'plus'} size={16} />{/if}{submitting ? 'Сохраняем…' : editingId ? 'Сохранить изменения' : 'Создать задачу'}</button></footer>
+      <footer class="editor-footer"><button type="button" class="button secondary" onclick={closeEditor} disabled={submitting}>Отмена</button><button type="submit" class="button primary" disabled={submitting || formUploading || formAttachmentInvalid}>{#if submitting}<Icon name="refresh" class="spin" size={16} />{:else}<Icon name={editingId ? 'check' : 'plus'} size={16} />{/if}{submitting ? 'Сохраняем…' : editingId ? 'Сохранить изменения' : 'Создать задачу'}</button></footer>
     </form>
   {/if}
 </dialog>

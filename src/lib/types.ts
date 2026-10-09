@@ -1,4 +1,20 @@
 export type Provider = 'codex' | 'claude';
+/** Immutable file metadata. Content is fetched only through the scoped attachment route. */
+export interface Attachment {
+  id: string;
+  taskId: string | null;
+  commentId: string | null;
+  runId: string | null;
+  stepIndex: number | null;
+  attemptId: string | null;
+  source: 'user' | 'agent';
+  name: string;
+  mime: string;
+  size: number;
+  sha256: string;
+  previewable: boolean;
+  createdAt: number;
+}
 export type Effort = 'default' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export interface WorkerInput {
   name: string;
@@ -61,6 +77,7 @@ export interface RunStep extends TaskStepInput {
   attempts: StepAttempt[];
 }
 export interface TaskInput {
+  attachmentIds?: string[];
   steps?: TaskStepInput[];
   workerId?: string | null;
   title: string;
@@ -73,6 +90,7 @@ export interface TaskInput {
   paused: boolean;
 }
 export interface Task extends TaskInput {
+  attachments?: Attachment[];
   steps: TaskStepInput[];
   workerId: string | null;
   worker: Worker | null;
@@ -85,6 +103,7 @@ export interface Task extends TaskInput {
   runCount: number;
 }
 export interface Run {
+  inputAttachments?: Attachment[];
   steps: RunStep[];
   currentStepIndex: number | null;
   instructions: InstructionSnapshot[];
@@ -108,6 +127,7 @@ export interface Run {
   mock: boolean;
 }
 export interface Comment {
+  attachments?: Attachment[];
   stepIndex: number | null;
   id: string;
   taskId: string;
@@ -116,7 +136,7 @@ export interface Comment {
   body: string;
   createdAt: number;
 }
-export interface TaskDetail { task: Task; runs: Run[]; comments: Comment[]; }
+export interface TaskDetail { task: Task; runs: Run[]; comments: Comment[]; attachments?: Attachment[]; }
 export interface AppInfo {
   mode: 'mock' | 'cli';
   cwd: string;

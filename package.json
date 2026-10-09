@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "bun scripts/dev.ts",
     "dev:demo": "BRIGD_MODE=mock bun scripts/dev.ts",
-    "build": "vite build",
+    "build": "vite build && bun build server/task-mcp-stdio.ts --target=bun --outfile=dist/task-mcp-stdio.js",
     "start": "bun server/index.ts",
     "demo": "BRIGD_MODE=mock BRIGD_DB=data/demo.sqlite bun server/index.ts",
     "check": "svelte-check --tsconfig ./tsconfig.json && tsc --noEmit -p tsconfig.server.json",
@@ -17,9 +17,12 @@
     "verify": "bun run check && bun test tests && bun run build",
     "doctor": "bun scripts/doctor.ts",
     "test:e2e": "playwright test",
-    "test:smoke": "bun scripts/smoke.ts"
+    "test:smoke": "bun scripts/smoke.ts",
+    "test:attachments-runtime": "bun scripts/check-attachments.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "sharp": "0.35.5",
     "svelte": "5.57.2"
   },
   "devDependencies": {
