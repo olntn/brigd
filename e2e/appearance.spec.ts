@@ -46,7 +46,7 @@ async function fixtureApi(page: Page, mode: AppInfo['mode'] = 'mock', populated:
       await route.fulfill({ status: 405, json: { error: 'Appearance fixtures are read-only' } });
     } else if (path === '/api/info') {
       await route.fulfill({ json: info });
-    } else if (path === '/api/workers') {
+    } else if (path === '/api/workers' || path === '/api/models') {
       await route.fulfill({ json: [] });
     } else if (path === '/api/tasks') {
       await route.fulfill({ json: Array.isArray(populated) ? populated : populated ? [task] : [] });
@@ -136,7 +136,6 @@ test('brigd branding appears in the title, navigation and workspace', async ({ p
   await openApp(page);
   await expect(page).toHaveTitle('brigd · Задачи для ваших агентов');
   await expect(page.getByRole('link', { name: 'brigd — главная', exact: true })).toHaveText('brigd.');
-  await expect(page.getByText('brigd · MVP', { exact: true })).toBeVisible();
   await expect(page.getByText(/Trackt|trackt/)).toHaveCount(0);
 });
 
@@ -220,7 +219,7 @@ test('readable legacy dark theme survives a blocked migration write', async ({ p
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 });
 
-test('all ten color schemes apply, persist and synchronize across tabs', async ({ page, context }) => {
+test('all twenty color schemes apply, persist and synchronize across tabs', async ({ page, context }) => {
   await fixtureApi(page);
   await openApp(page);
   const other = await context.newPage();
@@ -228,7 +227,7 @@ test('all ten color schemes apply, persist and synchronize across tabs', async (
   await openApp(other);
   const otherSettings = await openSettings(other);
   let settings = await openSettings(page);
-  await expect(settings.dialog.getByRole('group', { name: 'Цветовая схема', exact: true }).getByRole('radio')).toHaveCount(10);
+  await expect(settings.dialog.getByRole('group', { name: 'Цветовая схема', exact: true }).getByRole('radio')).toHaveCount(20);
   // Switch away from the default so every iteration triggers a real preference write.
   await settings.choice('dark').check();
   await expect(otherSettings.choice('dark')).toBeChecked();
@@ -249,7 +248,7 @@ test('all ten color schemes apply, persist and synchronize across tabs', async (
     settings = await openSettings(page);
     await expect(settings.choice(theme.id)).toBeChecked();
   }
-  expect(backgrounds.size, 'each scheme should provide its own page background').toBe(10);
+  expect(backgrounds.size, 'each scheme should provide its own page background').toBe(20);
   await other.close();
 });
 
@@ -259,7 +258,8 @@ test('CLI workspace is uncluttered and demo safety warning is preserved', async 
   for (const removedText of [
     'Workspace', 'Локально · синхронизировано', 'Данные хранятся локально',
     'Bun + Svelte 5 · Codex и Claude Code', 'Ваш фокус — на важном.',
-    'Агенты позаботятся об остальном',
+    'Агенты позаботятся об остальном', 'РАБОЧЕЕ ПРОСТРАНСТВО', 'Рабочее пространство',
+    'Моё пространство', 'Локальный workspace', 'Личное пространство', 'brigd · MVP', 'v0.1',
   ]) {
     await expect(page.getByText(removedText, { exact: true })).toHaveCount(0);
   }
@@ -272,6 +272,43 @@ test('CLI workspace is uncluttered and demo safety warning is preserved', async 
   await expect(page.getByText('Демонстрационный режим', { exact: true })).toBeVisible();
   await expect(page.getByText('Запуски симулируются. Codex и Claude CLI не вызываются, файлы не изменяются.', { exact: true })).toBeVisible();
   await expect(page.getByText('Демо-запуски · без вызовов CLI', { exact: true })).toHaveCount(0);
+});
+
+test('settings sections use side navigation that stacks on narrow screens', async ({ page }) => {
+  await fixtureApi(page);
+  await openApp(page);
+  const { dialog } = await openSettings(page);
+  const sections = dialog.getByRole('tablist', { name: 'Разделы настроек', exact: true });
+  const appearance = sections.getByRole('tab', { name: 'Внешний вид', exact: true });
+  const models = sections.getByRole('tab', { name: 'Модели', exact: true });
+  const appearancePanel = dialog.getByRole('tabpanel', { name: 'Внешний вид', exact: true });
+  const modelsPanel = dialog.getByRole('tabpanel', { name: 'Модели', exact: true });
+  await expect(sections.getByRole('tab')).toHaveCount(2);
+  await expect(appearance).toHaveAttribute('aria-selected', 'true');
+  await expect(appearancePanel.getByRole('group', { name: 'Цветовая схема', exact: true })).toBeVisible();
+  await expect(appearancePanel.getByRole('heading', { name: 'Светлые', exact: true })).toBeVisible();
+  await expect(appearancePanel.getByRole('heading', { name: 'Тёмные', exact: true })).toBeVisible();
+  await expect(modelsPanel).toBeHidden();
+  const [navBox, panelBox] = [await sections.boundingBox(), await appearancePanel.boundingBox()];
+  expect(navBox!.x + navBox!.width, 'sections sit to the left of the parameters').toBeLessThanOrEqual(panelBox!.x + 1);
+
+  await models.click();
+  await expect(models).toHaveAttribute('aria-selected', 'true');
+  await expect(modelsPanel.getByRole('heading', { name: 'Модели', exact: true })).toBeVisible();
+  await expect(appearancePanel).toBeHidden();
+  await page.keyboard.press('ArrowUp');
+  await expect(appearance).toBeFocused();
+  await expect(appearance).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('End');
+  await expect(models).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(appearance).toBeFocused();
+  await expect(appearancePanel).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectNoHorizontalOverflow(page, dialog);
+  const [narrowNav, narrowPanel] = [await sections.boundingBox(), await appearancePanel.boundingBox()];
+  expect(narrowNav!.y + narrowNav!.height, 'sections stack above the parameters').toBeLessThanOrEqual(narrowPanel!.y + 1);
 });
 
 test('standard theme settings persist and return focus after Escape or Close', async ({ page }, testInfo) => {
@@ -378,6 +415,12 @@ for (const { width, height, fontSize, emulatedLayout } of layouts) {
     await expectReachable(settings.choice(themes[themes.length - 1].id), settings.dialog);
     await settings.choice('dark').check();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    const modelsTab = settings.dialog.getByRole('tab', { name: 'Модели', exact: true });
+    await expectReachable(modelsTab, settings.dialog);
+    await modelsTab.click();
+    await expectReachable(settings.dialog.getByRole('heading', { name: 'Модели', exact: true }), settings.dialog);
+    await expectNoHorizontalOverflow(page, settings.dialog);
+    await settings.dialog.getByRole('tab', { name: 'Внешний вид', exact: true }).click();
     await settings.dialog.getByRole('button', { name: 'Закрыть настройки', exact: true }).click();
 
     await page.getByRole('button', { name: 'Новая задача', exact: true }).click();

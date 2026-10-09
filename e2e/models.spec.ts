@@ -29,6 +29,7 @@ async function createModel(request: APIRequestContext, input: ModelCatalogInput)
 async function openSettings(page: Page) {
   await page.getByRole('button', { name: 'Настройки', exact: true }).click();
   const settings = page.getByRole('dialog', { name: 'Настройки', exact: true });
+  await settings.getByRole('tab', { name: 'Модели', exact: true }).click();
   await expect(settings.getByRole('heading', { name: 'Модели', exact: true })).toBeVisible();
   return settings;
 }

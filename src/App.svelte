@@ -60,6 +60,12 @@
   let editor: HTMLDialogElement;
   let settings: HTMLDialogElement;
   let settingsOpen = $state(false);
+  const settingsSections = [
+    { id: 'appearance', label: 'Внешний вид', icon: 'palette' },
+    { id: 'models', label: 'Модели', icon: 'spark' },
+  ] as const;
+  let settingsSection = $state<(typeof settingsSections)[number]['id']>('appearance');
+  const themeGroups = [{ scheme: 'light', label: 'Светлые' }, { scheme: 'dark', label: 'Тёмные' }] as const;
   let theme = $state<Theme>(readTheme());
   let themeSaveError = $state(false);
   let editorOpen = $state(false);
@@ -572,6 +578,14 @@
     detailTab = event.key === 'Home' ? 'conversation' : event.key === 'End' ? 'history' : tabs[next];
     drawer.querySelector<HTMLButtonElement>(`#${detailTab}-tab`)?.focus();
   }
+  function settingsTabKey(event: KeyboardEvent) {
+    if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const ids = settingsSections.map(section => section.id);
+    const step = event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -1 : 1;
+    settingsSection = event.key === 'Home' ? ids[0] : event.key === 'End' ? ids[ids.length - 1] : ids[(ids.indexOf(settingsSection) + step + ids.length) % ids.length];
+    settings.querySelector<HTMLButtonElement>(`#settings-${settingsSection}-tab`)?.focus();
+  }
   function backdropClick(event: MouseEvent, dialog: HTMLDialogElement, close: () => void) {
     if (event.target !== dialog) return;
     const rect = dialog.getBoundingClientRect();
@@ -634,8 +648,6 @@
 <div class="app-shell">
   <aside class="sidebar" aria-label="Основная навигация">
     <a class="brand" href="/" aria-label="brigd — главная"><span class="brand-symbol"><BrigLogo size={28} /></span><span>brigd<span class="brand-dot">.</span></span></a>
-    <div class="workspace-label"><span class="workspace-icon"><Icon name="folder" size={16} /></span><div><strong>Моё пространство</strong><span>Локальный workspace</span></div><span class="local-light"></span></div>
-    <div class="nav-label">РАБОЧЕЕ ПРОСТРАНСТВО</div>
     <nav class="main-nav" aria-label="Задачи">
       <button class:active={page === 'tasks'} aria-label="Задачи" onclick={() => { page = 'tasks'; resetFilters(); }}><Icon name="board" /><span>Задачи</span><span class="nav-count">{tasks.length}</span></button>
       <button class:active={page === 'workers'} aria-label="Работники" onclick={() => { page = 'workers'; void loadWorkers(); }}><Icon name="spark" /><span>Работники</span><span class="nav-count">{workers.filter(worker => !worker.archived).length}</span></button>
@@ -643,7 +655,6 @@
     </nav>
     <div class="sidebar-bottom">
       <button class="settings-button" onclick={openSettings} aria-haspopup="dialog"><Icon name="sliders" /><span>Настройки</span></button>
-      <div class="workspace-footer"><span class="avatar">Я</span><div><strong>Личное пространство</strong><span>brigd · MVP</span></div><span class="version">v0.1</span></div>
     </div>
   </aside>
 
@@ -812,23 +823,38 @@
 </dialog>
 
 <dialog class="settings-dialog" bind:this={settings} aria-labelledby="settings-title" oncancel={(event) => { event.preventDefault(); closeSettings(); }} onclick={(event) => backdropClick(event, settings, closeSettings)}>
-  <header class="settings-header"><h2 id="settings-title">Настройки</h2><button class="icon-button" aria-label="Закрыть настройки" disabled={modelMutationPending} onclick={closeSettings}><Icon name="close" size={21} /></button></header>
-  <div class="settings-body">
-    <fieldset class="theme-settings">
-      <legend>Цветовая схема</legend>
-      <p id="theme-description">Выбор сохраняется в этом браузере.</p>
-      <div class="theme-options">
-        {#each themes as option (option.id)}
-          <label class="theme-option" class:selected={theme === option.id}>
-            <input type="radio" name="theme" value={option.id} checked={theme === option.id} onchange={() => selectTheme(option.id)} aria-label={option.label} aria-describedby="theme-description" />
-            <span class="theme-preview" aria-hidden="true">{#each option.preview as color}<span style:background={color}></span>{/each}</span>
-            <span class="theme-name">{option.label}</span>
-          </label>
+  <div class="settings-frame">
+    <header class="settings-header"><h2 id="settings-title">Настройки</h2><button class="icon-button" aria-label="Закрыть настройки" disabled={modelMutationPending} onclick={closeSettings}><Icon name="close" size={21} /></button></header>
+    <div class="settings-layout">
+      <div class="settings-nav" role="tablist" aria-label="Разделы настроек" aria-orientation="vertical">
+        {#each settingsSections as section (section.id)}
+          <button id="settings-{section.id}-tab" role="tab" tabindex={settingsSection === section.id ? 0 : -1} onkeydown={settingsTabKey} aria-selected={settingsSection === section.id} aria-controls="settings-{section.id}-panel" class:active={settingsSection === section.id} onclick={() => settingsSection = section.id}><Icon name={section.icon} size={17} /><span>{section.label}</span></button>
         {/each}
       </div>
-    </fieldset>
-    {#if themeSaveError}<p class="settings-warning" role="status">Тема изменена, но браузер не разрешил сохранить выбор. После перезагрузки выберите тему снова.</p>{/if}
-    {#if settingsOpen}<ModelSettings {models} loading={modelsLoading} error={modelsError} retry={() => { void loadModels(); }} onchange={modelChanged} ondelete={modelDeleted} bind:busy={modelMutationPending} />{/if}
+      <!-- Inactive panels stay mounted so an unsaved model draft survives switching sections. -->
+      <div id="settings-appearance-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-appearance-tab" hidden={settingsSection !== 'appearance'}>
+        <fieldset class="theme-settings">
+          <legend>Цветовая схема</legend>
+          <p id="theme-description">Выбор сохраняется в этом браузере.</p>
+          {#each themeGroups as group (group.scheme)}
+            <h3 class="theme-group-title">{group.label}</h3>
+            <div class="theme-options">
+              {#each themes.filter(option => option.colorScheme === group.scheme) as option (option.id)}
+                <label class="theme-option" class:selected={theme === option.id}>
+                  <input type="radio" name="theme" value={option.id} checked={theme === option.id} onchange={() => selectTheme(option.id)} aria-label={option.label} aria-describedby="theme-description" />
+                  <span class="theme-preview" aria-hidden="true">{#each option.preview as color}<span style:background={color}></span>{/each}</span>
+                  <span class="theme-name">{option.label}</span>
+                </label>
+              {/each}
+            </div>
+          {/each}
+        </fieldset>
+        {#if themeSaveError}<p class="settings-warning" role="status">Тема изменена, но браузер не разрешил сохранить выбор. После перезагрузки выберите тему снова.</p>{/if}
+      </div>
+      <div id="settings-models-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-models-tab" hidden={settingsSection !== 'models'}>
+        {#if settingsOpen}<ModelSettings {models} loading={modelsLoading} error={modelsError} retry={() => { void loadModels(); }} onchange={modelChanged} ondelete={modelDeleted} bind:busy={modelMutationPending} />{/if}
+      </div>
+    </div>
   </div>
 </dialog>
 

@@ -157,7 +157,7 @@ test('notes remain inert while an explicit request and its answer retain the ori
 test('an attachment-only request binds the original bytes to the new run without changing the original result', async ({ page, request }) => {
   const { task, original } = await completedTask(request);
   const drawer = await openTask(page, task);
-  const file = { name: 'дополнение.txt', mimeType: 'text/plain', buffer: Buffer.from('Дополнительные исходные данные.\n', 'utf8') };
+  const file = { name: 'addendum.txt', mimeType: 'text/plain', buffer: Buffer.from('Дополнительные исходные данные.\n', 'utf8') };
   const uploadPromise = page.waitForResponse(response => response.request().method() === 'POST' && pathOf(response.url()) === '/api/uploads');
   const files = drawer.getByRole('region', { name: 'Файлы заметки', exact: true });
   await files.locator('input[type="file"]').setInputFiles(file);

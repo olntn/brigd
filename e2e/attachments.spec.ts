@@ -8,8 +8,8 @@ const timestamp = Date.UTC(2026, 9, 9, 9);
 // A real, decodable PNG: browser previews must work, rather than merely render an <img>.
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==', 'base64');
 type TestFile = { name: string; mimeType: string; buffer: Buffer };
-const imageFile = (name = 'снимок экрана.png'): TestFile => ({ name, mimeType: 'image/png', buffer: png });
-const textFile = (name = 'контекст.txt'): TestFile => ({ name, mimeType: 'text/plain', buffer: Buffer.from('Контекст задачи\nВторая строка.\n', 'utf8') });
+const imageFile = (name = 'screenshot.png'): TestFile => ({ name, mimeType: 'image/png', buffer: png });
+const textFile = (name = 'context.txt'): TestFile => ({ name, mimeType: 'text/plain', buffer: Buffer.from('Контекст задачи\nВторая строка.\n', 'utf8') });
 const pathOf = (url: string) => new URL(url).pathname;
 const composer = (within: Locator, name: 'Файлы задачи' | 'Файлы заметки' | 'Файлы ответа') => within.getByRole('region', { name, exact: true });
 const attachmentName = (within: Locator, name: string) => within.locator('.attachment-name').filter({ hasText: name });
@@ -156,7 +156,7 @@ test('select multiple files and create one task with atomically bound uploads, t
   const { editor, title } = await openEditor(page);
   const region = composer(editor, 'Файлы задачи');
   await expect(region.locator('input[type="file"]')).toHaveAttribute('multiple', '');
-  const files = [imageFile('референс №1.png'), textFile('заметки & план.txt')];
+  const files = [imageFile('reference #1.png'), textFile('notes & plan.txt')];
   const staged = await selectFiles(page, region, files);
   expect(taskWrites, 'uploading a draft must not create a partial task').toEqual([]);
   expect(staged.every(file => file.taskId === null && file.source === 'user')).toBe(true);
@@ -182,10 +182,10 @@ test('select multiple files and create one task with atomically bound uploads, t
 test('paste from the task textarea and drop multiple files into the composer', async ({ page, request }) => {
   const { editor, title } = await openEditor(page);
   const region = composer(editor, 'Файлы задачи');
-  const pasted = imageFile('из буфера.png');
+  const pasted = imageFile('from clipboard.png');
   await transferFiles(editor.locator('[name="instruction"]'), 'paste', [pasted]);
   await expect(attachmentName(region, pasted.name)).toBeVisible();
-  const dropped = [textFile('перетащенная заметка.txt'), imageFile('перетащенный снимок.png')];
+  const dropped = [textFile('dropped note.txt'), imageFile('dropped screenshot.png')];
   await transferFiles(region, 'drop', dropped);
   for (const file of dropped) await expect(attachmentName(region, file.name)).toBeVisible();
   await expect(editor.locator('[name="instruction"]')).toHaveValue('Проверь приложенные материалы.');
@@ -200,7 +200,7 @@ test('an image opens by keyboard, Escape restores the task, and download returns
   // This captures the running app, not a synthetic claim of agent-produced output.
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Новая задача', exact: true })).toBeVisible();
-  const file: TestFile = { name: 'предпросмотр.png', mimeType: 'image/png', buffer: await page.screenshot({ fullPage: false }) };
+  const file: TestFile = { name: 'preview.png', mimeType: 'image/png', buffer: await page.screenshot({ fullPage: false }) };
   const staged = await upload(request, file);
   const task = await createTask(request, { attachmentIds: [staged.id] });
   const drawer = await openTask(page, task);
@@ -234,7 +234,7 @@ test('attachment-only note survives a failed save, binds once, and is visible af
   const task = await createTask(request);
   const drawer = await openTask(page, task);
   const region = composer(drawer, 'Файлы заметки');
-  const file = textFile('только вложение.txt');
+  const file = textFile('attachment only.txt');
   const [staged] = await selectFiles(page, region, [file]);
   await drawer.getByLabel('Заметка к задаче', { exact: true }).fill('Черновик для переключения вкладок.');
   await drawer.getByRole('tab', { name: /Запуски/ }).click();
@@ -285,7 +285,7 @@ test(`${withText ? 'pasted clarification with text' : 'attachment-only clarifica
   const answer = drawer.getByLabel('Ответ агенту', { exact: true });
   const answerText = withText ? 'Используй приложенный снимок.' : '';
   await answer.fill(answerText);
-  const file = imageFile('уточнение.png');
+  const file = imageFile('clarification.png');
   const uploaded = page.waitForResponse(response => pathOf(response.url()) === '/api/uploads' && response.request().method() === 'POST');
   await transferFiles(answer, 'paste', [file]);
   const uploadedResponse = await uploaded;
@@ -325,8 +325,8 @@ test('partial upload failure keeps successful files and the note draft for retry
   const drawer = await openTask(page, task);
   const region = composer(drawer, 'Файлы заметки');
   const field = drawer.getByLabel('Заметка к задаче', { exact: true });
-  const good = textFile('успешный.txt');
-  const rejected = imageFile('повторить.png');
+  const good = textFile('successful.txt');
+  const rejected = imageFile('retry.png');
   let rejectedAttempts = 0;
   const uploadedIds: string[] = [];
   await page.route('**/api/uploads?*', async route => {
@@ -368,7 +368,7 @@ test('partial upload failure keeps successful files and the note draft for retry
 test('failed task creation preserves staged uploads and retries without reupload or a partial task', async ({ page, request }) => {
   const { editor, title } = await openEditor(page);
   const region = composer(editor, 'Файлы задачи');
-  const file = textFile('сохранённый черновик.txt');
+  const file = textFile('saved draft.txt');
   const [staged] = await selectFiles(page, region, [file]);
   const bodies: { title: string; attachmentIds: string[] }[] = [];
   let duplicateUploads = 0;
@@ -397,7 +397,7 @@ test('failed task creation preserves staged uploads and retries without reupload
 test('removing a staged file and cancelling the editor delete abandoned uploads', async ({ page, request }) => {
   const { editor, title } = await openEditor(page);
   const region = composer(editor, 'Файлы задачи');
-  const staged = await selectFiles(page, region, [textFile('убрать.txt'), imageFile('отменить.png')]);
+  const staged = await selectFiles(page, region, [textFile('remove.txt'), imageFile('cancel.png')]);
   const removed = page.waitForResponse(response => response.request().method() === 'DELETE' && pathOf(response.url()) === `/api/uploads/${staged[0].id}`);
   await region.getByRole('button', { name: `Убрать файл: ${staged[0].name}`, exact: true }).click();
   expect((await removed).ok()).toBe(true);
@@ -420,14 +420,14 @@ test('a late upload response after cancellation is cleaned up and cannot leak in
     const response = await route.fetch();
     expect(response.ok()).toBe(true);
     const attachment = await response.json() as Attachment;
-    expectAttachmentIntegrity(attachment, imageFile('поздний снимок.png'));
+    expectAttachmentIntegrity(attachment, imageFile('late screenshot.png'));
     uploaded(attachment);
     await gate;
     await route.fulfill({ response });
   });
   try {
     const { editor } = await openEditor(page);
-    await composer(editor, 'Файлы задачи').locator('input[type="file"]').setInputFiles(imageFile('поздний снимок.png'));
+    await composer(editor, 'Файлы задачи').locator('input[type="file"]').setInputFiles(imageFile('late screenshot.png'));
     const staged = await accepted;
     await expect(editor.getByRole('button', { name: 'Создать задачу', exact: true })).toBeDisabled();
     await editor.getByRole('button', { name: 'Отмена', exact: true }).click();
@@ -445,11 +445,11 @@ test('a late upload response after cancellation is cleaned up and cannot leak in
 });
 
 test('closing a task discards note uploads without deleting its bound files', async ({ page, request }) => {
-  const existingFile = textFile('постоянный контекст.txt');
+  const existingFile = textFile('persistent context.txt');
   const existing = await upload(request, existingFile);
   const task = await createTask(request, { attachmentIds: [existing.id] });
   const drawer = await openTask(page, task);
-  const [staged] = await selectFiles(page, composer(drawer, 'Файлы заметки'), [textFile('несохранённая заметка.txt')]);
+  const [staged] = await selectFiles(page, composer(drawer, 'Файлы заметки'), [textFile('unsaved note.txt')]);
   const cleanup = page.waitForResponse(response => response.request().method() === 'DELETE' && pathOf(response.url()) === `/api/uploads/${staged.id}`);
   await drawer.getByRole('button', { name: 'Закрыть задачу', exact: true }).click();
   expect((await cleanup).ok()).toBe(true);
@@ -465,7 +465,7 @@ test('closing a task discards note uploads without deleting its bound files', as
 
 
 test('editing task files changes the next run but preserves the current run input snapshot', async ({ page, request }) => {
-  const initialFile = textFile('исходный контекст.txt');
+  const initialFile = textFile('initial context.txt');
   const initial = await upload(request, initialFile);
   const task = await createTask(request, { instruction: '[ask] Уточни вариант и используй исходный контекст.', attachmentIds: [initial.id] });
   const drawer = await openTask(page, task);
@@ -479,7 +479,7 @@ test('editing task files changes the next run but preserves the current run inpu
   const editor = page.getByRole('dialog', { name: 'Редактировать задачу', exact: true });
   const region = composer(editor, 'Файлы задачи');
   await region.getByRole('button', { name: `Убрать файл: ${initial.name}`, exact: true }).click();
-  const replacementFile = textFile('контекст следующего запуска.txt');
+  const replacementFile = textFile('next run context.txt');
   const [replacement] = await selectFiles(page, region, [replacementFile]);
   const updated = page.waitForResponse(response => response.request().method() === 'PATCH' && pathOf(response.url()) === `/api/tasks/${task.id}`);
   await editor.getByRole('button', { name: 'Сохранить изменения', exact: true }).click();
@@ -504,7 +504,7 @@ test(`a late ${succeeded ? 'successful' : 'failed'} note response preserves the 
   const firstTask = await createTask(request);
   const secondTask = await createTask(request);
   const drawer = await openTask(page, firstTask);
-  const sourceFile = textFile('сохранить при переходе.txt');
+  const sourceFile = textFile('keep on navigation.txt');
   const [savedFile] = await selectFiles(page, composer(drawer, 'Файлы заметки'), [sourceFile]);
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
@@ -530,7 +530,7 @@ test(`a late ${succeeded ? 'successful' : 'failed'} note response preserves the 
     const other = page.getByRole('dialog', { name: secondTask.title, exact: true });
     const field = other.getByLabel('Заметка к задаче', { exact: true });
     await field.fill('Новый черновик второй задачи.');
-    const [draftFile] = await selectFiles(page, composer(other, 'Файлы заметки'), [textFile('черновик другой задачи.txt')]);
+    const [draftFile] = await selectFiles(page, composer(other, 'Файлы заметки'), [textFile('other task draft.txt')]);
     const finished = page.waitForResponse(response => pathOf(response.url()) === `/api/tasks/${firstTask.id}/comments` && response.request().method() === 'POST');
     const abandoned = succeeded ? null : page.waitForResponse(response => response.request().method() === 'DELETE' && pathOf(response.url()) === `/api/uploads/${savedFile.id}`);
     release();
@@ -556,7 +556,7 @@ test(`a late ${succeeded ? 'successful' : 'failed'} note response preserves the 
 function attachmentFixture(overrides: Partial<Attachment> = {}): Attachment {
   return {
     id: 'fixture-input', taskId: 'attachment-fixture-task', commentId: null, runId: null,
-    stepIndex: null, attemptId: null, source: 'user', name: 'исходный референс.png', mime: 'image/png',
+    stepIndex: null, attemptId: null, source: 'user', name: 'source reference.png', mime: 'image/png',
     size: png.byteLength, sha256: 'a'.repeat(64), previewable: true, createdAt: timestamp, ...overrides,
   };
 }
@@ -571,14 +571,14 @@ function fixtureDetail(): TaskDetail {
     finishedAt: timestamp + 1000, summary: 'Результат готов и приложен.', error: null, turn: 1, mock: true,
   };
   const outputs = [
-    attachmentFixture({ id: 'fixture-result-image', name: 'готовый макет.png', source: 'agent', runId: run.id, commentId: 'fixture-result', stepIndex: 1, attemptId: 'fixture-attempt' }),
+    attachmentFixture({ id: 'fixture-result-image', name: 'final mockup.png', source: 'agent', runId: run.id, commentId: 'fixture-result', stepIndex: 1, attemptId: 'fixture-attempt' }),
     attachmentFixture({ id: 'fixture-result-pdf', name: `${'ОченьДлинноеИмяРезультата'.repeat(7)}.pdf`, mime: 'application/pdf', previewable: false, source: 'agent', runId: run.id, commentId: 'fixture-result', stepIndex: 1, attemptId: 'fixture-attempt', size: 1024 }),
-    attachmentFixture({ id: 'fixture-result-svg', name: 'диаграмма.svg', mime: 'image/svg+xml', previewable: false, source: 'agent', runId: run.id, commentId: 'fixture-result', size: 200 }),
+    attachmentFixture({ id: 'fixture-result-svg', name: 'diagram.svg', mime: 'image/svg+xml', previewable: false, source: 'agent', runId: run.id, commentId: 'fixture-result', size: 200 }),
     attachmentFixture({ id: 'fixture-result-html', name: '<b>отчёт</b>.html', mime: 'text/html', previewable: false, source: 'agent', runId: run.id, commentId: 'fixture-result', size: 100 }),
   ];
   // add_attachment without a caption creates a direct task file, not a comment.
   const directOutput = attachmentFixture({
-    id: 'fixture-direct-agent-output', name: 'результат без подписи.txt', mime: 'text/plain',
+    id: 'fixture-direct-agent-output', name: 'uncaptioned result.txt', mime: 'text/plain',
     previewable: false, source: 'agent', runId: run.id, commentId: null, size: 64,
   });
   const task: Task = {
@@ -629,7 +629,7 @@ test('agent outputs belong to their result, unsafe image types only download, an
     await expect(attachmentName(result, attachment.name)).toBeVisible();
     await expect(result.getByRole('link', { name: `Скачать: ${attachment.name}`, exact: true })).toHaveAttribute('href', `/api/tasks/${fixture.task.id}/attachments/${attachment.id}?download=1`);
   }
-  await expect(result.getByRole('button', { name: 'Открыть изображение: готовый макет.png', exact: true })).toBeVisible();
+  await expect(result.getByRole('button', { name: 'Открыть изображение: final mockup.png', exact: true })).toBeVisible();
   for (const attachment of outputs.filter(file => !file.previewable)) {
     await expect(result.getByRole('button', { name: `Открыть изображение: ${attachment.name}`, exact: true })).toHaveCount(0);
   }
@@ -665,8 +665,8 @@ for (const theme of ['light', 'dark'] as const) {
       const dimensions = await longName.evaluate(node => ({ width: node.clientWidth, content: node.scrollWidth }));
       expect(dimensions.content, 'long file names must wrap inside the card').toBeLessThanOrEqual(dimensions.width + 1);
       await page.screenshot({ path: testInfo.outputPath(`attachments-${layout.label}-${theme}-result.png`), fullPage: false });
-      await result.getByRole('button', { name: 'Открыть изображение: готовый макет.png', exact: true }).click();
-      const preview = page.getByRole('dialog', { name: 'готовый макет.png', exact: true });
+      await result.getByRole('button', { name: 'Открыть изображение: final mockup.png', exact: true }).click();
+      const preview = page.getByRole('dialog', { name: 'final mockup.png', exact: true });
       await expect(preview).toBeVisible();
       await noOverflow(page, preview);
       const close = preview.getByRole('button', { name: 'Закрыть просмотр', exact: true });
