@@ -333,7 +333,10 @@ dialog::backdrop { background: var(--overlay); backdrop-filter: blur(2px); }
 .worker-avatar img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .worker-identity { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; font-size: .92rem; color: var(--secondary); }
 .worker-identity > span:not(.worker-avatar) { overflow-wrap: anywhere; min-width: 0; }
-.worker-identity-copy { display: grid; gap: 3px; }
+.worker-identity-copy { display: grid; gap: 3px; flex: 1; }
+.worker-description { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; min-width: 0; max-width: 100%; color: var(--muted); font-size: .77rem; font-weight: 400; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.worker-identity.compact .worker-description { -webkit-line-clamp: 2; }
+.comment-author { display: grid; gap: 3px; flex: 1 1 10rem; }
 .worker-identity-copy small { color: var(--muted); font-size: .77rem; line-height: 1.5; }
 .worker-identity.compact .worker-identity-copy small { font-size: .69rem; }
 .worker-model-label { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
@@ -346,8 +349,9 @@ dialog::backdrop { background: var(--overlay); backdrop-filter: blur(2px); }
 .worker-card { min-width: 0; padding: 20px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
 .worker-card-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }.worker-card-heading > div { flex: 1 1 12rem; min-width: 0; }
 .worker-card h2 { margin: 0; font-size: 1.15rem; line-height: 1.5; font-weight: 550; overflow-wrap: anywhere; }.worker-card-heading p { margin: 5px 0 0; color: var(--muted); font-size: .77rem; overflow-wrap: anywhere; }.worker-card-heading p > span:not(.worker-model-label) { padding-inline: 4px; }
-.worker-style-preview { margin: 18px 0; font-size: .85rem; line-height: 1.8; color: var(--secondary); white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; min-height: 3rem; }
-.worker-card-actions { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--line); padding-top: 15px; }.worker-card-actions .button { font-size: .85rem; padding: 9px 11px; }.text-button { color: var(--muted); }.text-button:hover { background: var(--soft); color: var(--secondary); }
+.worker-card-heading .worker-description { margin: 6px 0 10px; color: var(--secondary); font-size: .85rem; line-height: 1.65; }
+.worker-card-heading .empty-description { color: var(--muted); font-size: .77rem; }
+.worker-card-actions { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--line); margin-top: 18px; padding-top: 15px; }.worker-card-actions .button { font-size: .85rem; padding: 9px 11px; }.text-button { color: var(--muted); }.text-button:hover { background: var(--soft); color: var(--secondary); }
 .worker-archived-label { color: var(--muted); border: 1px solid var(--line); background: var(--subtle); padding: 3px 6px; border-radius: 4px; font-size: .69rem; }.archived-worker { background: var(--subtle); }.workers-archive-help { color: var(--muted); font-size: .85rem; line-height: 1.8; }
 .form-field select { width: 100%; min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 11px 12px; color: var(--text); font-size: .92rem; line-height: 1.5; }.form-field select:focus { border-color: var(--focus); }
 .worker-model-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: 16px; }
@@ -414,8 +418,8 @@ dialog::backdrop { background: var(--overlay); backdrop-filter: blur(2px); }
 .workflow-assignment, .workflow-step-worker { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: .85rem; color: var(--secondary); min-width: 0; }
 .workflow-assignment > span, .workflow-step-worker > span { min-width: 0; overflow-wrap: anywhere; }
 .workflow-assignment-copy { flex: 1; }
-.workflow-assignment small { display: block; margin-top: 3px; color: var(--muted); font-size: .77rem; line-height: 1.5; }
-.workflow-step-worker small { color: var(--muted); font-size: .77rem; }
+.workflow-assignment small, .workflow-step-worker small { display: block; margin-top: 3px; color: var(--muted); font-size: .77rem; line-height: 1.5; }
+.workflow-assignment .worker-description, .workflow-step-worker .worker-description { display: -webkit-box; }
 .workflow-add { width: 100%; }
 .card-workflow-progress { display: flex; align-items: center; gap: 6px; margin-top: 13px; color: var(--accent-text); font-size: .77rem; line-height: 1.65; }
 .card-workflow-progress > span { min-width: 0; overflow-wrap: anywhere; }

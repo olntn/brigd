@@ -52,7 +52,7 @@ try {
   const upload = await fetch(origin + '/api/avatars', { method: 'POST', headers: { Origin: origin, 'Content-Type': 'image/png' }, body: avatarBytes });
   assert(upload.status === 201, 'Avatar upload failed');
   const { avatarUrl } = await upload.json();
-  const worker = await request('/api/workers', { name: 'Smoke reviewer', provider: 'codex', effort: 'high', communicationStyle: 'Кратко и по-русски.', avatarUrl });
+  const worker = await request('/api/workers', { name: 'Smoke reviewer', description: 'Reviews project changes.', provider: 'codex', effort: 'high', communicationStyle: 'Кратко и по-русски.', avatarUrl });
   // This file exceeds the unrelated avatar limit: exercise Bun.serve's real
   // request-size ceiling as well as the attachment route's own bounded reader.
   const largeFileBytes = Buffer.alloc(384 * 1024, 'a');
@@ -69,11 +69,12 @@ try {
   await request(`/api/instructions/${guidance.id}`, { body: 'Этот текст не должен попасть в старую сессию.', enabled: false }, 'PATCH');
   await request(`/api/instructions/${laterGuidance.id}`, { enabled: true }, 'PATCH');
   await request(`/api/instructions/${guidance.id}`, {}, 'DELETE');
+  assert(waiting.runs[0].worker?.description === 'Reviews project changes.', 'Worker description was not frozen');
   assert(waiting.runs[0].worker?.effort === 'high' && waiting.runs[0].worker?.avatarUrl === avatarUrl, 'Worker snapshot was not captured');
   assert(waiting.runs[0].inputAttachments.length === 2, 'Run did not freeze staged attachments atomically with task creation');
   const lateFile = await uploadFile('late-note.txt', Buffer.from('Next run only.'), 'text/plain');
   await request(`/api/tasks/${task.id}/comments`, { body: 'Saved after the run started.', attachmentIds: [lateFile.id] });
-  await request(`/api/workers/${worker.id}`, { name: 'Edited reviewer', provider: 'claude', effort: 'max', communicationStyle: 'Новый стиль', avatarUrl: null }, 'PATCH');
+  await request(`/api/workers/${worker.id}`, { name: 'Edited reviewer', description: 'Writes detailed reports.', provider: 'claude', effort: 'max', communicationStyle: 'Новый стиль', avatarUrl: null }, 'PATCH');
   await request(`/api/workers/${worker.id}`, {}, 'DELETE');
   await stop();
   await start();
@@ -82,6 +83,7 @@ try {
   const library = await request('/api/instructions');
   assert(library.length === 1 && library[0].id === laterGuidance.id && library[0].enabled, 'Instruction edit/toggle/delete did not persist');
   assert(JSON.stringify(restored.runs[0].instructions) === JSON.stringify(frozenInstructions), 'Library changes changed the saved run snapshot after restart');
+  assert(restored.task.worker.description === 'Writes detailed reports.' && restored.runs[0].worker.description === 'Reviews project changes.', 'Current and historic worker descriptions were not kept separate on restart');
   assert(restored.task.worker.archived && restored.task.provider === 'claude', 'Archived worker assignment did not persist');
   assert(restored.runs[0].provider === 'codex' && restored.runs[0].worker.name === 'Smoke reviewer' && restored.runs[0].worker.communicationStyle === 'Кратко и по-русски.', 'Editing profile changed an existing session');
   const persistedAvatar = await fetch(origin + avatarUrl);
@@ -92,13 +94,14 @@ try {
   await request(`/api/runs/${restored.runs[0].id}/resume`, { answer: 'Keep the same test session.', attachmentIds: [clarificationFile.id] });
   const done = await poll(() => request(`/api/tasks/${task.id}`), value => value.task.status === 'completed');
   assert(done.runs[0].sessionId === session && done.runs[0].turn === 2, 'Resume did not use exact session');
+  assert(done.runs[0].worker.description === 'Reviews project changes.', 'Resume changed the frozen display description');
   assert(done.runs[0].worker.effort === 'high' && done.runs[0].worker.avatarUrl === avatarUrl, 'Resume lost worker snapshot');
   assert(JSON.stringify(done.runs[0].instructions) === JSON.stringify(frozenInstructions), 'Resume lost immutable instruction snapshot');
   assert(done.runs[0].inputAttachments.length === 3 && done.runs[0].inputAttachments.some((file: any) => file.id === clarificationFile.id) && !done.runs[0].inputAttachments.some((file: any) => file.id === lateFile.id), 'Resume did not preserve immutable attachment inputs and explicit clarification');
   const workflowCrew = await Promise.all([
-    request('/api/workers', { name: 'Workflow planner', provider: 'codex', effort: 'high', communicationStyle: 'Plan precisely.' }),
-    request('/api/workers', { name: 'Workflow builder', provider: 'claude', effort: 'max', communicationStyle: 'Show changes.' }),
-    request('/api/workers', { name: 'Workflow reviewer', provider: 'codex', effort: 'xhigh', communicationStyle: 'Verify tests.' }),
+    request('/api/workers', { name: 'Workflow planner', description: 'Plans the work.', provider: 'codex', effort: 'high', communicationStyle: 'Plan precisely.' }),
+    request('/api/workers', { name: 'Workflow builder', description: 'Builds the change.', provider: 'claude', effort: 'max', communicationStyle: 'Show changes.' }),
+    request('/api/workers', { name: 'Workflow reviewer', description: 'Checks the result.', provider: 'codex', effort: 'xhigh', communicationStyle: 'Verify tests.' }),
   ]);
   const complex = await request('/api/tasks', { title: 'Sequential workflow restart smoke', instruction: 'Complete this ordered mock checklist.', provider: 'codex', cwd: directory,
     schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false, steps: [
@@ -113,7 +116,7 @@ try {
   assert(waitingRun.currentStepIndex === 1 && waitingRun.steps.map((step: any) => step.status).join(',') === 'completed,waiting_input,pending', 'Workflow failed to pause at its exact current step');
   const workflowSession = waitingRun.steps[1].sessionId;
   const savedFirstStep = JSON.stringify(waitingRun.steps[0]);
-  await request(`/api/workers/${workflowCrew[2].id}`, { name: 'Edited future reviewer', provider: 'claude', effort: 'low', communicationStyle: 'Changed after start.' }, 'PATCH');
+  await request(`/api/workers/${workflowCrew[2].id}`, { name: 'Edited future reviewer', description: 'New public description.', provider: 'claude', effort: 'low', communicationStyle: 'Changed after start.' }, 'PATCH');
   await request(`/api/workers/${workflowCrew[2].id}`, {}, 'DELETE');
   await stop();
   await start();
@@ -124,6 +127,7 @@ try {
   const workflowDone = await poll(() => request(`/api/tasks/${complex.id}`), value => value.task.status === 'completed');
   assert(workflowDone.runs[0].steps.every((step: any) => step.status === 'completed' && step.attempts.length === 1), 'Workflow did not complete every durable step exactly once');
   assert(workflowDone.runs[0].steps[1].sessionId === workflowSession, 'Workflow answer changed the current worker session');
+  assert(workflowDone.runs[0].steps[2].worker.description === 'Checks the result.' && workflowDone.runs[0].steps[2].worker.communicationStyle === 'Verify tests.', 'Future step lost its independent frozen description or personal instructions');
   assert(workflowDone.runs[0].steps[2].worker.name === 'Workflow reviewer' && workflowDone.runs[0].steps[2].worker.provider === 'codex' && workflowDone.runs[0].steps[2].worker.effort === 'xhigh', 'Future worker settings were not frozen at workflow start');
   assert(JSON.stringify(workflowDone.runs[0].steps[0]) === savedFirstStep, 'Workflow replayed or rewrote its completed predecessor');
   const scheduled = await request('/api/tasks', { title: 'Scheduled instruction snapshot', instruction: 'Mock smoke only.', provider: 'codex', cwd: directory, schedule: 'interval', intervalMinutes: 1, firstRunAt: Date.now() + 50, paused: false });
@@ -143,7 +147,7 @@ try {
   await request(`/api/runs/${active.id}/resume`, { answer: 'Mock process is stopped; continue.', acknowledgeInterruption: true });
   const recovered = await poll(() => request(`/api/tasks/${crashed.id}`), value => value.task.status === 'completed');
   assert(recovered.runs[0].sessionId === interrupted.runs[0].sessionId, 'Crash recovery changed session');
-  console.log('PASS: production HTTP, legacy TRACKT_ → BRIGD_ restart, mock clarification, exact session resume, worker/avatar persistence and frozen profiles, instruction CRUD and frozen snapshots, ordered multi-worker workflow and later-step restart/resume with frozen future worker, scheduled no-worker instructions, graceful restart, SIGKILL recovery, no replay.');
+  console.log('PASS: production HTTP, legacy TRACKT_ → BRIGD_ restart, mock clarification, exact session resume, worker/avatar persistence and separate frozen descriptions/personal instructions, instruction CRUD and frozen snapshots, ordered multi-worker workflow and later-step restart/resume with frozen future worker, scheduled no-worker instructions, graceful restart, SIGKILL recovery, no replay.');
 } finally {
   await stop();
   rmSync(directory, { recursive: true, force: true });

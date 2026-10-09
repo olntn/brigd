@@ -254,18 +254,22 @@ describe('durable sequential execution and frozen inputs', () => {
     expect(detail.runs[0].instructions).toEqual(run.instructions);
   });
 
-  test('models stay frozen through profile edits, waiting, restart, resume, future steps and retry; new runs use current profiles', async () => {
-    const crew = workers();
+  test('models and descriptions stay frozen through profile edits, waiting, restart, resume, future steps and retry; new runs use current profiles', async () => {
+    const crew = workers().map((worker, index) => store.updateWorker(worker.id, { ...worker, description: `DISPLAY_ONLY_ORIGINAL_ROLE_${index}` }));
     const task = workflow({}, crew);
     const run = engine.start(task.id);
     const frozenModels = crew.map(worker => worker.model);
+    const frozenDescriptions = crew.map(worker => worker.description);
     expect(run.steps.map(step => step.worker.model)).toEqual(frozenModels);
+    expect(run.steps.map(step => step.worker.description)).toEqual(frozenDescriptions);
     expect(calls[0]!.input.model).toBe(frozenModels[0]);
-    for (const [index, worker] of crew.entries()) store.updateWorker(worker.id, { ...worker, model: `changed-model-${index}` });
+    for (const [index, worker] of crew.entries()) store.updateWorker(worker.id, { ...worker, model: `changed-model-${index}`, description: `DISPLAY_ONLY_UPDATED_ROLE_${index}` });
     expect(store.getRun(run.id).steps.map(step => step.worker.model)).toEqual(frozenModels);
+    expect(store.getRun(run.id).steps.map(step => step.worker.description)).toEqual(frozenDescriptions);
     await settle(0, 'Choose a target', 'needs_input', 'original-model-session');
     await reopen();
     expect(store.getRun(run.id).steps.map(step => step.worker.model)).toEqual(frozenModels);
+    expect(store.getRun(run.id).steps.map(step => step.worker.description)).toEqual(frozenDescriptions);
     engine.resume(run.id, 'Continue.', false);
     expect(calls[1]!.input).toMatchObject({ model: frozenModels[0], sessionId: 'original-model-session' });
     await settle(1, 'Plan complete', 'completed', 'original-model-session');
@@ -275,6 +279,7 @@ describe('durable sequential execution and frozen inputs', () => {
     engine.retry(run.id);
     expect(calls[3]!.input.model).toBe(frozenModels[1]);
     expect(calls[3]!.input.sessionId).toBeUndefined();
+    expect(store.getRun(run.id).worker?.description).toBe(frozenDescriptions[1]);
     await settle(3, 'Implementation complete');
     expect(calls[4]!.input.model).toBe(frozenModels[2]);
     await settle(4, 'Review complete');
@@ -282,6 +287,13 @@ describe('durable sequential execution and frozen inputs', () => {
     expect(calls[5]!.input.model).toBe('changed-model-0');
     expect(next.steps.map(step => step.worker.model)).toEqual(['changed-model-0', 'changed-model-1', 'changed-model-2']);
     expect(store.getRun(run.id).steps.map(step => step.worker.model)).toEqual(frozenModels);
+    expect(next.steps.map(step => step.worker.description)).toEqual(['DISPLAY_ONLY_UPDATED_ROLE_0', 'DISPLAY_ONLY_UPDATED_ROLE_1', 'DISPLAY_ONLY_UPDATED_ROLE_2']);
+    expect(store.getRun(run.id).steps.map(step => step.worker.description)).toEqual(frozenDescriptions);
+    for (const call of calls) {
+      expect(call.input).not.toHaveProperty('description');
+      expect(buildPrompt(call.input)).not.toContain('DISPLAY_ONLY_');
+      expect(buildPrompt(call.input)).toContain(JSON.stringify(call.input.communicationStyle));
+    }
   });
 
   test('repeated starts and scheduler ticks cannot overlap an active workflow or launch a future step', async () => {
@@ -810,7 +822,7 @@ describe('handoff prompt and native argv safety', () => {
 // Capture legacy bytes independently of the current Store so its migrations cannot
 // make a malformed compatibility fixture look self-consistent.
 describe('additive workflow migration', () => {
-  test('pre-model workflow snapshots normalize to null without rewriting history or borrowing current profile models', async () => {
+  test.each(['missing', 'null', 'mixed'])('pre-model/description workflow snapshots with %s description normalize without rewriting history or borrowing current profiles', async legacyDescription => {
     const crew = workers();
     const task = workflow({}, crew);
     const first = store.startManual(task.id, true, BASE);
@@ -818,14 +830,16 @@ describe('additive workflow migration', () => {
     store.finish(first.id, 'completed', 'Historical plan', null, BASE + 1);
     store.setSession(first.id, 'legacy-build-session');
     const waiting = store.finish(first.id, 'waiting_input', 'Historical question', null, BASE + 2);
-    const legacyWorker = (worker: Run['steps'][number]['worker']) => {
-      const { model: _model, ...legacy } = worker;
-      return legacy;
+    const legacyWorker = (worker: Run['steps'][number]['worker'], index = -1) => {
+      const { model: _model, description: _description, ...legacy } = worker;
+      const useNull = legacyDescription === 'null' || legacyDescription === 'mixed' && (index === -1 || index % 2 === 0);
+      return { ...legacy, ...(useNull ? { description: null } : {}) };
     };
     const workerJSON = JSON.stringify(legacyWorker(waiting.worker!), null, 2);
-    const stepsJSON = JSON.stringify(waiting.steps.map(step => ({ ...step, worker: legacyWorker(step.worker) })), null, 2);
+    const stepsJSON = JSON.stringify(waiting.steps.map((step, index) => ({ ...step, worker: legacyWorker(step.worker, index) })), null, 2);
     store.db.query('UPDATE runs SET worker_snapshot=?,steps_snapshot=? WHERE id=?').run(workerJSON, stepsJSON, waiting.id);
     store.db.exec('ALTER TABLE workers DROP COLUMN model');
+    store.db.exec('ALTER TABLE workers DROP COLUMN description');
     const tables = ['workers', 'tasks', 'runs', 'comments', 'instructions'];
     const original = new Map(tables.map(table => [table, store.db.query(`SELECT * FROM ${table} ORDER BY rowid`).all() as Record<string, unknown>[]]));
     for (let pass = 0; pass < 2; pass++) {
@@ -837,20 +851,27 @@ describe('additive workflow migration', () => {
         expect(store.db.query(`SELECT ${columns} FROM ${table} ORDER BY rowid`).all()).toEqual(rows);
       }
       expect(store.listWorkers().every(worker => worker.model === null)).toBe(true);
+      expect(store.listWorkers().every(worker => worker.description === '')).toBe(true);
       expect(store.getRun(waiting.id).worker?.model).toBeNull();
+      expect(store.getRun(waiting.id).worker?.description).toBe('');
       expect(store.getRun(waiting.id).steps.map(step => step.worker.model)).toEqual([null, null, null]);
+      expect(store.getRun(waiting.id).steps.map(step => step.worker.description)).toEqual(['', '', '']);
       expect(store.db.query('SELECT worker_snapshot,steps_snapshot FROM runs WHERE id=?').get(waiting.id)).toEqual({ worker_snapshot: workerJSON, steps_snapshot: stepsJSON });
       expect(store.db.query('PRAGMA foreign_key_check').all()).toEqual([]);
     }
-    for (const worker of crew) store.updateWorker(worker.id, { ...worker, model: 'profile-after-migration' });
+    for (const worker of crew) store.updateWorker(worker.id, { ...worker, model: 'profile-after-migration', description: 'DISPLAY_ONLY_CURRENT_ROLE', communicationStyle: 'Updated instructions after migration.' });
     engine.resume(waiting.id, 'Resume with the historical CLI default.', false);
     expect(calls[0]!.input).toMatchObject({ model: null, sessionId: 'legacy-build-session' });
+    expect(calls[0]!.input.communicationStyle).toBe(crew[1]!.communicationStyle);
+    expect(buildPrompt(calls[0]!.input)).not.toContain('DISPLAY_ONLY_CURRENT_ROLE');
     await settle(0, 'Historical implementation', 'completed', 'legacy-build-session');
     expect(calls[1]!.input.model).toBeNull();
     expect(store.getRun(waiting.id).steps.map(step => step.worker.model)).toEqual([null, null, null]);
+    expect(store.getRun(waiting.id).steps.map(step => step.worker.description)).toEqual(['', '', '']);
     await settle(1);
     const fresh = engine.start(task.id);
     expect(fresh.steps.map(step => step.worker.model)).toEqual(crew.map(() => 'profile-after-migration'));
+    expect(fresh.steps.map(step => step.worker.description)).toEqual(crew.map(() => 'DISPLAY_ONLY_CURRENT_ROLE'));
   });
 
   test('two opens preserve all raw legacy rows, JSON bytes, comments, IDs, leases, and session continuity', () => {
@@ -899,7 +920,7 @@ describe('additive workflow migration', () => {
           const columns = Object.keys(original[0]!).map(name => `"${name}"`).join(',');
           expect(migrated.db.query(`SELECT ${columns} FROM ${table} ORDER BY rowid`).all()).toEqual(original);
         }
-        expect(migrated.getWorker('legacy-worker').model).toBeNull();
+        expect(migrated.getWorker('legacy-worker')).toMatchObject({ model: null, description: '', communicationStyle: 'Keep exact style' });
         expect(migrated.getTask('legacy-task')).toMatchObject({ steps: [], workerId: 'legacy-worker', worker: { model: null }, status: 'waiting_input' });
         expect(migrated.getRun('legacy-waiting')).toMatchObject({ steps: [], currentStepIndex: null, worker: { model: null }, sessionId: 'waiting-session', turn: 3 });
         expect(migrated.detail('legacy-task').comments.every(comment => comment.stepIndex === null)).toBe(true);
@@ -1005,6 +1026,11 @@ describe('persisted workflow corruption fails closed', () => {
       { name: 'missing active worker snapshot', row: { worker_snapshot: null } },
       { name: 'changed active provider snapshot', row: { worker_snapshot: JSON.stringify({ ...run.steps[1]!.worker, provider: 'codex' }) } },
       { name: 'changed active model snapshot', row: { worker_snapshot: JSON.stringify({ ...run.steps[1]!.worker, model: 'different-model' }) } },
+      { name: 'changed active description snapshot', row: { worker_snapshot: JSON.stringify({ ...run.steps[1]!.worker, description: 'Mismatched role' }) } },
+      { name: 'oversized future description', steps: steps => { steps[2]!.worker.description = 'x'.repeat(1_001); return steps; } },
+      { name: 'nul future description', steps: steps => { steps[2]!.worker.description = 'a\0b'; return steps; } },
+      { name: 'nontext future description', steps: steps => { Object.assign(steps[2]!.worker, { description: { role: 'Reviewer' } }); return steps; } },
+      { name: 'noncanonical future description', steps: steps => { steps[2]!.worker.description = ' Reviewer '; return steps; } },
       { name: 'malicious future model', steps: steps => { steps[2]!.worker.model = '--permission-bypass'; return steps; } },
       { name: 'noncanonical future model', steps: steps => { steps[2]!.worker.model = ' model '; return steps; } },
       { name: 'extra future worker key', steps: steps => { Object.assign(steps[2]!.worker, { extra: true }); return steps; } },

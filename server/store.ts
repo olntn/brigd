@@ -7,7 +7,7 @@ import { validateInstruction, validateInstructionPatch, validateInstructionSnaps
 import { AppError } from './errors';
 import { validateWorkflowSteps } from './workflows';
 import { validateSessionId } from './protocol';
-import { effortOptions, MODEL_CATALOG_PROVIDER_LIMIT, modelPresets, normalizeModel } from '../src/lib/workers';
+import { effortOptions, MODEL_CATALOG_PROVIDER_LIMIT, modelPresets, normalizeModel, normalizeWorkerDescription } from '../src/lib/workers';
 import { validateModel, validateModelPatch } from './models';
 import { attachmentIds, preparedAttachmentPayload, type PreparedAttachment } from './attachments';
 import { ATTACHMENT_MAX_COUNT, ATTACHMENT_TASK_MAX_COUNT, ATTACHMENT_TASK_MAX_BYTES, ATTACHMENT_STAGING_MAX_COUNT, ATTACHMENT_STAGING_MAX_BYTES, ATTACHMENT_TOTAL_MAX_BYTES, ATTACHMENT_STAGING_TTL_MS } from '../src/lib/attachments';
@@ -27,18 +27,22 @@ function matchesFence(run: Run, fence?: RunFence): boolean {
   return current.turn === fence.turn && current.currentStepIndex === fence.currentStepIndex && current.attemptId === fence.attemptId;
 }
 function workerSnapshot(worker: Worker): WorkerSnapshot {
-  return { id: worker.id, name: worker.name, provider: worker.provider, model: worker.model, effort: worker.effort,
+  return { id: worker.id, name: worker.name, description: worker.description, provider: worker.provider, model: worker.model, effort: worker.effort,
     communicationStyle: worker.communicationStyle, avatarUrl: worker.avatarUrl };
 }
 function validatedModel(value: unknown): string | null {
   try { return normalizeModel(value); }
   catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректная модель'); }
 }
+function validatedDescription(value: unknown): string {
+  try { return normalizeWorkerDescription(value); }
+  catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректное описание'); }
+}
 function validWorkerSnapshot(value: unknown): value is WorkerSnapshot {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const worker = value as WorkerSnapshot;
-  const keys = Object.keys(worker).sort().join(',');
-  if (keys !== 'avatarUrl,communicationStyle,effort,id,name,provider' && keys !== 'avatarUrl,communicationStyle,effort,id,model,name,provider') return false;
+  const keys = Object.keys(worker).filter(key => key !== 'model' && key !== 'description').sort().join(',');
+  if (keys !== 'avatarUrl,communicationStyle,effort,id,name,provider') return false;
   if (typeof worker.id !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(worker.id) || typeof worker.name !== 'string' || !worker.name.trim() || worker.name.length > 80 || worker.name.includes('\0')) return false;
   if (!['codex', 'claude'].includes(worker.provider) || !effortOptions[worker.provider]?.includes(worker.effort)) return false;
   if (typeof worker.communicationStyle !== 'string' || worker.communicationStyle.length > 4_000 || worker.communicationStyle.includes('\0')) return false;
@@ -46,13 +50,16 @@ function validWorkerSnapshot(value: unknown): value is WorkerSnapshot {
   try {
     const model = normalizeModel(worker.model);
     if ('model' in worker && worker.model !== model) return false;
+    const description = normalizeWorkerDescription(worker.description);
+    if (worker.description != null && worker.description !== description) return false;
     // Upgrade legacy JSON in memory only; opening a database never rewrites snapshots.
     worker.model = model;
+    worker.description = description;
     return true;
   } catch { return false; }
 }
 function sameWorker(left: WorkerSnapshot, right: WorkerSnapshot): boolean {
-  return left.id === right.id && left.name === right.name && left.provider === right.provider && left.model === right.model && left.effort === right.effort && left.communicationStyle === right.communicationStyle && left.avatarUrl === right.avatarUrl;
+  return left.id === right.id && left.name === right.name && left.description === right.description && left.provider === right.provider && left.model === right.model && left.effort === right.effort && left.communicationStyle === right.communicationStyle && left.avatarUrl === right.avatarUrl;
 }
 function beginAttempt(step: RunStep, turn: number, now: number) {
   const attempt: StepAttempt = { id: crypto.randomUUID(), number: step.attempts.length + 1, status: 'running', sessionId: null,
@@ -128,6 +135,7 @@ export class Store {
     this.db.transaction(() => {
       for (const [table, column, definition] of [
         ['workers', 'model', 'TEXT'],
+        ['workers', 'description', "TEXT NOT NULL DEFAULT ''"],
         ['tasks', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_snapshot', 'TEXT'],
@@ -317,7 +325,7 @@ export class Store {
     if (!result.changes) throw new AppError('Инструкция не найдена', 404);
   }
   private mapWorker(row: Row): Worker {
-    return { id: row.id, name: row.name, provider: row.provider, model: validatedModel(row.model), effort: row.effort,
+    return { id: row.id, name: row.name, description: validatedDescription(row.description), provider: row.provider, model: validatedModel(row.model), effort: row.effort,
       communicationStyle: row.communication_style, avatarUrl: row.avatar_url, archived: !!row.archived,
       createdAt: row.created_at, updatedAt: row.updated_at };
   }
@@ -336,18 +344,20 @@ export class Store {
   }
   createWorker(input: WorkerInput, now = Date.now()): Worker {
     const model = validatedModel(input.model);
+    const description = validatedDescription(input.description);
     this.assertAvatar(input.avatarUrl);
     const id = crypto.randomUUID();
-    this.db.query(`INSERT INTO workers (id,name,provider,model,effort,communication_style,avatar_url,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`)
-      .run(id, input.name, input.provider, model, input.effort, input.communicationStyle, input.avatarUrl, now, now);
+    this.db.query(`INSERT INTO workers (id,name,description,provider,model,effort,communication_style,avatar_url,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, input.name, description, input.provider, model, input.effort, input.communicationStyle, input.avatarUrl, now, now);
     return this.getWorker(id);
   }
   updateWorker(id: string, input: WorkerInput & { archived?: boolean }, now = Date.now()): Worker {
     const current = this.getWorker(id);
     const model = validatedModel(input.model === undefined && input.provider === current.provider ? current.model : input.model);
+    const description = validatedDescription(input.description === undefined ? current.description : input.description);
     this.assertAvatar(input.avatarUrl);
-    this.db.query('UPDATE workers SET name=?,provider=?,model=?,effort=?,communication_style=?,avatar_url=?,archived=?,updated_at=? WHERE id=?')
-      .run(input.name, input.provider, model, input.effort, input.communicationStyle, input.avatarUrl, +(input.archived ?? current.archived), now, id);
+    this.db.query('UPDATE workers SET name=?,description=?,provider=?,model=?,effort=?,communication_style=?,avatar_url=?,archived=?,updated_at=? WHERE id=?')
+      .run(input.name, description, input.provider, model, input.effort, input.communicationStyle, input.avatarUrl, +(input.archived ?? current.archived), now, id);
     return this.getWorker(id);
   }
   archiveWorker(id: string, now = Date.now()): Worker {

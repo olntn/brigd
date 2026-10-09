@@ -83,7 +83,7 @@ const workerInput = (patch: Partial<WorkerInput> = {}): WorkerInput => ({
   name: 'Ada', provider: 'codex', effort: 'default', communicationStyle: '', avatarUrl: null, ...patch,
 });
 const snapshot = (worker: Worker): WorkerSnapshot => ({
-  id: worker.id, name: worker.name, provider: worker.provider, model: worker.model, effort: worker.effort,
+  id: worker.id, name: worker.name, description: worker.description, provider: worker.provider, model: worker.model, effort: worker.effort,
   communicationStyle: worker.communicationStyle, avatarUrl: worker.avatarUrl,
 });
 function request(path: string, method = 'GET', value?: unknown, headers: Record<string, string> = {}) {
@@ -221,7 +221,7 @@ describe('worker profile CRUD and validation', () => {
     const response = await request('/api/workers', 'POST', { name: '  Ада  ', provider: 'codex' });
     expect(response.status).toBe(201);
     const created: Worker = await response.json();
-    expect(created).toMatchObject({ name: 'Ада', provider: 'codex', model: null, effort: 'default', communicationStyle: '', avatarUrl: null, archived: false });
+    expect(created).toMatchObject({ name: 'Ада', description: '', provider: 'codex', model: null, effort: 'default', communicationStyle: '', avatarUrl: null, archived: false });
     expect(created.id).toMatch(/^[a-zA-Z0-9-]+$/);
     expect(created.createdAt).toBeGreaterThan(0);
     expect(created.updatedAt).toBe(created.createdAt);
@@ -362,20 +362,20 @@ describe('worker assignment and immutable run snapshots', () => {
   test('task providers follow current profiles; old sessions keep their original identity across edits, reassignment, archive, and restart', async () => {
     const originalAvatar = store.saveAvatar(PNG, 'image/png', BASE);
     const replacementAvatar = store.saveAvatar(JPEG, 'image/jpeg', BASE);
-    const original = store.createWorker(workerInput({ name: 'Original', model: 'gpt-5.3-codex', effort: 'xhigh', communicationStyle: 'Use short summaries', avatarUrl: originalAvatar }), BASE);
+    const original = store.createWorker(workerInput({ name: 'Original', description: 'Original role', model: 'gpt-5.3-codex', effort: 'xhigh', communicationStyle: 'Use short summaries', avatarUrl: originalAvatar }), BASE);
     const task = store.createTask(taskInput({ workerId: original.id, provider: 'claude' }), BASE);
     expect(task).toMatchObject({ workerId: original.id, provider: 'codex', worker: original });
     const run = store.startManual(task.id, true, BASE + 1);
     const frozen = snapshot(original);
     expect(run).toMatchObject({ workerId: original.id, worker: frozen, provider: 'codex' });
     expect(frozen.model).toBe('gpt-5.3-codex');
-    expect(Object.keys(run.worker!).sort()).toEqual(['avatarUrl', 'communicationStyle', 'effort', 'id', 'model', 'name', 'provider']);
+    expect(Object.keys(run.worker!).sort()).toEqual(['avatarUrl', 'communicationStyle', 'description', 'effort', 'id', 'model', 'name', 'provider']);
     store.setSession(run.id, 'original-persistent-session');
     store.finish(run.id, 'waiting_input', 'Choose branch', null, BASE + 2);
-    const edited = store.updateWorker(original.id, workerInput({ name: 'Edited', provider: 'claude', model: 'claude-opus-4-6', effort: 'max', communicationStyle: 'Long explanations', avatarUrl: replacementAvatar }), BASE + 3);
+    const edited = store.updateWorker(original.id, workerInput({ name: 'Edited', description: 'Updated role', provider: 'claude', model: 'claude-opus-4-6', effort: 'max', communicationStyle: 'Long explanations', avatarUrl: replacementAvatar }), BASE + 3);
     expect(store.getTask(task.id)).toMatchObject({ worker: edited, provider: 'claude' });
     expect(store.getRun(run.id).worker).toEqual(frozen);
-    const other = store.createWorker(workerInput({ name: 'Other', provider: 'claude', model: 'sonnet', effort: 'high' }), BASE + 4);
+    const other = store.createWorker(workerInput({ name: 'Other', description: 'Replacement role', provider: 'claude', model: 'sonnet', effort: 'high' }), BASE + 4);
     store.updateTask(task.id, taskInput({ workerId: other.id, instruction: 'Replacement task instruction' }), BASE + 5);
     store.archiveWorker(original.id, BASE + 6);
     store.archiveWorker(other.id, BASE + 7);
@@ -463,12 +463,12 @@ describe('worker assignment and immutable run snapshots', () => {
   });
 
   test('scheduled snapshots capture current settings at each occurrence and still run for archived assigned workers', async () => {
-    const worker = store.createWorker(workerInput({ model: 'gpt-5.3-codex', effort: 'low', communicationStyle: 'Initial style' }), BASE);
+    const worker = store.createWorker(workerInput({ description: 'Initial role', model: 'gpt-5.3-codex', effort: 'low', communicationStyle: 'Initial style' }), BASE);
     const task = store.createTask(taskInput({ workerId: worker.id, schedule: 'interval', intervalMinutes: 5, firstRunAt: BASE }), BASE);
     const first = store.claimDue(true, BASE)[0]!;
     expect(first).toMatchObject({ taskId: task.id, workerId: worker.id, worker: snapshot(worker), trigger: 'schedule', scheduledFor: BASE });
     store.finish(first.id, 'completed', 'First complete', null, BASE + 1);
-    const edited = store.updateWorker(worker.id, workerInput({ provider: 'claude', model: 'opus', effort: 'max', communicationStyle: 'Updated style' }), BASE + 2);
+    const edited = store.updateWorker(worker.id, workerInput({ description: 'Updated role', provider: 'claude', model: 'opus', effort: 'max', communicationStyle: 'Updated style' }), BASE + 2);
     store.archiveWorker(worker.id, BASE + 3);
     await reopen();
     const second = store.claimDue(true, BASE + 5 * MINUTE)[0]!;
@@ -479,7 +479,7 @@ describe('worker assignment and immutable run snapshots', () => {
   });
 
   test('HTTP run and detail round-trip frozen worker data while task detail shows the current profile', async () => {
-    const worker = await createWorker({ model: 'gpt-5.3-codex', communicationStyle: 'Keep it brief', effort: 'high' });
+    const worker = await createWorker({ description: 'Initial role', model: 'gpt-5.3-codex', communicationStyle: 'Keep it brief', effort: 'high' });
     const task = await createTask({ workerId: worker.id });
     const response = await request(`/api/tasks/${task.id}/run`, 'POST', {});
     expect(response.status).toBe(201);
@@ -488,11 +488,109 @@ describe('worker assignment and immutable run snapshots', () => {
     expect(calls).toHaveLength(1);
     calls[0]!.resolve({ sessionId: 'synthetic-worker-session', envelope: { status: 'completed', summary: 'Done', questions: [] } });
     await flush();
-    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { name: 'New display name', model: 'gpt-5.4', effort: 'low' })).status).toBe(200);
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { name: 'New display name', description: 'Updated role', model: 'gpt-5.4', effort: 'low' })).status).toBe(200);
     const detail = await (await request(`/api/tasks/${task.id}`)).json();
-    expect(detail.task.worker).toMatchObject({ name: 'New display name', model: 'gpt-5.4', effort: 'low' });
+    expect(detail.task.worker).toMatchObject({ name: 'New display name', description: 'Updated role', model: 'gpt-5.4', effort: 'low' });
     expect(detail.runs[0]).toMatchObject({ id: run.id, status: 'completed', worker: snapshot(worker) });
     expect(detail.task.latestRun.worker).toEqual(snapshot(worker));
+  });
+});
+
+describe('display-only worker descriptions', () => {
+  test('HTTP creates, reads and independently edits descriptions and personal instructions; omitted values preserve and null clears', async () => {
+    const worker = await createWorker({ description: '  Reviews migrations.\nChecks compatibility.  ', communicationStyle: 'Use concise Russian.' });
+    expect(worker.description).toBe('Reviews migrations.\nChecks compatibility.');
+    expect(await (await request(`/api/workers/${worker.id}`)).json()).toEqual(worker);
+    expect((await (await request('/api/workers')).json())[0]).toEqual(worker);
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { communicationStyle: 'Explain your checks.' })).status).toBe(200);
+    expect(store.getWorker(worker.id)).toMatchObject({ description: worker.description, communicationStyle: 'Explain your checks.' });
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { description: '  New role  ' })).status).toBe(200);
+    expect(store.getWorker(worker.id)).toMatchObject({ description: 'New role', communicationStyle: 'Explain your checks.' });
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { provider: 'claude' })).status).toBe(200);
+    await reopen();
+    expect(store.getWorker(worker.id)).toMatchObject({ description: 'New role', communicationStyle: 'Explain your checks.' });
+    for (const description of [null, '', ' \n\t ']) {
+      expect((await request(`/api/workers/${worker.id}`, 'PATCH', { description: 'Before clear' })).status).toBe(200);
+      expect((await request(`/api/workers/${worker.id}`, 'PATCH', { description })).status).toBe(200);
+      expect(store.getWorker(worker.id)).toMatchObject({ description: '', communicationStyle: 'Explain your checks.' });
+    }
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { description: 'я'.repeat(1_000) })).status).toBe(200);
+    expect(store.getWorker(worker.id).description).toBe('я'.repeat(1_000));
+    expect((await createWorker({ description: null, communicationStyle: 'Never copy this into description.' })).description).toBe('');
+  });
+
+  test('direct Store calls trim descriptions, preserve omitted edits even across providers and clear null', () => {
+    const worker = store.createWorker(workerInput({ description: '  Database reviewer  ', communicationStyle: 'Keep this instruction.' }));
+    expect(worker.description).toBe('Database reviewer');
+    for (const provider of ['codex', 'claude'] as const) {
+      expect(store.updateWorker(worker.id, workerInput({ provider, communicationStyle: worker.communicationStyle })).description).toBe(worker.description);
+    }
+    expect(store.updateWorker(worker.id, workerInput({ description: null })).description).toBe('');
+    expect(store.updateWorker(worker.id, workerInput({ description: '  Updated role  ' })).description).toBe('Updated role');
+    expect(store.updateWorker(worker.id, workerInput({ description: ' ' })).description).toBe('');
+    expect(store.createWorker(workerInput({ communicationStyle: 'No implied role.' })).description).toBe('');
+  });
+
+  test.each([0, false, {}, [], 'x'.repeat(1_001), ' '.repeat(1_001), 'a\0b'].map(description => ({ description })))('rejects invalid descriptions $description atomically in HTTP and Store calls', async ({ description }) => {
+    const worker = await createWorker({ description: 'Kept role', communicationStyle: 'Kept instruction' });
+    expect((await request('/api/workers', 'POST', { ...workerInput(), description })).status).toBe(400);
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { description, communicationStyle: 'Do not save' })).status).toBe(400);
+    const invalid = { ...workerInput(), description } as WorkerInput;
+    expectAppError(() => store.createWorker(invalid), 400);
+    expectAppError(() => store.updateWorker(worker.id, invalid), 400);
+    expect(store.listWorkers()).toEqual([worker]);
+  });
+
+  test.each(['missing', 'null'])('pre-description database and %s snapshots upgrade in memory without changing raw data', async legacyDescription => {
+    const worker = store.createWorker(workerInput({ model: 'kept-model', communicationStyle: '  Keep exact personal instructions.\nDo not make this a role.  ' }), BASE);
+    const task = store.createTask(taskInput({ workerId: worker.id }), BASE);
+    const run = store.startManual(task.id, true, BASE + 1);
+    store.setSession(run.id, 'legacy-description-session');
+    store.finish(run.id, 'waiting_input', 'Which target?', null, BASE + 2);
+    const { description: _description, ...legacyWorker } = snapshot(worker);
+    const workerJSON = JSON.stringify({ ...legacyWorker, ...(legacyDescription === 'null' ? { description: null } : {}) }, null, 2);
+    store.db.query('UPDATE runs SET worker_snapshot=? WHERE id=?').run(workerJSON, run.id);
+    store.db.exec('ALTER TABLE workers DROP COLUMN description');
+    const tables = ['workers', 'tasks', 'runs', 'comments', 'instructions'];
+    const originals = new Map(tables.map(table => [table, store.db.query(`SELECT * FROM ${table} ORDER BY rowid`).all() as Record<string, unknown>[]]));
+    for (let pass = 0; pass < 2; pass++) {
+      await reopen();
+      for (const table of tables) {
+        const rows = originals.get(table)!;
+        if (!rows.length) continue;
+        const columns = Object.keys(rows[0]!).map(name => `"${name}"`).join(',');
+        expect(store.db.query(`SELECT ${columns} FROM ${table} ORDER BY rowid`).all()).toEqual(rows);
+      }
+      expect(store.getWorker(worker.id)).toMatchObject({ description: '', communicationStyle: worker.communicationStyle, model: 'kept-model' });
+      expect(store.db.query('SELECT description FROM workers WHERE id=?').get(worker.id)).toEqual({ description: '' });
+      expect(store.getRun(run.id).worker).toEqual(snapshot(worker));
+      expect(store.db.query('SELECT worker_snapshot FROM runs WHERE id=?').get(run.id)).toEqual({ worker_snapshot: workerJSON });
+    }
+    store.updateWorker(worker.id, { ...worker, description: 'Current role', communicationStyle: 'Current personal instructions' });
+    const resumed = store.resume(run.id, 'main');
+    expect(resumed.worker).toMatchObject({ description: '', communicationStyle: worker.communicationStyle });
+    expect(store.db.query('SELECT worker_snapshot FROM runs WHERE id=?').get(run.id)).toEqual({ worker_snapshot: workerJSON });
+    store.finish(run.id, 'completed', 'Done', null);
+    expect(store.startManual(task.id, true).worker).toMatchObject({ description: 'Current role', communicationStyle: 'Current personal instructions' });
+    expect(store.db.query('PRAGMA foreign_key_check').all()).toEqual([]);
+  });
+
+  test('malformed descriptions in simple snapshots fail closed before a resumed agent launches', () => {
+    const worker = store.createWorker(workerInput({ description: 'Valid role' }));
+    const task = store.createTask(taskInput({ workerId: worker.id }));
+    const run = store.startManual(task.id, true);
+    store.setSession(run.id, 'description-session');
+    store.finish(run.id, 'waiting_input', 'Continue?', null);
+    const original = (store.db.query('SELECT worker_snapshot FROM runs WHERE id=?').get(run.id) as { worker_snapshot: string }).worker_snapshot;
+    try {
+      for (const description of [false, 1, {}, [], 'x'.repeat(1_001), 'a\0b', ' noncanonical ']) {
+        const corrupted = JSON.stringify({ ...JSON.parse(original), description });
+        store.db.query('UPDATE runs SET worker_snapshot=? WHERE id=?').run(corrupted, run.id);
+        expectAppError(() => engine.resume(run.id, 'Do not launch.', false), 409);
+        expect(calls).toHaveLength(0);
+        expect(store.db.query('SELECT worker_snapshot FROM runs WHERE id=?').get(run.id)).toEqual({ worker_snapshot: corrupted });
+      }
+    } finally { store.db.query('UPDATE runs SET worker_snapshot=? WHERE id=?').run(original, run.id); }
   });
 });
 

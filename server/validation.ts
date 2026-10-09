@@ -4,7 +4,7 @@ import type { Effort, TaskInput, WorkerInput } from '../src/lib/types';
 import { AppError } from './store';
 import { validateWorkflowSteps } from './workflows';
 import { attachmentIds } from './attachments';
-import { effortOptions, normalizeModel } from '../src/lib/workers';
+import { effortOptions, normalizeModel, normalizeWorkerDescription } from '../src/lib/workers';
 
 export function textField(value: unknown, label: string, max: number): string {
   if (typeof value !== 'string' || !value.trim() || value.length > max || value.includes('\0')) throw new AppError(`${label}: введите от 1 до ${max} символов`);
@@ -49,12 +49,15 @@ export function validateWorker(value: unknown): WorkerInput & { archived?: boole
   let model: string | null;
   try { model = normalizeModel(v.model); }
   catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректная модель'); }
+  let description: string;
+  try { description = normalizeWorkerDescription(v.description); }
+  catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректное описание'); }
   if (typeof effort !== 'string' || !effortOptions[v.provider].includes(effort as Effort)) throw new AppError('Этот effort не поддерживается выбранным провайдером');
   const communicationStyle = v.communicationStyle === undefined ? '' : v.communicationStyle;
-  if (typeof communicationStyle !== 'string' || communicationStyle.length > 4_000 || communicationStyle.includes('\0')) throw new AppError('Стиль общения: не больше 4000 символов');
+  if (typeof communicationStyle !== 'string' || communicationStyle.length > 4_000 || communicationStyle.includes('\0')) throw new AppError('Личные инструкции: не больше 4000 символов');
   const avatarUrl = v.avatarUrl ?? null;
   if (avatarUrl !== null && (typeof avatarUrl !== 'string' || !/^\/api\/avatars\/[a-f0-9]{64}$/.test(avatarUrl))) throw new AppError('Используйте загруженный аватар');
   if ('archived' in v && typeof v.archived !== 'boolean') throw new AppError('archived должен быть boolean');
-  return { name, provider: v.provider, model, effort: effort as Effort, communicationStyle: communicationStyle.trim(), avatarUrl,
+  return { name, description, provider: v.provider, model, effort: effort as Effort, communicationStyle: communicationStyle.trim(), avatarUrl,
     ...(typeof v.archived === 'boolean' ? { archived: v.archived } : {}) };
 }

@@ -29,6 +29,8 @@ export interface ModelCatalogEntry extends ModelCatalogInput {
 }
 export interface WorkerInput {
   name: string;
+  /** Display-only profile text; never passed to the agent as instructions. */
+  description?: string | null;
   provider: Provider;
   /** null/omitted keeps the native CLI default; explicit IDs are frozen per run. */
   model?: string | null;
@@ -38,13 +40,14 @@ export interface WorkerInput {
 }
 export interface Worker extends WorkerInput {
   model: string | null;
+  description: string;
   id: string;
   archived: boolean;
   createdAt: number;
   updatedAt: number;
 }
 /** Immutable identity and execution settings captured when a run starts. */
-export interface WorkerSnapshot extends WorkerInput { id: string; model: string | null; }
+export interface WorkerSnapshot extends WorkerInput { id: string; model: string | null; description: string; }
 
 export interface InstructionInput {
   title: string;

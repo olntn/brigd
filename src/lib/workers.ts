@@ -3,6 +3,16 @@ import type { Effort, ModelCatalogEntry, Provider } from './types';
 export const MODEL_ID_LIMIT = 128;
 export const MODEL_LABEL_LIMIT = 80;
 export const MODEL_CATALOG_PROVIDER_LIMIT = 100;
+export const WORKER_DESCRIPTION_LIMIT = 1_000;
+
+/** Optional display metadata, kept separate from executable personal instructions. */
+export function normalizeWorkerDescription(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string' || value.length > WORKER_DESCRIPTION_LIMIT || value.includes('\0')) {
+    throw new Error(`Описание: не больше ${WORKER_DESCRIPTION_LIMIT} символов, без нулевого символа`);
+  }
+  return value.trim();
+}
 
 /** Documented IDs, not an account-specific availability list. Custom IDs stay supported.
  * Verified with Codex 0.162.0 / Claude Code 2.1.295 and their model documentation:

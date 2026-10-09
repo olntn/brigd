@@ -14,6 +14,7 @@
   let editing = $state(false);
   let editingId = $state<string | null>(null);
   let name = $state('');
+  let description = $state('');
   let provider = $state<Provider>('codex');
   // Keep the actual ID independent of the available options. Renaming, moving or
   // deleting a catalog entry must never change an open draft or saved profile.
@@ -64,6 +65,7 @@
     imageBusy = false;
     editingId = worker?.id ?? null;
     name = worker?.name ?? '';
+    description = worker?.description ?? '';
     provider = worker?.provider ?? 'codex';
     draftModel = worker?.model ?? '';
     customSelection = !!draftModel && (modelsError !== '' || !models.some(option => option.provider === provider && option.modelId === draftModel));
@@ -174,7 +176,7 @@
         avatarUrl = uploaded.avatarUrl;
         avatarBlob = null; // A failed profile save can reuse this upload on retry.
       }
-      const payload: WorkerInput = { name: name.trim(), provider, model, effort, communicationStyle: communicationStyle.trim(), avatarUrl };
+      const payload: WorkerInput = { name: name.trim(), description: description.trim(), provider, model, effort, communicationStyle: communicationStyle.trim(), avatarUrl };
       const saved = await request<Worker>(editingId ? `/api/workers/${encodeURIComponent(editingId)}` : '/api/workers', {
         method: editingId ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
       });
@@ -209,13 +211,12 @@
 
 {#snippet workerCard(worker: Worker)}
   <article class="worker-card" class:archived-worker={worker.archived} aria-label={'Работник: ' + worker.name}>
-    <div class="worker-card-heading"><WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={48} /><div><h2>{worker.name}</h2><p>{providerName(worker.provider)} <span>·</span> <span class="worker-model-label" title={worker.model ?? undefined}>{modelLabel(worker.model, models, worker.provider)}</span></p><p>Усилия: {effortLabel(worker.effort)}</p></div>{#if worker.archived}<span class="worker-archived-label">В архиве</span>{/if}</div>
-    <p class="worker-style-preview">{worker.communicationStyle || 'Стиль общения по умолчанию'}</p>
+    <div class="worker-card-heading"><WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={48} /><div><h2>{worker.name}</h2><p class="worker-description" class:empty-description={!worker.description?.trim()}>{worker.description?.trim() || 'Описание не задано'}</p><p>{providerName(worker.provider)} <span>·</span> <span class="worker-model-label" title={worker.model ?? undefined}>{modelLabel(worker.model, models, worker.provider)}</span></p><p>Усилия: {effortLabel(worker.effort)}</p></div>{#if worker.archived}<span class="worker-archived-label">В архиве</span>{/if}</div>
     <div class="worker-card-actions"><button class="button secondary" disabled={pending.includes(worker.id)} onclick={() => openEditor(worker)} aria-label={'Изменить работника: ' + worker.name}><Icon name="edit" size={14} />Изменить</button><button class="button text-button" disabled={pending.includes(worker.id)} onclick={() => setArchived(worker)} aria-label={(worker.archived ? 'Восстановить работника: ' : 'В архив: ') + worker.name}><Icon name={pending.includes(worker.id) ? 'refresh' : worker.archived ? 'refresh' : 'inbox'} size={14} class={pending.includes(worker.id) ? 'spin' : ''} />{worker.archived ? 'Восстановить' : 'В архив'}</button></div>
   </article>
 {/snippet}
 
-<section class="page-heading"><div><div class="eyebrow">ВАША КОМАНДА АГЕНТОВ</div><h1>Работники<span>{activeWorkers.length}</span></h1><p>Имя, модель и стиль общения для ваших задач.</p></div><button class="button primary create-button" onclick={() => openEditor()}><Icon name="plus" size={17} />Новый работник</button></section>
+<section class="page-heading"><div><div class="eyebrow">ВАША КОМАНДА АГЕНТОВ</div><h1>Работники<span>{activeWorkers.length}</span></h1><p>Профили работников для ваших задач.</p></div><button class="button primary create-button" onclick={() => openEditor()}><Icon name="plus" size={17} />Новый работник</button></section>
 {#if error}<div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{error}</span><button onclick={retry}>Повторить</button></div>{/if}
 <div class="workers-note"><Icon name="spark" size={17} /><p>Выберите работника при создании задачи. Изменения профиля применятся к новым запускам, а история сохранит прежние имя, аватар и настройки.</p></div>
 {#if loading}<div class="detail-loading" role="status"><Icon name="refresh" class="spin" />Загружаем работников…</div>
@@ -232,6 +233,7 @@
       {#if imageBusy}<p class="worker-image-status" role="status">Подготавливаем изображение…</p>{/if}
       {#if imageError}<div class="form-error" role="alert">{imageError}</div>{/if}
       <label class="form-field"><span>Имя работника <span class="required">*</span></span><input name="workerName" aria-label="Имя работника" bind:value={name} maxlength="80" placeholder="Например, Мира" required disabled={submitting} /></label>
+      <label class="form-field"><span>Описание</span><textarea name="workerDescription" aria-label="Описание" bind:value={description} rows="3" maxlength="1000" disabled={submitting}></textarea><small>Показывается рядом с именем работника в задачах.</small></label>
       <div class="worker-model-fields">
         <label class="form-field"><span>Провайдер</span><select name="workerProvider" aria-label="Провайдер" bind:value={provider} onchange={changeProvider} disabled={submitting}><option value="codex">Codex</option><option value="claude">Claude Code</option></select><small>При смене провайдера модель сбросится на значение CLI по умолчанию.</small></label>
         <label class="form-field"><span>Модель</span><select name="workerModel" aria-label="Модель" value={modelSelection} onchange={changeModel} disabled={submitting}><option value="">По умолчанию CLI</option>{#each providerModels as option (option.id)}<option value={option.modelId}>{option.label} · {option.modelId}</option>{/each}<option value="__custom__">Другая модель…</option></select><small>Список можно изменить в настройках. Доступность зависит от вашего CLI и аккаунта; ID можно указать вручную.</small></label>
@@ -241,7 +243,7 @@
       {:else if !providerModels.length}<p class="worker-image-status">В списке этого провайдера пока нет моделей. Добавьте их в настройках или укажите ID вручную.</p>{/if}
       {#if modelSelection === '__custom__'}<label class="form-field"><span>ID модели <span class="required">*</span></span><input name="workerCustomModel" aria-label="ID модели" bind:value={draftModel} maxlength={MODEL_ID_LIMIT} placeholder={providerModels[0]?.modelId ?? 'model-id'} autocomplete="off" autocapitalize="off" spellcheck="false" required disabled={submitting} /><small>Укажите ID или алиас, который принимает ваш CLI, до {MODEL_ID_LIMIT} символов. Без пробелов внутри и символов управления.</small></label>{/if}
       <label class="form-field"><span>Уровень усилий</span><select name="workerEffort" aria-label="Уровень усилий" bind:value={effort} disabled={submitting}>{#each effortOptions[provider] as option}<option value={option}>{effortLabel(option)}</option>{/each}</select><small>Поддержка уровня зависит от выбранной модели, аккаунта и версии CLI. «По умолчанию CLI» сохраняет настройки CLI.</small></label>
-      <label class="form-field"><span>Стиль общения</span><textarea name="communicationStyle" aria-label="Стиль общения" bind:value={communicationStyle} rows="5" maxlength="4000" placeholder="Например: отвечай по-русски, кратко. Сначала вывод, затем важные детали. Если есть риск, скажи о нём прямо." disabled={submitting}></textarea><small>Добавим к инструкции работника при запуске. Саму задачу опишите отдельно.</small></label>
+      <label class="form-field"><span>Личные инструкции</span><textarea name="communicationStyle" aria-label="Личные инструкции" bind:value={communicationStyle} rows="5" maxlength="4000" disabled={submitting}></textarea><small>Передаются работнику при запуске. Показываются только в его профиле.</small></label>
       {#if editingId}<div class="form-note">Уже начатые запуски и их продолжения сохранят прежний профиль. Обновления будут действовать со следующего запуска.</div>{/if}
     </div>
     <footer class="editor-footer"><button type="button" class="button secondary" disabled={submitting} onclick={closeEditor}>Отмена</button><button type="submit" class="button primary" disabled={submitting || imageBusy || !!imageError}>{#if submitting}<Icon name="refresh" class="spin" size={16} />{:else}<Icon name={editingId ? 'check' : 'plus'} size={16} />{/if}{submitting ? 'Сохраняем…' : editingId ? 'Сохранить профиль' : 'Создать работника'}</button></footer>

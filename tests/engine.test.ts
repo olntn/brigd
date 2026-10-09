@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentCallbacks, AgentInput, AgentOutcome } from '../server/adapter';
+import { buildPrompt, type AgentCallbacks, type AgentInput, type AgentOutcome } from '../server/adapter';
 import { Engine, type AgentFactory } from '../server/engine';
 import { ProtocolError } from '../server/protocol';
 import { AppError, Store } from '../server/store';
@@ -104,23 +104,30 @@ describe('agent lifecycle orchestration', () => {
   });
 
   test.each(['codex', 'claude'] as const)('%s launches and resumes frozen worker model/effort/style after profile edits and archiving', async provider => {
-    const worker = store.createWorker({ name: 'Reviewer', avatarUrl: null, provider, model: 'original-model', effort: 'high', communicationStyle: 'Be concise; "quotes" stay literal.' });
+    const worker = store.createWorker({ name: 'Reviewer', description: 'DISPLAY_ONLY_ROLE: database migrations.', avatarUrl: null, provider, model: 'original-model', effort: 'high', communicationStyle: 'Be concise; "quotes" stay literal.' });
     const task = store.createTask(input(folder, { provider, workerId: worker.id }));
     const run = engine.start(task.id);
-    expect(run.worker).toMatchObject({ id: worker.id, provider, model: 'original-model', effort: 'high', communicationStyle: worker.communicationStyle });
+    expect(run.worker).toMatchObject({ id: worker.id, description: worker.description, provider, model: 'original-model', effort: 'high', communicationStyle: worker.communicationStyle });
     expect(agent.calls[0]!.input).toEqual({ provider, cwd: folder, instruction: task.instruction, instructions: [], sessionId: undefined, answer: undefined, mock: true, model: 'original-model', effort: 'high', communicationStyle: worker.communicationStyle });
     agent.calls[0]!.resolve(outcome('needs_input'));
     await flush();
     const nextProvider = provider === 'codex' ? 'claude' : 'codex';
-    store.updateWorker(worker.id, { name: 'Changed reviewer', avatarUrl: null, provider: nextProvider, model: 'updated-model', effort: 'low', communicationStyle: 'A different style' });
+    store.updateWorker(worker.id, { name: 'Changed reviewer', description: 'DISPLAY_ONLY_UPDATED_ROLE: implementation.', avatarUrl: null, provider: nextProvider, model: 'updated-model', effort: 'low', communicationStyle: 'A different style' });
     store.archiveWorker(worker.id);
     engine.resume(run.id, 'Continue with the original task.', false);
     expect(agent.calls[1]!.input).toEqual({ ...agent.calls[0]!.input, sessionId: 'session-exact', answer: 'Continue with the original task.' });
     expect(store.getRun(run.id).worker).toEqual(run.worker);
     agent.calls[1]!.resolve(outcome());
     await flush();
-    engine.start(task.id);
+    const next = engine.start(task.id);
+    expect(next.worker?.description).toBe('DISPLAY_ONLY_UPDATED_ROLE: implementation.');
     expect(agent.calls[2]!.input).toMatchObject({ provider: nextProvider, model: 'updated-model', effort: 'low', communicationStyle: 'A different style', sessionId: undefined });
+    for (const call of agent.calls) {
+      expect(call.input).not.toHaveProperty('description');
+      const prompt = buildPrompt(call.input);
+      expect(prompt).not.toContain('DISPLAY_ONLY_');
+      expect(prompt).toContain(JSON.stringify(call.input.communicationStyle));
+    }
   });
 
   test('scheduled launch uses the same persisted worker settings as manual launch', () => {

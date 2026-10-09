@@ -3,6 +3,17 @@ import type { ModelCatalogEntry, Worker, Task, TaskDetail } from '../src/lib/typ
 
 const unique = (label: string) => `${label} ${crypto.randomUUID().slice(0, 8)}`;
 const origin = { Origin: 'http://127.0.0.1:4318' };
+const privateInstructions = 'PRIVATE_WORKER_INSTRUCTIONS: Коротко и по-русски. Сначала вывод.';
+const changedPrivateInstructions = 'PRIVATE_WORKER_INSTRUCTIONS_EDITED: Подробно, с примерами.';
+const publicDescription = 'Помогает разобраться в архитектуре проекта.';
+const changedDescription = 'Редактор технических обзоров и итоговых отчётов.';
+
+async function noPrivateInstructions(scope: Locator) {
+  await expect(scope).not.toContainText('PRIVATE_WORKER_INSTRUCTIONS');
+  expect(await scope.evaluate(element => element.outerHTML)).not.toContain('PRIVATE_WORKER_INSTRUCTIONS');
+  await expect(scope.getByText('Стиль общения', { exact: true })).toHaveCount(0);
+  await expect(scope.getByText('Личные инструкции', { exact: true })).toHaveCount(0);
+}
 
 async function openWorkers(page: Page) {
   await page.getByRole('button', { name: 'Работники', exact: true }).click();
@@ -32,7 +43,8 @@ async function noOverflow(page: Page, dialog?: Locator) {
   if (dialog) expect(await dialog.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
 }
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page, request }) => {
+  expect((await (await request.get('/api/info')).json()).mode, 'Worker browser tests must never invoke paid CLI adapters').toBe('mock');
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Новая задача', exact: true })).toBeEnabled();
 });
@@ -61,11 +73,17 @@ test('profile avatar, task assignment and immutable identity through edit and re
   });
   const { editor } = await newWorker(page);
   await editor.locator('[name="workerName"]').fill(name);
+  await editor.locator('[name="workerName"]').press('Tab');
+  await expect(editor.getByLabel('Описание', { exact: true })).toBeFocused();
+  await editor.getByLabel('Описание', { exact: true }).fill(publicDescription);
+  await expect(editor.getByLabel('Описание', { exact: true })).toHaveAttribute('maxlength', '1000');
+  await expect(editor.getByLabel('Личные инструкции', { exact: true })).not.toHaveAttribute('placeholder');
+  await expect(editor.getByLabel('Стиль общения', { exact: true })).toHaveCount(0);
   await editor.getByLabel('Провайдер', { exact: true }).selectOption('codex');
   await expect(editor.getByLabel('Модель', { exact: true })).toHaveValue('');
   await editor.getByLabel('Модель', { exact: true }).selectOption(codexModel);
   await editor.getByLabel('Уровень усилий', { exact: true }).selectOption('xhigh');
-  await editor.getByLabel('Стиль общения', { exact: true }).fill('Коротко и по-русски. Сначала вывод.');
+  await editor.getByLabel('Личные инструкции', { exact: true }).fill(privateInstructions);
   await editor.getByLabel('Загрузить аватар', { exact: true }).setInputFiles(await imageFile(page));
   await expect(editor.locator('.worker-avatar img')).toHaveAttribute('src', /^blob:/);
   expect(avatarRequests).toEqual([]);
@@ -82,6 +100,9 @@ test('profile avatar, task assignment and immutable identity through edit and re
   const worker = (await (await request.get('/api/workers')).json() as Worker[]).find(row => row.name === name)!;
   expect(worker.avatarUrl).toMatch(/^\/api\/avatars\//);
   expect(worker.model).toBe(codexModel);
+  expect(worker).toMatchObject({ description: publicDescription, communicationStyle: privateInstructions });
+  await expect(profile.locator('.worker-description')).toHaveText(publicDescription);
+  await noPrivateInstructions(page.locator('body'));
   await expect(profile.locator('.worker-model-label')).toHaveText(codex.label);
   // Chromium may omit browser Blob bodies from Playwright request events.
   // Assert the real persisted bytes rather than treating a missing event body as empty.
@@ -103,6 +124,8 @@ test('profile avatar, task assignment and immutable identity through edit and re
   await expect(taskEditor.locator('.provider-options')).toHaveCount(0);
   await expect(taskEditor.locator('.worker-assignment')).toContainText(name);
   await expect(taskEditor.locator('.worker-assignment')).toContainText(codex.label);
+  await expect(taskEditor.locator('.worker-assignment .worker-description')).toHaveText(publicDescription);
+  await noPrivateInstructions(taskEditor);
   await taskEditor.getByRole('button', { name: 'Создать задачу', exact: true }).click();
   const drawer = page.getByRole('dialog', { name: title, exact: true });
   await drawer.getByRole('button', { name: 'Запустить', exact: true }).click();
@@ -111,11 +134,17 @@ test('profile avatar, task assignment and immutable identity through edit and re
   const sessionId = task.latestRun!.sessionId;
   await expect(drawer.locator('.comment-question .comment-meta strong')).toHaveText(name);
   await expect(drawer.locator('.comment-question img')).toHaveAttribute('src', worker.avatarUrl!);
+  await expect(drawer.locator('.comment-question .worker-description')).toHaveText(publicDescription);
+  await expect(drawer.locator('.drawer-badges .worker-description')).toHaveText(publicDescription);
+  await noPrivateInstructions(drawer);
   await drawer.getByRole('button', { name: 'Закрыть задачу', exact: true }).click();
 
   await openWorkers(page);
   await page.getByRole('button', { name: `Изменить работника: ${name}`, exact: true }).click();
   const workerEditor = page.getByRole('dialog', { name: 'Редактировать работника', exact: true });
+  await expect(workerEditor.getByLabel('Описание', { exact: true })).toHaveValue(publicDescription);
+  await expect(workerEditor.getByLabel('Личные инструкции', { exact: true })).toHaveValue(privateInstructions);
+  await workerEditor.getByLabel('Описание', { exact: true }).fill(changedDescription);
   await workerEditor.locator('[name="workerName"]').fill(renamed);
   await expect(workerEditor.getByLabel('Модель', { exact: true })).toHaveValue(codexModel);
   await workerEditor.getByLabel('Провайдер', { exact: true }).selectOption('claude');
@@ -130,7 +159,7 @@ test('profile avatar, task assignment and immutable identity through edit and re
   await expect(workerEditor.getByLabel('Модель', { exact: true })).toHaveValue('');
   await workerEditor.getByLabel('Модель', { exact: true }).selectOption(claudeModel);
   await workerEditor.getByLabel('Уровень усилий', { exact: true }).selectOption('max');
-  await workerEditor.getByLabel('Стиль общения', { exact: true }).fill('Подробно, с примерами.');
+  await workerEditor.getByLabel('Личные инструкции', { exact: true }).fill(changedPrivateInstructions);
   await workerEditor.getByRole('button', { name: 'Убрать аватар', exact: true }).click();
   await workerEditor.getByRole('button', { name: 'Сохранить профиль', exact: true }).click();
   await expect(workerEditor).not.toBeVisible();
@@ -139,31 +168,61 @@ test('profile avatar, task assignment and immutable identity through edit and re
   await expect(taskCard.locator('.worker-identity')).toContainText(name);
   await expect(taskCard.locator('.worker-identity')).not.toContainText(renamed);
   await expect(taskCard.locator('.worker-model-label')).toHaveText(`Codex · ${codex.label}`);
+  await expect(taskCard.locator('.worker-description')).toHaveText(publicDescription);
+  await noPrivateInstructions(taskCard);
+  await page.getByRole('button', { name: 'Список', exact: true }).click();
+  const taskRow = page.locator('.task-row').filter({ has: page.getByRole('button', { name: `Открыть: ${title}`, exact: true }) });
+  await expect(taskRow.locator('.worker-description')).toHaveText(publicDescription);
+  await noPrivateInstructions(taskRow);
+  await page.getByRole('button', { name: 'Доска', exact: true }).click();
   await taskCard.click();
   await expect(drawer.locator('.drawer-badges .worker-identity')).toContainText(name);
   await expect(drawer.locator('.task-properties')).toContainText(renamed);
   await expect(drawer.locator('.task-properties')).toContainText(claude.label);
+  await expect(drawer.locator('.drawer-badges .worker-description')).toHaveText(publicDescription);
+  await expect(drawer.locator('.task-properties .worker-description')).toHaveText(changedDescription);
   await drawer.locator('.current-run-instructions summary').click();
   await expect(drawer.locator('.current-run-instructions .worker-run-settings')).toContainText(codexModel);
   await expect(drawer.locator('.current-run-instructions .worker-run-settings')).not.toContainText(claudeModel);
+  await expect(drawer.locator('.current-run-instructions .worker-description')).toHaveText(publicDescription);
+  await noPrivateInstructions(drawer);
   await drawer.getByLabel('Ответ агенту', { exact: true }).fill('Сначала архитектура.');
   await drawer.getByRole('button', { name: 'Продолжить работу', exact: true }).click();
   await expect(drawer.locator('.drawer-badges').getByText('Завершено', { exact: true })).toBeVisible();
   await expect(drawer.locator('.comment-result .comment-meta strong')).toHaveText(name);
   await expect(drawer.locator('.comment-result img')).toHaveAttribute('src', worker.avatarUrl!);
+  await expect(drawer.locator('.comment-result .worker-description')).toHaveText(publicDescription);
+  await noPrivateInstructions(drawer);
   await drawer.locator('.comment-result').screenshot({ path: testInfo.outputPath('brigd-worker-frozen-comment.png') });
   await drawer.getByRole('tab', { name: /Запуски/ }).click();
-  await expect(drawer.locator('.run-entry .worker-identity')).toContainText(name);
-  await expect(drawer.locator('.run-entry .worker-model-label')).toHaveText(`Codex · ${codex.label}`);
+  await expect(drawer.locator('.run-entry .run-meta .worker-identity')).toContainText(name);
+  await expect(drawer.locator('.run-entry .run-meta .worker-model-label')).toHaveText(`Codex · ${codex.label}`);
+  await expect(drawer.locator('.run-entry .run-meta .worker-description')).toHaveText(publicDescription);
+  await drawer.locator('.run-entry .run-instruction-snapshot summary').click();
+  await expect(drawer.locator('.run-entry .worker-run-settings .worker-description')).toHaveText(publicDescription);
+  await noPrivateInstructions(drawer);
   await drawer.locator('.run-entry').screenshot({ path: testInfo.outputPath('brigd-worker-frozen-run.png') });
   let detail = await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail;
   expect(detail.runs[0].sessionId).toBe(sessionId);
-  expect(detail.runs[0].worker).toMatchObject({ name, provider: 'codex', model: codexModel, effort: 'xhigh', avatarUrl: worker.avatarUrl, communicationStyle: 'Коротко и по-русски. Сначала вывод.' });
+  expect(detail.runs[0].worker).toMatchObject({ name, provider: 'codex', model: codexModel, effort: 'xhigh', avatarUrl: worker.avatarUrl, communicationStyle: privateInstructions, description: publicDescription });
   await drawer.getByRole('button', { name: 'Запустить снова', exact: true }).click();
   await expect(drawer.getByText('Агенту нужен ваш ответ', { exact: true })).toBeVisible();
   detail = await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail;
-  expect(detail.runs[0].worker).toMatchObject({ name: renamed, provider: 'claude', model: claudeModel, effort: 'max', avatarUrl: null, communicationStyle: 'Подробно, с примерами.' });
-  expect(detail.runs[1].worker?.name).toBe(name);
+  expect(detail.runs[0].worker).toMatchObject({ name: renamed, provider: 'claude', model: claudeModel, effort: 'max', avatarUrl: null, communicationStyle: changedPrivateInstructions, description: changedDescription });
+  expect(detail.runs[1].worker).toMatchObject({ name, description: publicDescription, communicationStyle: privateInstructions });
+  await expect(drawer.locator('.drawer-badges .worker-description')).toHaveText(changedDescription);
+  await drawer.getByRole('tab', { name: /Запуски/ }).click();
+  const latestEntry = drawer.locator('.run-entry').nth(0);
+  const historicalEntry = drawer.locator('.run-entry').nth(1);
+  await expect(latestEntry.locator('.run-meta .worker-description')).toHaveText(changedDescription);
+  await expect(historicalEntry.locator('.run-meta .worker-description')).toHaveText(publicDescription);
+  for (const entry of [latestEntry, historicalEntry]) {
+    const snapshot = entry.locator('.run-instruction-snapshot');
+    if (!await snapshot.evaluate(element => (element as HTMLDetailsElement).open)) await snapshot.locator('summary').click();
+  }
+  await expect(latestEntry.locator('.worker-run-settings .worker-description')).toHaveText(changedDescription);
+  await expect(historicalEntry.locator('.worker-run-settings .worker-description')).toHaveText(publicDescription);
+  await noPrivateInstructions(drawer);
   await drawer.getByRole('button', { name: 'Отменить запуск', exact: true }).click();
   await expect(drawer.locator('.drawer-badges').getByText('Отменено', { exact: true })).toBeVisible();
   expect(errors).toEqual([]);
@@ -216,6 +275,8 @@ test('invalid images, cancellation, draft reset, focus and deferred upload', asy
   page.on('request', request => { if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/avatars') uploads++; });
   let { editor, trigger } = await newWorker(page);
   await editor.locator('[name="workerName"]').fill('Черновик, не сохранять');
+  await editor.getByLabel('Описание', { exact: true }).fill('Несохранённое описание');
+  await editor.getByLabel('Личные инструкции', { exact: true }).fill(privateInstructions);
   await editor.getByLabel('Модель', { exact: true }).selectOption('__custom__');
   await editor.getByLabel('ID модели', { exact: true }).fill('custom-draft-model');
   await editor.getByLabel('Загрузить аватар', { exact: true }).setInputFiles({ name: 'unsafe.svg', mimeType: 'image/svg+xml', buffer: Buffer.from('<svg/>') });
@@ -234,6 +295,9 @@ test('invalid images, cancellation, draft reset, focus and deferred upload', asy
   await trigger.click();
   editor = page.getByRole('dialog', { name: 'Новый работник', exact: true });
   await expect(editor.locator('[name="workerName"]')).toHaveValue('');
+  await expect(editor.getByLabel('Описание', { exact: true })).toHaveValue('');
+  await expect(editor.getByLabel('Личные инструкции', { exact: true })).toHaveValue('');
+  await expect(editor.getByLabel('Личные инструкции', { exact: true })).not.toHaveAttribute('placeholder');
   await expect(editor.getByLabel('Модель', { exact: true })).toHaveValue('');
   await expect(editor.getByLabel('ID модели', { exact: true })).toHaveCount(0);
   await expect(editor.locator('.worker-avatar img')).toHaveCount(0);
@@ -359,7 +423,10 @@ for (const theme of ['light', 'dark'] as const) {
       await editor.getByLabel('Модель', { exact: true }).selectOption('__custom__');
       await editor.getByLabel('ID модели', { exact: true }).fill('m'.repeat(128));
       await expect(editor.getByLabel('ID модели', { exact: true })).toHaveAttribute('maxlength', '128');
-      await editor.getByLabel('Стиль общения', { exact: true }).fill('ДлиннаяИнструкцияБезПробелов'.repeat(100));
+      const longDescription = 'ДлинноеОписаниеБезПробелов'.repeat(40).slice(0, 1000);
+      await editor.getByLabel('Описание', { exact: true }).fill(longDescription);
+      await editor.getByLabel('Личные инструкции', { exact: true }).fill(`${privateInstructions} ${'ДлиннаяИнструкцияБезПробелов'.repeat(100)}`);
+      await expect(editor.getByLabel('Личные инструкции', { exact: true })).not.toHaveAttribute('placeholder');
       await noOverflow(page, editor);
       await editor.evaluate(node => { node.scrollTop = 0; });
       await editor.screenshot({ path: testInfo.outputPath(`brigd-worker-editor-${theme}-${size.width}-${size.font}-top.png`) });
@@ -372,6 +439,8 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(editor).not.toBeVisible();
       const card = page.getByRole('article', { name: `Работник: ${name}`, exact: true });
       await expect(card.locator('.worker-model-label')).toHaveText('m'.repeat(128));
+      await expect(card.locator('.worker-description')).toHaveText(longDescription);
+      await noPrivateInstructions(card);
       await noOverflow(page);
       await card.screenshot({ path: testInfo.outputPath(`brigd-worker-card-${theme}-${size.width}-${size.font}.png`) });
     });
