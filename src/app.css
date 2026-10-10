@@ -34,6 +34,8 @@
   --shadow: 0 2px 3px #27204705, 0 7px 18px #27204708;
   --overlay: #28203355;
   --sidebar-width: clamp(230px, 18rem, 320px);
+  --scrollbar-thumb: color-mix(in srgb, var(--muted) 45%, var(--line));
+  --scrollbar-thumb-hover: var(--accent);
   color: var(--text);
   background: var(--page);
 }
@@ -366,7 +368,21 @@
   --accent-text: #f0f0f5;
   --focus: #fff;
 }
-* { box-sizing: border-box; }
+/* Keep scrollbars consistent in task panels, dialogs and nested textareas. */
+* {
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+@supports selector(::-webkit-scrollbar) {
+  /* Native scrollbar properties override the rounded thumb in Chromium. */
+  * { scrollbar-width: auto; scrollbar-color: auto; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 999px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+  ::-webkit-scrollbar-corner { background: transparent; }
+}
 body { margin: 0; min-width: 0; line-height: 1.5; }
 button, input, textarea, select { font: inherit; }
 button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
