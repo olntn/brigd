@@ -411,12 +411,9 @@ input[type='checkbox'], input[type='radio'] { flex-shrink: 0; }
 .main-nav, .agent-nav { display: grid; gap: 5px; }
 .main-nav { margin-top: 34px; }
 .main-nav button, .archive-button, .settings-button { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; font-size: .92rem; line-height: 1.5; padding: 12px; border-radius: 7px; color: var(--secondary); font-weight: 500; }
-.main-nav button > span:not(.nav-count), .archive-button > span:not(.nav-count), .settings-button span { min-width: 0; overflow-wrap: anywhere; }
+.main-nav button > span, .archive-button > span, .settings-button span { min-width: 0; overflow-wrap: anywhere; }
 .main-nav button:hover, .archive-button:hover, .settings-button:hover, .agent-nav button:hover { background: var(--soft); }
 .main-nav button.active, .archive-button.active { color: var(--accent-text); background: var(--selected); }
-.nav-count { margin-left: auto; font-size: .77rem; flex-shrink: 0; min-width: 18px; text-align: center; padding: 2px 4px; border-radius: 4px; background: var(--soft); color: var(--muted); }
-.main-nav .active .nav-count, .archive-button.active .nav-count { background: var(--surface); color: var(--accent-text); }
-.main-nav .attention-count { background: var(--warning-bg); color: var(--warning); }
 .agents-label { margin-top: 30px; }
 .agents-label span { font-size: .69rem; border: 1px solid var(--line); border-radius: 4px; min-width: 16px; text-align: center; padding: 1px 3px; }
 .agent-nav button { display: flex; align-items: center; gap: 10px; text-align: left; padding: 10px 12px; border-radius: 8px; border: 1px solid transparent; width: 100%; }

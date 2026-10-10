@@ -797,13 +797,13 @@
   <aside class="sidebar" aria-label="Основная навигация">
     <a class="brand" href="/" aria-label="brigd — главная"><span class="brand-symbol"><BrigLogo size={28} /></span><span>brigd<span class="brand-dot">.</span></span></a>
     <nav class="main-nav" aria-label="Задачи">
-      <button class:active={page === 'tasks'} aria-label="Задачи" onclick={() => { page = 'tasks'; resetFilters(); }}><Icon name="board" /><span>Задачи</span><span class="nav-count">{activeTasks.length}</span></button>
-      <button class:active={page === 'workers'} aria-label="Работники" onclick={() => { page = 'workers'; void loadWorkers(); }}><Icon name="spark" /><span>Работники</span><span class="nav-count">{workers.filter(worker => !worker.archived).length}</span></button>
+      <button class:active={page === 'tasks'} aria-label="Задачи" onclick={() => { page = 'tasks'; resetFilters(); }}><Icon name="board" /><span>Задачи</span></button>
+      <button class:active={page === 'workers'} aria-label="Работники" onclick={() => { page = 'workers'; void loadWorkers(); }}><Icon name="spark" /><span>Работники</span></button>
       <button class:active={page === 'instructions'} aria-label="Инструкции" onclick={() => { page = 'instructions'; }}><Icon name="list" /><span>Инструкции</span></button>
-      <button class:active={page === 'tags'} aria-label="Теги" onclick={() => { page = 'tags'; void loadTags(); }}><Icon name="tag" /><span>Теги</span><span class="nav-count">{tags.length}</span></button>
+      <button class:active={page === 'tags'} aria-label="Теги" onclick={() => { page = 'tags'; void loadTags(); }}><Icon name="tag" /><span>Теги</span></button>
     </nav>
     <div class="sidebar-bottom">
-      <button class="archive-button" class:active={page === 'archive'} aria-label="Архив" onclick={() => { page = 'archive'; }}><Icon name="archive" /><span>Архив</span><span class="nav-count">{archivedTasks.length}</span></button>
+      <button class="archive-button" class:active={page === 'archive'} aria-label="Архив" onclick={() => { page = 'archive'; }}><Icon name="archive" /><span>Архив</span></button>
       <button class="settings-button" onclick={openSettings} aria-haspopup="dialog"><Icon name="sliders" /><span>Настройки</span></button>
     </div>
   </aside>
