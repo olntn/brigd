@@ -971,8 +971,9 @@
       {#if detail && selectedTask.archivedAt !== null}<p class="archived-comment-note" hidden={detailTab !== 'conversation'}><Icon name="archive" size={15} />Задача в архиве. Восстановите её, чтобы оставить заметку или отправить агенту дополнительный запрос.</p>
       {:else if detail}<form class="comment-form" hidden={detailTab !== 'conversation'} onpaste={(event) => commentComposer?.handlePaste(event)} onsubmit={sendComment}>
         <label for="task-comment">Заметка к задаче</label>
-        <div class="comment-input"><textarea id="task-comment" bind:value={comment} maxlength="8000" placeholder="Добавьте заметку или новое задание агенту…" rows="3" disabled={taskBusy} aria-describedby="comment-actions-help"></textarea></div>
-        {#key drawerContext}<AttachmentComposer bind:this={commentComposer} label="Файлы заметки" disabled={taskBusy} bind:count={commentAttachmentCount} bind:uploading={commentUploading} bind:invalid={commentAttachmentInvalid} bind:attachmentIds={commentAttachmentIds} />{/key}
+        {#key drawerContext}<AttachmentComposer compact bind:this={commentComposer} label="Файлы заметки" disabled={taskBusy} bind:count={commentAttachmentCount} bind:uploading={commentUploading} bind:invalid={commentAttachmentInvalid} bind:attachmentIds={commentAttachmentIds}>
+          <textarea id="task-comment" bind:value={comment} maxlength="8000" placeholder="Добавьте заметку или новое задание агенту…" rows="3" disabled={taskBusy} aria-describedby="comment-actions-help"></textarea>
+        </AttachmentComposer>{/key}
         {#if recipientOptions.length}
           <section class="followup-recipient" aria-label="Получатель дополнительного запроса">
             <label for="followup-recipient">Отправить в завершённую сессию</label>

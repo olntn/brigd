@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, untrack, type Snippet } from 'svelte';
   import Icon from './Icon.svelte';
   import type { Attachment } from './types';
   import { ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_COUNT } from './attachments';
 
   type DraftFile = { key: string; file?: File; attachment?: Attachment; error: string; uploading: boolean; preview?: string; previewFailed?: boolean };
-  let { initial = [], label = 'Файлы', disabled = false, count = $bindable(0), uploading = $bindable(false), invalid = $bindable(false), attachmentIds = $bindable<string[]>([]) }: {
-    initial?: Attachment[]; label?: string; disabled?: boolean; count?: number; uploading?: boolean; invalid?: boolean; attachmentIds?: string[];
+  let { initial = [], label = 'Файлы', compact = false, children, disabled = false, count = $bindable(0), uploading = $bindable(false), invalid = $bindable(false), attachmentIds = $bindable<string[]>([]) }: {
+    initial?: Attachment[]; label?: string; compact?: boolean; children?: Snippet; disabled?: boolean; count?: number; uploading?: boolean; invalid?: boolean; attachmentIds?: string[];
   } = $props();
   // Each mounted composer owns its staging, even if an earlier request finishes after navigation.
   let rows = $state<DraftFile[]>(untrack(() => initial.map(attachment => ({ key: attachment.id, attachment, error: '', uploading: false }))));
@@ -114,10 +114,18 @@
   }
 </script>
 
-<section class="attachment-composer" class:dragging aria-label={label} ondragover={dragOver} ondragleave={() => dragging = false} ondrop={handleDrop} onpaste={handlePaste}>
-  <div class="attachment-composer-heading"><span>{label}{#if rows.length}<small>{rows.length}/{ATTACHMENT_MAX_COUNT}</small>{/if}</span><button class="attachment-add" type="button" disabled={disabled || rows.length >= ATTACHMENT_MAX_COUNT} onclick={() => fileInput.click()}><Icon name="plus" size={15} />Прикрепить файлы</button></div>
-  <input bind:this={fileInput} class="sr-only" type="file" multiple tabindex="-1" aria-label={label} aria-describedby={helpId} disabled={disabled} onchange={(event) => { addFiles([...event.currentTarget.files ?? []]); event.currentTarget.value = ''; }} />
-  <p id={helpId} class="attachment-help">Перетащите файлы сюда или вставьте изображение из буфера. До {ATTACHMENT_MAX_COUNT} файлов, до {sizeLabel(ATTACHMENT_MAX_BYTES)} каждый.</p>
+<section class="attachment-composer" class:compact class:dragging aria-label={label} ondragover={dragOver} ondragleave={() => dragging = false} ondrop={handleDrop} onpaste={handlePaste}>
+  {#if compact}
+    <div class="comment-input">
+      <button class="icon-button attachment-paperclip" type="button" aria-label="Прикрепить файлы" aria-describedby={helpId} title="Прикрепить файлы" disabled={disabled || rows.length >= ATTACHMENT_MAX_COUNT} onclick={() => fileInput.click()}><Icon name="paperclip" size={20} /></button>
+      {@render children?.()}
+    </div>
+  {:else}
+    <div class="attachment-composer-heading"><span>{label}{#if rows.length}<small>{rows.length}/{ATTACHMENT_MAX_COUNT}</small>{/if}</span><button class="attachment-add" type="button" disabled={disabled || rows.length >= ATTACHMENT_MAX_COUNT} onclick={() => fileInput.click()}><Icon name="plus" size={15} />Прикрепить файлы</button></div>
+  {/if}
+  <!-- Picker cancellation bubbles; keep it from closing the enclosing dialog. -->
+  <input bind:this={fileInput} class="sr-only" type="file" multiple tabindex="-1" aria-label={label} aria-describedby={helpId} disabled={disabled} oncancel={(event) => event.stopPropagation()} onchange={(event) => { addFiles([...event.currentTarget.files ?? []]); event.currentTarget.value = ''; }} />
+  <p id={helpId} class="attachment-help" class:sr-only={compact}>Перетащите файлы сюда или вставьте изображение из буфера. До {ATTACHMENT_MAX_COUNT} файлов, до {sizeLabel(ATTACHMENT_MAX_BYTES)} каждый.</p>
   {#if error}<p class="attachment-error" role="alert">{error}</p>{/if}
   {#if rows.length}<ul class="attachment-drafts">{#each rows as row (row.key)}
     <li class="attachment-draft" class:has-error={!!row.error}>

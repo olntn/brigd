@@ -230,12 +230,59 @@ test('an image opens by keyboard, Escape restores the task, and download returns
   await expect(drawer).toBeVisible();
 });
 
+for (const width of [1440, 375]) {
+test(`cancelling the note file picker preserves the card and draft at ${width}px`, async ({ page, request }, testInfo) => {
+  await page.setViewportSize({ width, height: 1000 });
+  const task = await createTask(request);
+  const drawer = await openTask(page, task);
+  const region = composer(drawer, 'Файлы заметки');
+  const field = drawer.getByLabel('Заметка к задаче', { exact: true });
+  const draft = 'Черновик остаётся после отмены выбора файла.';
+  await field.fill(draft);
+  const [staged] = await selectFiles(page, region, [textFile('keep this draft.txt')]);
+  const picker = page.waitForEvent('filechooser');
+  const button = region.getByRole('button', { name: 'Прикрепить файлы', exact: true });
+  await button.click();
+  // Headless browsers intercept the native picker; reproduce its bubbling cancel event.
+  await (await picker).element().dispatchEvent('cancel', { bubbles: true });
+  await expect(drawer).toBeVisible();
+  await expect(field).toHaveValue(draft);
+  await expect(attachmentName(region, staged.name)).toBeVisible();
+  const buttonBounds = await button.boundingBox();
+  const fieldBounds = await field.boundingBox();
+  expect(buttonBounds!.x + buttonBounds!.width).toBeLessThanOrEqual(fieldBounds!.x);
+  await drawer.locator('.comment-form').screenshot({ path: testInfo.outputPath('note-paperclip.png') });
+  await page.keyboard.press('Escape');
+  await expect(drawer).not.toBeVisible();
+});
+}
+
+test('cancelling the task file picker preserves the task editor', async ({ page }) => {
+  const { editor, title } = await openEditor(page);
+  const region = composer(editor, 'Файлы задачи');
+  const picker = page.waitForEvent('filechooser');
+  await region.getByRole('button', { name: 'Прикрепить файлы', exact: true }).click();
+  await (await picker).element().dispatchEvent('cancel', { bubbles: true });
+  await expect(editor).toBeVisible();
+  await expect(editor.locator('[name="title"]')).toHaveValue(title);
+  await page.keyboard.press('Escape');
+  await expect(editor).not.toBeVisible();
+});
+
 test('attachment-only note survives a failed save, binds once, and is visible after reload', async ({ page, request }) => {
   const task = await createTask(request);
   const drawer = await openTask(page, task);
   const region = composer(drawer, 'Файлы заметки');
   const file = textFile('attachment only.txt');
-  const [staged] = await selectFiles(page, region, [file]);
+  const uploaded = page.waitForResponse(response => response.request().method() === 'POST' && pathOf(response.url()) === '/api/uploads');
+  const picker = page.waitForEvent('filechooser');
+  await region.getByRole('button', { name: 'Прикрепить файлы', exact: true }).click();
+  await (await picker).setFiles([file]);
+  const uploadResponse = await uploaded;
+  expect(uploadResponse.ok()).toBe(true);
+  const staged = await uploadResponse.json() as Attachment;
+  expectAttachmentIntegrity(staged, file);
+  await expect(attachmentName(region, staged.name)).toBeVisible();
   await drawer.getByLabel('Заметка к задаче', { exact: true }).fill('Черновик для переключения вкладок.');
   await drawer.getByRole('tab', { name: /Запуски/ }).click();
   await drawer.getByRole('tab', { name: /Комментарии/ }).click();

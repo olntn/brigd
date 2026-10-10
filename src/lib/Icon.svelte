@@ -2,6 +2,7 @@
   let { name, size = 18, stroke = 1.7, class: className = '' }: { name: string; size?: number; stroke?: number; class?: string } = $props();
   const paths: Record<string, string> = {
     plus: 'M12 5v14M5 12h14',
+    paperclip: 'm21.4 11.6-9.2 9.2a6 6 0 0 1-8.5-8.5l9.9-9.9a4 4 0 0 1 5.7 5.7l-9.9 9.9a2 2 0 0 1-2.8-2.8l9.2-9.2',
     close: 'm6 6 12 12M18 6 6 18',
     search: 'm21 21-4.3-4.3M19 10.5a8.5 8.5 0 1 1-17 0 8.5 8.5 0 0 1 17 0Z',
     board: 'M4 4h6v16H4zM14 4h6v10h-6z',
