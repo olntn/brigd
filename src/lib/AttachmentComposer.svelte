@@ -5,8 +5,8 @@
   import { ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_COUNT } from './attachments';
 
   type DraftFile = { key: string; file?: File; attachment?: Attachment; error: string; uploading: boolean; preview?: string; previewFailed?: boolean };
-  let { initial = [], label = 'Файлы', compact = false, children, disabled = false, count = $bindable(0), uploading = $bindable(false), invalid = $bindable(false), attachmentIds = $bindable<string[]>([]) }: {
-    initial?: Attachment[]; label?: string; compact?: boolean; children?: Snippet; disabled?: boolean; count?: number; uploading?: boolean; invalid?: boolean; attachmentIds?: string[];
+  let { initial = [], label = 'Файлы', compact = false, children, footer, disabled = false, count = $bindable(0), uploading = $bindable(false), invalid = $bindable(false), attachmentIds = $bindable<string[]>([]) }: {
+    initial?: Attachment[]; label?: string; compact?: boolean; children?: Snippet; footer?: Snippet<[Snippet]>; disabled?: boolean; count?: number; uploading?: boolean; invalid?: boolean; attachmentIds?: string[];
   } = $props();
   // Each mounted composer owns its staging, even if an earlier request finishes after navigation.
   let rows = $state<DraftFile[]>(untrack(() => initial.map(attachment => ({ key: attachment.id, attachment, error: '', uploading: false }))));
@@ -114,10 +114,13 @@
   }
 </script>
 
+{#snippet attachFiles()}
+  <button class="icon-button attachment-paperclip" type="button" aria-label="Прикрепить файлы" aria-describedby={helpId} title="Прикрепить файлы" disabled={disabled || rows.length >= ATTACHMENT_MAX_COUNT} onclick={() => fileInput.click()}><Icon name="paperclip" size={20} /></button>
+{/snippet}
+
 <section class="attachment-composer" class:compact class:dragging aria-label={label} ondragover={dragOver} ondragleave={() => dragging = false} ondrop={handleDrop} onpaste={handlePaste}>
   {#if compact}
     <div class="comment-input">
-      <button class="icon-button attachment-paperclip" type="button" aria-label="Прикрепить файлы" aria-describedby={helpId} title="Прикрепить файлы" disabled={disabled || rows.length >= ATTACHMENT_MAX_COUNT} onclick={() => fileInput.click()}><Icon name="paperclip" size={20} /></button>
       {@render children?.()}
     </div>
   {:else}
@@ -134,5 +137,8 @@
       <div class="attachment-draft-actions">{#if row.error && row.file && row.file.size <= ATTACHMENT_MAX_BYTES}<button class="attachment-retry" type="button" onclick={() => retry(row)} disabled={disabled} aria-label={`Повторить загрузку: ${row.file.name}`}>Повторить</button>{/if}<button class="icon-button" type="button" onclick={() => remove(row)} disabled={disabled} aria-label={`Убрать файл: ${row.attachment?.name ?? row.file?.name}`}><Icon name="close" size={16} /></button></div>
     </li>
   {/each}</ul>{/if}
+  {#if compact}
+    {#if footer}{@render footer(attachFiles)}{:else}<div class="comment-actions">{@render attachFiles()}</div>{/if}
+  {/if}
   <span class="sr-only" role="status" aria-live="polite">{uploading ? 'Файлы загружаются' : rows.length ? `Файлов: ${rows.length}` : ''}</span>
 </section>

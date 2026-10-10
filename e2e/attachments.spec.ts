@@ -250,7 +250,9 @@ test(`cancelling the note file picker preserves the card and draft at ${width}px
   await expect(attachmentName(region, staged.name)).toBeVisible();
   const buttonBounds = await button.boundingBox();
   const fieldBounds = await field.boundingBox();
-  expect(buttonBounds!.x + buttonBounds!.width).toBeLessThanOrEqual(fieldBounds!.x);
+  const inputBounds = await region.locator('.comment-input').boundingBox();
+  expect(buttonBounds!.y).toBeGreaterThanOrEqual(fieldBounds!.y + fieldBounds!.height);
+  expect(Math.abs(buttonBounds!.x - inputBounds!.x)).toBeLessThanOrEqual(1);
   await drawer.locator('.comment-form').screenshot({ path: testInfo.outputPath('note-paperclip.png') });
   await page.keyboard.press('Escape');
   await expect(drawer).not.toBeVisible();

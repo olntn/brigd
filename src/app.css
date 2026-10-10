@@ -515,8 +515,6 @@ input[type='checkbox'], input[type='radio'] { flex-shrink: 0; }
 .task-ref { font-size: .62rem; letter-spacing: .5px; color: var(--muted); }
 .task-card h3 { font-weight: 550; font-size: 1rem; line-height: 1.6; margin: 0 0 7px; color: var(--text); overflow-wrap: anywhere; }
 .card-description { font-size: .85rem; line-height: 1.65; color: var(--muted); margin: 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; min-height: 32px; overflow-wrap: anywhere; }
-.card-folder { display: flex; align-items: center; gap: 5px; margin-top: 17px; color: var(--muted); font-size: .77rem; min-width: 0; }
-.card-folder > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); min-height: 39px; }
 .card-schedule { font-size: .77rem; display: flex; align-items: center; gap: 5px; color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
 .card-schedule.is-paused { color: var(--warning); }
@@ -856,8 +854,8 @@ dialog::backdrop { background: var(--overlay); backdrop-filter: blur(2px); }
 .task-attachments h3 { margin: 0 0 10px; font-size: .85rem; color: var(--secondary); font-weight: 550; overflow-wrap: anywhere; }
 .attachment-composer { min-width: 0; margin-top: 12px; padding: 12px; border: 1px dashed var(--line); border-radius: 8px; background: var(--subtle); }
 .attachment-composer.compact { margin-top: 0; padding: 0; border: 0; background: transparent; }
-.comment-input .attachment-paperclip { flex-shrink: 0; width: 36px; height: 36px; margin: 0 9px 2px 0; background: transparent; color: var(--secondary); }
-.comment-input .attachment-paperclip:hover:not(:disabled) { background: var(--soft); color: var(--accent-text); }
+.comment-actions .attachment-paperclip { flex-shrink: 0; width: 40px; height: 40px; margin-right: auto; background: transparent; color: var(--secondary); }
+.comment-actions .attachment-paperclip:hover:not(:disabled) { background: var(--soft); color: var(--accent-text); }
 .editor-fields > .attachment-composer { margin-top: 0; }
 .attachment-composer.dragging { border-color: var(--accent); background: var(--selected); outline: 2px solid var(--accent); outline-offset: 2px; }
 .attachment-composer-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
@@ -917,18 +915,21 @@ dialog::backdrop { background: var(--overlay); backdrop-filter: blur(2px); }
 .card-followup-label svg { margin-top: 2px; }.card-followup-label span { min-width: 0; overflow-wrap: anywhere; }
 .run-followup-request { margin: 12px 0; padding: 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
 .run-followup-request strong { font-size: .85rem; font-weight: 500; overflow-wrap: anywhere; }
-.followup-recipient { margin-top: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--subtle); min-width: 0; }
-.followup-recipient > label { display: block; margin-bottom: 7px; font-size: .85rem; font-weight: 500; }
-.followup-recipient select { display: block; width: 100%; border: 1px solid var(--line); border-radius: 5px; padding: 9px 10px; background: var(--surface); color: var(--text); font-size: .85rem; text-overflow: ellipsis; }
-.followup-recipient-identity { display: grid; gap: 8px; margin-top: 12px; min-width: 0; }
-.followup-recipient-stage { color: var(--accent-text); font-size: .85rem; line-height: 1.65; overflow-wrap: anywhere; }
-.followup-recipient > p, .followup-blocked { margin: 10px 0 0; color: var(--muted); font-size: .77rem; line-height: 1.7; overflow-wrap: anywhere; }
-.comment-form > .followup-blocked { color: var(--warning); }
 .followup-error { margin-top: 12px; padding: 11px; border: 1px solid var(--error-line); border-radius: 6px; background: var(--error-bg); color: var(--error); font-size: .85rem; line-height: 1.7; overflow-wrap: anywhere; }
 .followup-error p { margin: 0; }.followup-error p + p { margin-top: 6px; }
 .comment-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 9px; margin-top: 14px; }
 .comment-actions .button { min-height: 40px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
-@media (max-width: 700px) { .current-followup { margin-inline: 20px; }.followup-recipient select { font-size: max(16px, .85rem); } }
-@media (max-width: 400px) { .comment-actions .button { flex: 1 1 100%; }.followup-recipient { padding: 11px; }.comment-entry { gap: 9px; }.comment-result .comment-main { padding: 10px; } }
+.followup-send-actions { display: flex; max-width: 100%; }
+.followup-send-actions.has-picker > .button { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.followup-session-picker { position: relative; flex-shrink: 0; }
+.followup-session-picker > summary { height: 100%; padding-inline: 10px; border-top-left-radius: 0; border-bottom-left-radius: 0; border-left-color: var(--line); list-style: none; cursor: pointer; }
+.followup-session-picker > summary::-webkit-details-marker { display: none; }
+.followup-session-picker > summary:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+.followup-session-picker > summary[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
+.followup-session-menu { position: absolute; z-index: 2; right: 0; bottom: calc(100% + 8px); width: min(350px, calc(100vw - 80px)); padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); }
+.followup-session-menu > label { display: block; margin-bottom: 7px; font-size: .85rem; color: var(--secondary); }
+.followup-session-menu select { width: 100%; border: 1px solid var(--line); border-radius: 5px; padding: 9px 10px; background: var(--surface); color: var(--text); font-size: .85rem; text-overflow: ellipsis; }
+@media (max-width: 700px) { .current-followup { margin-inline: 20px; }.followup-session-menu select { font-size: max(16px, .85rem); } }
+@media (max-width: 400px) { .comment-actions > .button, .comment-actions > .followup-send-actions { flex: 1 1 100%; }.followup-send-actions > .button { flex: 1; }.comment-entry { gap: 9px; }.comment-result .comment-main { padding: 10px; } }
 
 .workflow-template-worker { display: flex; align-items: center; gap: 10px; min-width: 0; margin-top: 8px; color: var(--muted); }.workflow-template-worker > span:not(.worker-avatar) { flex: 1; min-width: 0; overflow-wrap: anywhere; }.list-task-name .list-followup-label { color: var(--accent-text); }

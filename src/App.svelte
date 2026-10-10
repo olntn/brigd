@@ -64,6 +64,7 @@
   let comment = $state('');
   let followupTargetKey = $state('');
   let followupRecipientSession = $state('');
+  let followupRecipientOpen = $state(false);
   let followupSending = $state(false);
   let followupError = $state('');
   let followupAttempt = $state<{ taskId: string; signature: string; payload: FollowupInput; target: FollowupTarget } | null>(null);
@@ -174,6 +175,9 @@
     if (next !== inputRunKey) { inputRunKey = next; answer = ''; acknowledgeInterruption = false; }
   });
   let taskBusy = $derived(selectedId ? pending.includes(selectedId) : false);
+  $effect(() => {
+    if (taskBusy || detailTab !== 'conversation') followupRecipientOpen = false;
+  });
   let currentStep = $derived(currentRun?.currentStepIndex != null ? currentRun.steps?.[currentRun.currentStepIndex] ?? null : null);
   let interruptedWithoutSession = $derived(!!currentRun?.steps?.length && currentRun.status === 'interrupted' && !currentRun.sessionId);
   let runCanRetry = $derived(!!currentRun?.steps?.length && (['failed', 'blocked'].includes(currentRun.status) || interruptedWithoutSession));
@@ -392,6 +396,7 @@
     comment = '';
     followupTargetKey = '';
     followupRecipientSession = '';
+    followupRecipientOpen = false;
     followupAttempt = null;
     followupError = '';
     commentAttachmentIds = [];
@@ -699,6 +704,12 @@
   function resetFilters() { search = ''; provider = 'all'; tagFilter = 'all'; setScope('all'); }
   function setScope(value: Scope) { scope = value; showOtherStatuses = true; }
   function globalKey(event: KeyboardEvent) {
+    if (event.key === 'Escape' && followupRecipientOpen) {
+      event.preventDefault();
+      followupRecipientOpen = false;
+      drawer.querySelector<HTMLElement>('.followup-session-picker summary')?.focus();
+      return;
+    }
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && page === 'tasks' && !editorOpen && !selectedId && !settingsOpen) {
       event.preventDefault(); searchInput?.focus();
     }
@@ -726,7 +737,7 @@
   }
 </script>
 
-<svelte:window onkeydown={globalKey} />
+<svelte:window onkeydown={globalKey} onclick={(event) => { if (event.target instanceof Element && !event.target.closest('.followup-session-picker')) followupRecipientOpen = false; }} />
 
 {#snippet providerBadge(value: Provider, compact = false)}
   <span class:compact class="provider-badge {value}"><span class="provider-mark">{#if value === 'codex'}<Icon name="code" size={compact ? 12 : 14} />{:else}<span class="claude-mark" aria-hidden="true">✳</span>{/if}</span>{providerName(value)}</span>
@@ -772,7 +783,6 @@
       {#if task.status === 'interrupted'}<div class="card-signal"><Icon name="alert" size={13} /> Проверьте прерванный запуск</div>{/if}
       {#if task.latestRun?.error && ['failed', 'blocked'].includes(task.status)}<div class="card-error">{task.latestRun.error}</div>{/if}
       {#if task.attachments?.length}<div class="card-attachment-count"><Icon name="folder" size={13} /><span>Файлов: {task.attachments.length}</span></div>{/if}
-      <div class="card-folder" title={task.cwd}><Icon name="folder" size={13} /><span>{shortPath(task.cwd)}</span></div>
     </button>
     <div class="card-footer">
       <span class="card-schedule" class:is-paused={task.paused}><Icon name={task.paused ? 'pause' : task.schedule === 'interval' ? 'clock' : 'play'} size={12} />{task.paused ? 'Расписание на паузе' : task.schedule === 'interval' ? intervalLabel(task.intervalMinutes) : 'Вручную'}</span>
@@ -972,26 +982,32 @@
       {:else if detail}<form class="comment-form" hidden={detailTab !== 'conversation'} onpaste={(event) => commentComposer?.handlePaste(event)} onsubmit={sendComment}>
         <label for="task-comment">Заметка к задаче</label>
         {#key drawerContext}<AttachmentComposer compact bind:this={commentComposer} label="Файлы заметки" disabled={taskBusy} bind:count={commentAttachmentCount} bind:uploading={commentUploading} bind:invalid={commentAttachmentInvalid} bind:attachmentIds={commentAttachmentIds}>
-          <textarea id="task-comment" bind:value={comment} maxlength="8000" placeholder="Добавьте заметку или новое задание агенту…" rows="3" disabled={taskBusy} aria-describedby="comment-actions-help"></textarea>
+          <textarea id="task-comment" bind:value={comment} maxlength="8000" placeholder="Добавьте заметку или новое задание агенту…" rows="3" disabled={taskBusy}></textarea>
+          {#snippet footer(attachFiles)}
+            {#if followupError}<div class="followup-error" role="alert"><p>{followupError}</p>{#if retryingFollowup}<p>Текст и файлы сохранены. Повторная отправка этого же запроса защищена от дублирования.</p>{/if}</div>{/if}
+            <div class="comment-actions">
+              {@render attachFiles()}
+              <button class="button secondary" type="submit" title={`Сохранить текст и файлы в истории задачи без запуска агента.${runCanResume ? ' Для ответа на текущий вопрос используйте «Продолжить работу» выше.' : ''}`} disabled={(!comment.trim() && !commentAttachmentCount) || taskBusy || commentUploading || commentAttachmentInvalid}><Icon name="check" size={16} />Сохранить заметку</button>
+              {#if recipientOptions.length}
+                <div class="followup-send-actions" class:has-picker={recipientOptions.length > 1 || !followupTarget}>
+                  <button class="button primary" type="button" title={followupBlocked || `Отправить текст и файлы в сессию: ${recipientLabel(followupTarget!)}. Агент продолжит работу с прежними настройками. Остальные этапы не запускаются.`} onclick={() => void sendFollowup()} disabled={(!comment.trim() && !commentAttachmentCount) || taskBusy || commentUploading || commentAttachmentInvalid || !!followupBlocked}><Icon name={followupSending ? 'refresh' : 'send'} class={followupSending ? 'spin' : ''} size={16} />{followupSending ? 'Отправляем…' : 'Отправить агенту'}</button>
+                  {#if recipientOptions.length > 1 || !followupTarget}
+                    <details class="followup-session-picker" bind:open={followupRecipientOpen}>
+                      <summary class="button primary" aria-label="Выбрать сессию агента" aria-disabled={taskBusy} title="Выбрать завершённую сессию" onclick={(event) => { if (taskBusy) event.preventDefault(); }}><Icon name="down" size={16} /></summary>
+                      <div class="followup-session-menu">
+                        <label for="followup-recipient">Получатель дополнительного запроса</label>
+                        <select id="followup-recipient" value={followupTarget?.key ?? ''} disabled={taskBusy} onchange={(event) => { followupTargetKey = event.currentTarget.value; followupError = ''; followupRecipientOpen = false; drawer.querySelector<HTMLElement>('.followup-session-picker summary')?.focus(); }}>
+                          {#if !followupTarget}<option value="" disabled>Выберите завершённую сессию</option>{/if}
+                          {#each recipientOptions as target (target.key)}<option value={target.key}>{recipientLabel(target)}</option>{/each}
+                        </select>
+                      </div>
+                    </details>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/snippet}
         </AttachmentComposer>{/key}
-        {#if recipientOptions.length}
-          <section class="followup-recipient" aria-label="Получатель дополнительного запроса">
-            <label for="followup-recipient">Отправить в завершённую сессию</label>
-            <select id="followup-recipient" aria-label="Получатель дополнительного запроса" value={followupTarget?.key ?? ''} disabled={taskBusy} onchange={(event) => { followupTargetKey = event.currentTarget.value; followupError = ''; }}>
-              {#if !followupTarget}<option value="" disabled>Выберите завершённую сессию</option>{/if}
-              {#each recipientOptions as target (target.key)}<option value={target.key}>{recipientLabel(target)}</option>{/each}
-            </select>
-            {#if followupTarget}<div class="followup-recipient-identity">{#if followupTarget.worker}{@render workerBadge(followupTarget.worker)}{:else}{@render providerBadge(followupTarget.provider)}{/if}{#if followupTarget.stageIndex != null}<span class="followup-recipient-stage">Этап {followupTarget.stageIndex + 1}: {followupTarget.stageTitle}</span>{/if}</div>{/if}
-            <p>Агент получит текст и файлы в выбранной сессии с прежними настройками. Остальные этапы не запускаются.</p>
-          </section>
-        {/if}
-        {#if followupError}<div class="followup-error" role="alert"><p>{followupError}</p>{#if retryingFollowup}<p>Текст и файлы сохранены. Повторная отправка этого же запроса защищена от дублирования.</p>{/if}</div>{/if}
-        {#if followupBlocked && (recipientOptions.length || selectedTask.runCount)}<p class="followup-blocked" id="followup-blocked">{followupBlocked}</p>{/if}
-        <div class="comment-actions">
-          <button class="button secondary" type="submit" disabled={(!comment.trim() && !commentAttachmentCount) || taskBusy || commentUploading || commentAttachmentInvalid}><Icon name="check" size={16} />Сохранить заметку</button>
-          {#if recipientOptions.length}<button class="button primary" type="button" onclick={() => void sendFollowup()} disabled={(!comment.trim() && !commentAttachmentCount) || taskBusy || commentUploading || commentAttachmentInvalid || !!followupBlocked} aria-describedby={followupBlocked ? 'followup-blocked' : undefined}><Icon name={followupSending ? 'refresh' : 'send'} class={followupSending ? 'spin' : ''} size={16} />{followupSending ? 'Отправляем…' : 'Отправить агенту'}</button>{/if}
-        </div>
-        <p id="comment-actions-help">«Сохранить заметку» только добавляет запись в историю. {runCanResume ? 'Для ответа на текущий вопрос используйте «Продолжить работу» выше.' : recipientOptions.length ? '«Отправить агенту» запускает дополнительный запрос в выбранной сессии.' : 'После завершения запуска появится отправка дополнительного запроса агенту.'}</p>
       </form>{/if}
       </section>
       </div>

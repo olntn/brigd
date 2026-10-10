@@ -9,6 +9,7 @@ const pathOf = (url: string) => new URL(url).pathname;
 const composer = (drawer: Locator) => drawer.locator('#task-comment');
 const sendRequest = (drawer: Locator) => drawer.getByRole('button', { name: 'Отправить агенту', exact: true });
 const recipient = (drawer: Locator) => drawer.getByRole('combobox', { name: 'Получатель дополнительного запроса', exact: true });
+const recipientToggle = (drawer: Locator) => drawer.getByLabel('Выбрать сессию агента', { exact: true });
 
 async function readDetail(request: APIRequestContext, taskId: string) {
   const response = await request.get(`/api/tasks/${taskId}`);
@@ -119,6 +120,11 @@ test('notes remain inert while an explicit request and its answer retain the ori
   const { task, original, workers } = await completedTask(request);
   const drawer = await openTask(page, task);
   await noFreshStart(drawer);
+  await expect(drawer.locator('.followup-recipient, #comment-actions-help, .followup-blocked')).toHaveCount(0);
+  await expect(recipient(drawer)).toHaveCount(0);
+  await expect(recipientToggle(drawer)).toHaveCount(0);
+  await expect(drawer.getByRole('button', { name: 'Сохранить заметку', exact: true })).toHaveAttribute('title', /истори/);
+  await expect(sendRequest(drawer)).toHaveAttribute('title', /сесси/);
   expect((await request.post(`/api/tasks/${task.id}/run`, { headers: origin, data: {} })).status()).toBe(409);
   const note = 'Просто заметка: не запускать агента.';
   await composer(drawer).fill(note);
@@ -147,7 +153,7 @@ test('notes remain inert while an explicit request and its answer retain the ori
   expect(detail.runs[0]).toMatchObject({ id: run.id, sessionId: original.sessionId, worker: original.worker, trigger: 'followup', turn: run.turn + 1 });
   expect(detail.runs[0].followup).toMatchObject({ sourceRunId: original.id, sourceStepIndex: null, request: body });
   await noPrivateText(drawer);
-  await expect(recipient(drawer).locator('option')).toHaveCount(1);
+  await expect(recipient(drawer)).toHaveCount(0);
   await drawer.getByRole('tab', { name: /Запуски/ }).click();
   await expect(drawer.locator('.run-entry')).toHaveCount(2);
   await expect(drawer.locator('.run-entry').first()).toContainText('Дополнительный запрос');
@@ -275,18 +281,23 @@ test('last and earlier workflow recipients preserve every original completed sta
   const { task, original, workers } = await completedTask(request, true);
   const drawer = await openTask(page, task);
   await expect(drawer.locator('.current-workflow [data-status="completed"]')).toHaveCount(3);
+  await expect(recipient(drawer)).toBeHidden();
+  await recipientToggle(drawer).click();
   await expect(recipient(drawer).locator('option')).toHaveCount(3);
   await expect(recipient(drawer).locator('option:checked')).toContainText(workers[2].name);
+  await recipientToggle(drawer).click();
   const last = await postFromComposer(page, drawer, task.id, 'Добавь вывод от последнего работника.');
   expect(last.payload).toMatchObject({ sourceRunId: original.id, sourceStepIndex: 2 });
   await waitForStatus(request, task.id, 'completed');
   await expect(sendRequest(drawer)).toBeDisabled(); // Empty composer, regardless of the next poll.
   await expect(drawer.locator('.current-workflow [data-status="completed"]')).toHaveCount(3);
+  await recipientToggle(drawer).click();
   await expect(recipient(drawer).locator('option')).toHaveCount(3); // Same sessions are deduplicated after a followup.
   const prior = recipient(drawer).locator('option').filter({ hasText: workers[0].name });
   const priorValue = await prior.getAttribute('value');
   expect(priorValue).toBeTruthy();
   await recipient(drawer).selectOption(priorValue!);
+  await expect(recipient(drawer)).toBeHidden();
   const first = await postFromComposer(page, drawer, task.id, 'Уточни данные первого этапа.');
   expect(first.payload).toMatchObject({ sourceRunId: original.id, sourceStepIndex: 0 });
   const detail = await waitForStatus(request, task.id, 'completed');
@@ -297,7 +308,9 @@ test('last and earlier workflow recipients preserve every original completed sta
     expect(detail.runs[index].followup?.workflow?.steps).toEqual(original.steps);
   }
   await expect(drawer.locator('.current-followup .followup-request')).toHaveText('Уточни данные первого этапа.');
+  await recipientToggle(drawer).click();
   await expect(recipient(drawer).locator('option:checked')).toContainText(workers[0].name);
+  await recipientToggle(drawer).click();
   // A request after that completed followup is scalar, even though it displays frozen workflow context.
   const further = await postFromComposer(page, drawer, task.id, 'Ещё одно уточнение первому работнику.');
   expect(further.payload).toMatchObject({ sourceRunId: first.run.id, sourceStepIndex: null });
