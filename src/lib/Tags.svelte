@@ -248,9 +248,9 @@
 <style>
   .tags-note :global(svg) { flex-shrink: 0; }
   .tags-list { display: grid; gap: 10px; }
-  .tag-card { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 20px; min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
+  .tag-card { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 20px; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
   .tag-card-name { display: flex; align-items: center; flex: 1 1 15rem; min-width: 0; }
-  .tag-name-badge { margin: 0; min-width: 0; max-width: 100%; padding: 5px 9px; border: 1px solid var(--tag-border-color); border-radius: 5px; background: var(--tag-background); color: var(--tag-text-color); font-size: .92rem; font-weight: 500; line-height: 1.6; overflow-wrap: anywhere; }
+  .tag-name-badge { margin: 0; min-width: 0; max-width: 100%; padding: 5px 9px; border: 1px solid var(--tag-border-color); border-radius: var(--radius-sm); background: var(--tag-background); color: var(--tag-text-color); font-size: .92rem; font-weight: 500; line-height: 1.6; overflow-wrap: anywhere; }
   .tag-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   .tags-capacity { margin: 16px 0 0; color: var(--muted); font-size: .77rem; }
   .tags-limit { margin: 0 0 18px; }
@@ -260,17 +260,17 @@
   .tag-colors { min-width: 0; margin: 0; padding: 0; border: 0; }
   .tag-colors legend { padding: 0; margin-bottom: 11px; color: var(--secondary); font-size: .92rem; font-weight: 500; }
   .tag-color-options { display: flex; flex-wrap: wrap; gap: 10px; padding: 3px; }
-  .tag-color-option { display: grid; place-items: center; width: 34px; height: 34px; flex-shrink: 0; border: 1px solid var(--tag-border-color); border-radius: 8px; background: var(--tag-background); color: var(--tag-text-color); }
+  .tag-color-option { display: grid; place-items: center; width: 34px; height: 34px; flex-shrink: 0; border: 1px solid var(--tag-border-color); border-radius: var(--radius-sm); background: var(--tag-background); color: var(--tag-text-color); }
   .tag-color-option.selected { outline: 2px solid var(--focus); outline-offset: 3px; }
   .tag-color-option:hover:not(:disabled) { box-shadow: 0 0 0 2px var(--line); }
   .tag-color-option:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
   .tag-custom-color { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 15px; color: var(--secondary); font-size: .85rem; cursor: pointer; }
-  .tag-custom-color input { width: 42px; height: 34px; flex-shrink: 0; padding: 3px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); cursor: pointer; }
+  .tag-custom-color input { width: 42px; height: 34px; flex-shrink: 0; padding: 3px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); cursor: pointer; }
   .tag-custom-color small { color: var(--muted); font-size: .77rem; }
   .tag-colors:disabled .tag-custom-color, .tag-colors:disabled input { cursor: default; }
-  .tag-preview-section { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-width: 0; padding: 12px; border: 1px dashed var(--line); border-radius: 7px; }
+  .tag-preview-section { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-width: 0; padding: 12px; border: 1px dashed var(--line); border-radius: var(--radius-md); }
   .tag-preview-section > span:first-child { color: var(--muted); font-size: .77rem; }
-  .tag-preview { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; padding: 5px 8px; border: 1px solid var(--tag-border-color); border-radius: 5px; background: var(--tag-background); color: var(--tag-text-color); font-size: .85rem; line-height: 1.5; }
+  .tag-preview { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; padding: 5px 8px; border: 1px solid var(--tag-border-color); border-radius: var(--radius-sm); background: var(--tag-background); color: var(--tag-text-color); font-size: .85rem; line-height: 1.5; }
   .tag-preview > span { min-width: 0; overflow-wrap: anywhere; }
   .tag-delete-dialog .editor-header h2 { margin: 0; }
   .tag-delete-dialog .editor-fields > p { margin: 0; font-size: .92rem; line-height: 1.8; color: var(--secondary); overflow-wrap: anywhere; }

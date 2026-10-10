@@ -1,6 +1,6 @@
 export const themes = [
-  { id: 'light', label: 'Светлая', colorScheme: 'light', preview: ['#fbfbfd', '#ffffff', '#7764cf'], themeColor: '#fbfbfd' },
-  { id: 'dark', label: 'Тёмная', colorScheme: 'dark', preview: ['#18171e', '#22212a', '#8d76d9'], themeColor: '#18171e' },
+  { id: 'light', label: 'Светлая', colorScheme: 'light', preview: ['#f4f5f7', '#ffffff', '#315c87'], themeColor: '#f4f5f7' },
+  { id: 'dark', label: 'Тёмная', colorScheme: 'dark', preview: ['#171b21', '#20262e', '#85add5'], themeColor: '#171b21' },
   { id: 'ocean', label: 'Океан', colorScheme: 'light', preview: ['#f3f8fc', '#ffffff', '#26749d'], themeColor: '#f3f8fc' },
   { id: 'forest', label: 'Лес', colorScheme: 'light', preview: ['#f5f9f4', '#ffffff', '#45744a'], themeColor: '#f5f9f4' },
   { id: 'rose', label: 'Роза', colorScheme: 'light', preview: ['#fdf6f8', '#ffffff', '#b44f7b'], themeColor: '#fdf6f8' },

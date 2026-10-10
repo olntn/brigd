@@ -53,16 +53,16 @@
   legend { padding: 0; margin-bottom: 10px; color: var(--secondary); font-size: .92rem; font-weight: 500; }
   p { margin: 0; color: var(--muted); font-size: .85rem; line-height: 1.7; display: flex; align-items: center; gap: 7px; }
   .tag-picker-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 10px; }
-  .tag-search { display: flex; align-items: center; gap: 7px; flex: 1 1 12rem; min-width: 0; padding: 8px 9px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: var(--surface); }
+  .tag-search { display: flex; align-items: center; gap: 7px; flex: 1 1 12rem; min-width: 0; padding: 8px 9px; border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--muted); background: var(--surface); }
   .tag-search:focus-within { outline: 2px solid var(--focus); outline-offset: 1px; }
   .tag-search input { flex: 1; min-width: 0; width: 100%; height: auto; margin: 0; padding: 0; border: 0; outline: 0; font-size: .85rem; color: var(--text); background: transparent; }
   .tag-search input::placeholder { color: var(--muted); }
   .tag-search input::-webkit-search-cancel-button { display: none; }
   .tag-search button { display: grid; place-items: center; padding: 1px; flex-shrink: 0; color: var(--muted); }
   .tag-selection-count { color: var(--muted); font-size: .77rem; white-space: nowrap; }
-  .tag-options { display: flex; flex-wrap: wrap; align-content: flex-start; align-items: flex-start; gap: 8px; max-height: min(12rem, 28dvh); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scroll-padding: 7px; padding: 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--subtle); }
+  .tag-options { display: flex; flex-wrap: wrap; align-content: flex-start; align-items: flex-start; gap: 8px; max-height: min(12rem, 28dvh); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scroll-padding: 7px; padding: 7px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--subtle); }
   .tag-search-empty { width: 100%; padding: 4px; }
-  label { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 7px 9px; color: var(--secondary); font-size: .85rem; cursor: pointer; max-width: 100%; }
+  label { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); background: var(--surface); border-radius: var(--radius-sm); padding: 7px 9px; color: var(--secondary); font-size: .85rem; cursor: pointer; max-width: 100%; }
   .tag-option { background: var(--tag-background); border-color: var(--tag-border-color); color: var(--tag-text-color); }
   .tag-option.selected { outline: 1px solid var(--tag-border-color); outline-offset: 2px; }
   .tag-option:has(input:focus-visible) { outline: 3px solid var(--focus); outline-offset: 2px; }
@@ -70,7 +70,7 @@
   input[type='checkbox'] { flex-shrink: 0; width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
   .tag-option input { accent-color: var(--tag-text-color); }
   .missing { color: var(--error); }
-  .tag-picker-error { color: var(--error); background: var(--error-bg); border: 1px solid var(--error-line); border-radius: 6px; padding: 10px; margin-bottom: 10px; font-size: .85rem; overflow-wrap: anywhere; }
+  .tag-picker-error { color: var(--error); background: var(--error-bg); border: 1px solid var(--error-line); border-radius: var(--radius-sm); padding: 10px; margin-bottom: 10px; font-size: .85rem; overflow-wrap: anywhere; }
   .tag-picker-error button { display: block; margin-top: 8px; text-decoration: underline; }
   fieldset:disabled label { cursor: default; opacity: .65; }
   @media (max-width: 700px) { .tag-search input { font-size: max(16px, .85rem); } }
