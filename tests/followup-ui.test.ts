@@ -68,7 +68,7 @@ test('request fingerprint is stable across object field order and sensitive to e
 });
 
 test('successful history forbids fresh manual reruns even after failed or cancelled follow-ups', () => {
-  const task = (latestRun: Run | null, hasCompletedRun?: boolean): Task => ({ id: 'task', title: 'Task', instruction: 'Initial work',
+  const task = (latestRun: Run | null, hasCompletedRun?: boolean): Task => ({ tagIds: [], tags: [], id: 'task', title: 'Task', instruction: 'Initial work',
     provider: 'codex', cwd: '/project', schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false,
     createdAt: 1, updatedAt: 1, archivedAt: null, nextRunAt: null, workerId: null, worker: null, steps: [], runCount: latestRun ? 1 : 0,
     latestRun, status: latestRun?.status ?? 'ready', ...(hasCompletedRun === undefined ? {} : { hasCompletedRun }) });

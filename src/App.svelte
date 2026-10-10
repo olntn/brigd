@@ -4,6 +4,8 @@
   import Workers from './lib/Workers.svelte';
   import ModelSettings from './lib/ModelSettings.svelte';
   import Instructions from './lib/Instructions.svelte';
+  import Tags from './lib/Tags.svelte';
+  import TagPicker from './lib/TagPicker.svelte';
   import AttachmentComposer from './lib/AttachmentComposer.svelte';
   import AttachmentList from './lib/AttachmentList.svelte';
   import BrigLogo from './lib/BrigLogo.svelte';
@@ -14,15 +16,28 @@
   import { taskActivity } from './lib/activity';
   import { WORKFLOW_MIN_STEPS, WORKFLOW_MAX_STEPS, WORKFLOW_TEXT_LIMIT, WORKFLOW_BYTES_LIMIT } from './lib/workflows';
   import { effortLabel, modelLabel } from './lib/workers';
+  import { tagColorStyle } from './lib/tags';
   import { followupTargets, followupFingerprint, followupStage, runWorkflowSteps, taskHasCompletedRun, resolveFollowupTarget, followupSessionKey, type FollowupTarget } from './lib/followups';
   import { applyTheme, readTheme, saveTheme, themes, themeStorageKey, type Theme } from './lib/theme';
-  import type { AppInfo, Attachment, Comment, FollowupInput, ModelCatalogEntry, Provider, Run, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
+  import type { AppInfo, Attachment, Comment, FollowupInput, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
 
   type Scope = 'all' | 'scheduled' | 'attention' | 'completed';
   type View = 'board' | 'list';
   let info = $state<AppInfo | null>(null);
   let tasks = $state<Task[]>([]);
-  let page = $state<'tasks' | 'workers' | 'instructions' | 'archive'>('tasks');
+  let page = $state<'tasks' | 'workers' | 'instructions' | 'tags' | 'archive'>('tasks');
+  let tags = $state<Tag[]>([]);
+  let tagsLoading = $state(true);
+  let tagsError = $state('');
+  let tagSequence = 0;
+  let tagReadSequence: number | null = null;
+  let tagMutationPending = $state(false);
+  let tagFilter = $state('all');
+  let archiveTagFilter = $state('all');
+  let editingTags = $state(false);
+  let taskTagIds = $state<string[]>([]);
+  let tagsSaving = $state(false);
+  let taskTagsError = $state('');
   let workers = $state<Worker[]>([]);
   let workersLoading = $state(true);
   let workersError = $state('');
@@ -72,6 +87,7 @@
   let editorOpen = $state(false);
   let editingId = $state<string | null>(null);
   let formTitle = $state('');
+  let formTagIds = $state<string[]>([]);
   let formInstruction = $state('');
   let formProvider = $state<Provider>('codex');
   let formWorkerId = $state('');
@@ -123,11 +139,12 @@
   let archivedTasks = $derived(tasks.filter(task => task.archivedAt !== null).sort((a, b) => b.archivedAt! - a.archivedAt!));
   let archiveResults = $derived(archivedTasks.filter(task => {
     const query = archiveSearch.trim().toLocaleLowerCase();
-    return !query || `${task.title} ${task.instruction} ${task.cwd}`.toLocaleLowerCase().includes(query);
+    return matchesTag(task, archiveTagFilter) && (!query || `${task.title} ${task.instruction} ${task.cwd}`.toLocaleLowerCase().includes(query));
   }));
   let filtered = $derived(activeTasks.filter(task => {
     const query = search.trim().toLocaleLowerCase();
     return (provider === 'all' || taskProviders(task).includes(provider))
+      && matchesTag(task, tagFilter)
       && (scope === 'all' || (scope === 'scheduled' && task.schedule === 'interval') || (scope === 'attention' && attentionStatuses.includes(task.status)) || (scope === 'completed' && task.status === 'completed'))
       && (!query || `${task.title} ${task.instruction} ${task.cwd} ${task.worker?.name ?? ''} ${task.latestRun?.worker?.name ?? ''} ${(task.steps ?? []).map(step => `${step.title} ${workers.find(worker => worker.id === step.workerId)?.name ?? ''}`).join(' ')} ${(task.latestRun?.steps ?? []).map(step => `${step.title} ${step.worker.name}`).join(' ')}`.toLocaleLowerCase().includes(query));
   }));
@@ -207,6 +224,60 @@
     } finally { if (sequence === workerSequence) workersLoading = false; }
   }
 
+  async function loadTags() {
+    if (tagMutationPending || tagReadSequence !== null) return;
+    const sequence = ++tagSequence;
+    tagReadSequence = sequence;
+    try {
+      const result = await api<Tag[]>('/api/tags');
+      if (sequence !== tagSequence) return;
+      tags = result;
+      tagsError = '';
+      if (!['all', 'untagged'].includes(tagFilter) && !tags.some(tag => tag.id === tagFilter)) tagFilter = 'all';
+      if (!['all', 'untagged'].includes(archiveTagFilter) && !tags.some(tag => tag.id === archiveTagFilter)) archiveTagFilter = 'all';
+    } catch (error) {
+      if (sequence === tagSequence) tagsError = error instanceof Error ? error.message : 'Не удалось загрузить теги';
+    } finally {
+      if (tagReadSequence === sequence) tagReadSequence = null;
+      if (sequence === tagSequence) tagsLoading = false;
+    }
+  }
+
+  function tagMutation(pending: boolean) {
+    tagMutationPending = pending;
+    if (pending) { tagSequence++; tagReadSequence = null; }
+  }
+
+  function tagChanged(tag: Tag) {
+    tagSequence++;
+    tagReadSequence = null;
+    tags = (tags.some(item => item.id === tag.id) ? tags.map(item => item.id === tag.id ? tag : item) : [...tags, tag]).sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    tagsLoading = false;
+    tagsError = '';
+    taskSequence++;
+    drawerSequence++;
+    const update = (task: Task) => ({ ...task, tags: (task.tags ?? []).map(item => item.id === tag.id ? tag : item) });
+    tasks = tasks.map(update);
+    if (detail) detail = { ...detail, task: update(detail.task) };
+  }
+
+  function tagDeleted(id: string) {
+    tagSequence++;
+    tagReadSequence = null;
+    tags = tags.filter(tag => tag.id !== id);
+    tagsLoading = false;
+    tagsError = '';
+    if (tagFilter === id) tagFilter = 'all';
+    if (archiveTagFilter === id) archiveTagFilter = 'all';
+    formTagIds = formTagIds.filter(tagId => tagId !== id);
+    taskTagIds = taskTagIds.filter(tagId => tagId !== id);
+    taskSequence++;
+    drawerSequence++;
+    const update = (task: Task) => ({ ...task, tagIds: (task.tagIds ?? []).filter(tagId => tagId !== id), tags: (task.tags ?? []).filter(tag => tag.id !== id) });
+    tasks = tasks.map(update);
+    if (detail) detail = { ...detail, task: update(detail.task) };
+  }
+
   async function loadModels() {
     // Do not read midway through a write. Its result invalidates every older read.
     if (modelMutationPending || modelReadSequence !== null) return;
@@ -267,7 +338,7 @@
   }
 
   async function refresh() {
-    await Promise.all([loadTasks(), loadWorkers(), loadModels(), selectedId ? loadDetail() : Promise.resolve()]);
+    await Promise.all([loadTasks(), loadWorkers(), loadModels(), loadTags(), selectedId ? loadDetail() : Promise.resolve()]);
   }
 
   async function loadInfo() {
@@ -313,7 +384,7 @@
   }
 
   async function openTask(task: Task) {
-    if (followupSending) return;
+    if (followupSending || tagsSaving) return;
     drawerContext++;
     selectedId = task.id;
     detail = null;
@@ -327,12 +398,14 @@
     answer = '';
     acknowledgeInterruption = false;
     detailTab = 'conversation';
+    editingTags = false;
+    taskTagsError = '';
     drawer.showModal();
     await loadDetail(task.id);
   }
 
   function closeDrawer() {
-    if (followupSending) return;
+    if (followupSending || tagsSaving) return;
     drawer.close();
     drawerContext++;
     selectedId = null;
@@ -355,6 +428,8 @@
     formAttachmentInvalid = false;
     editingId = task?.id ?? null;
     formTitle = task?.title ?? '';
+    formTagIds = [...(task?.tagIds ?? [])];
+    void loadTags();
     formInstruction = task?.instruction ?? '';
     formProvider = task?.provider ?? 'codex';
     formWorkerId = task?.workerId ?? '';
@@ -406,6 +481,7 @@
       steps: formComplex ? formSteps.map(({ workerId, title, instruction }) => ({ workerId, title: title.trim(), instruction: instruction.trim() })) : [],
       schedule: formSchedule, intervalMinutes: formSchedule === 'interval' ? formInterval : null,
       firstRunAt, paused: formPaused,
+      tagIds: formTagIds,
     };
     const savedEditingId = editingId;
     const context = editorContext;
@@ -426,6 +502,50 @@
       void refresh();
     } catch (error) { attachments?.finish(false); if (context === editorContext) formError = error instanceof Error ? error.message : 'Не удалось сохранить задачу'; }
     finally { submitting = false; }
+  }
+
+  async function openTaskTags(task: Task) {
+    const context = drawerContext;
+    taskTagIds = [...(task.tagIds ?? [])];
+    taskTagsError = '';
+    editingTags = true;
+    void loadTags();
+    await tick();
+    if (context === drawerContext && selectedId === task.id && editingTags) drawer.querySelector<HTMLInputElement>('.task-tag-section input[type="search"]')?.focus();
+  }
+
+  async function closeTaskTags() {
+    if (tagsSaving) return;
+    editingTags = false;
+    await tick();
+    drawer.querySelector<HTMLButtonElement>('[data-edit-task-tags]')?.focus();
+  }
+
+  async function saveTaskTags(task: Task) {
+    if (tagsSaving || pending.includes(task.id)) return;
+    const context = drawerContext;
+    tagsSaving = true;
+    taskTagsError = '';
+    pending = [...pending, task.id];
+    try {
+      const saved = await api<Task>(`/api/tasks/${encodeURIComponent(task.id)}/tags`, { method: 'PATCH', body: JSON.stringify({ tagIds: taskTagIds }) });
+      taskSequence++;
+      drawerSequence++;
+      tasks = tasks.map(item => item.id === saved.id ? saved : item);
+      if (context === drawerContext && selectedId === saved.id) {
+        if (detail) detail = { ...detail, task: saved };
+        editingTags = false;
+        notify('Теги задачи сохранены');
+      }
+      void refresh();
+    } catch (error) {
+      if (context === drawerContext) taskTagsError = error instanceof Error ? error.message : 'Не удалось сохранить теги';
+    } finally {
+      tagsSaving = false;
+      pending = pending.filter(id => id !== task.id);
+      await tick();
+      if (context === drawerContext && selectedId === task.id && !editingTags) drawer.querySelector<HTMLButtonElement>('[data-edit-task-tags]')?.focus();
+    }
   }
 
   async function act(task: Task, action: 'run' | 'pause' | 'resume' | 'cancel' | 'retry' | 'archive' | 'restore', response?: string) {
@@ -575,7 +695,8 @@
     const seconds = Math.max(0, Math.floor(((run.finishedAt ?? run.updatedAt) - run.startedAt) / 1000));
     return seconds < 60 ? `${seconds} сек.` : `${Math.floor(seconds / 60)} мин. ${seconds % 60} сек.`;
   }
-  function resetFilters() { search = ''; provider = 'all'; setScope('all'); }
+  function matchesTag(task: Task, value: string) { return value === 'all' || (value === 'untagged' ? !(task.tagIds ?? []).length : (task.tagIds ?? []).includes(value)); }
+  function resetFilters() { search = ''; provider = 'all'; tagFilter = 'all'; setScope('all'); }
   function setScope(value: Scope) { scope = value; showOtherStatuses = true; }
   function globalKey(event: KeyboardEvent) {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && page === 'tasks' && !editorOpen && !selectedId && !settingsOpen) {
@@ -633,12 +754,17 @@
   </details>
 {/snippet}
 
+{#snippet taskTags(task: Task)}
+  {#if task.tags?.length}<span class="task-tags">{#each task.tags as tag (tag.id)}<span class="task-tag" style={tagColorStyle(tag.color)}><span>{tag.name}</span></span>{/each}</span>{/if}
+{/snippet}
+
 {#snippet taskCard(task: Task)}
   <article class="task-card {task.status}" class:paused-card={task.paused}>
     <button class="card-main" onclick={() => openTask(task)} aria-label={'Открыть задачу: ' + task.title}>
       <div class="card-top">{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}<span class="task-ref">{task.id.slice(0, 6).toUpperCase()}</span></div>
       <h3>{task.title}</h3>
       <p class="card-description">{task.latestRun?.summary || task.instruction}</p>
+      {@render taskTags(task)}
       {#if workflowSteps(task).length}<div class="card-workflow-progress"><Icon name="list" size={14} /><span>{workflowProgress(task)}</span></div>{/if}
       {#if task.latestRun?.followup}<div class="card-followup-label"><Icon name="message" size={14} /><span>Дополнительный запрос{#if followupStage(task.latestRun)} · Этап {followupStage(task.latestRun)!.index + 1}{/if}</span></div>{/if}
       {#if task.status === 'cancelling'}<div class="card-cancelling"><Icon name="refresh" size={13} class="spin" />Останавливается</div>{/if}
@@ -664,6 +790,7 @@
       <button class:active={page === 'tasks'} aria-label="Задачи" onclick={() => { page = 'tasks'; resetFilters(); }}><Icon name="board" /><span>Задачи</span><span class="nav-count">{activeTasks.length}</span></button>
       <button class:active={page === 'workers'} aria-label="Работники" onclick={() => { page = 'workers'; void loadWorkers(); }}><Icon name="spark" /><span>Работники</span><span class="nav-count">{workers.filter(worker => !worker.archived).length}</span></button>
       <button class:active={page === 'instructions'} aria-label="Инструкции" onclick={() => { page = 'instructions'; }}><Icon name="list" /><span>Инструкции</span></button>
+      <button class:active={page === 'tags'} aria-label="Теги" onclick={() => { page = 'tags'; void loadTags(); }}><Icon name="tag" /><span>Теги</span><span class="nav-count">{tags.length}</span></button>
     </nav>
     <div class="sidebar-bottom">
       <button class="archive-button" class:active={page === 'archive'} aria-label="Архив" onclick={() => { page = 'archive'; }}><Icon name="archive" /><span>Архив</span><span class="nav-count">{archivedTasks.length}</span></button>
@@ -675,6 +802,8 @@
     <div class="workspace-content">
       {#if page === 'instructions'}
         <Instructions {notify} />
+      {:else if page === 'tags'}
+        <Tags {tags} loading={tagsLoading} error={tagsError} onreload={loadTags} onchanged={tagChanged} ondeleted={tagDeleted} onmutation={tagMutation} {notify} />
       {:else if page === 'archive'}
         <section class="page-heading" aria-label="Архив задач"><div><h1>Архив<span>{archivedTasks.length}</span></h1><p>Задачи в архиве не показываются на доске и не запускаются по расписанию. История, комментарии и файлы сохраняются.</p></div></section>
         {#if loading}
@@ -682,8 +811,9 @@
         {:else if archivedTasks.length === 0}
           <div class="no-results"><span class="empty-icon"><Icon name="archive" size={28} /></span><h2>Архив пуст</h2><p>Откройте задачу, которая больше не нужна на доске, и нажмите «В архив».</p></div>
         {:else}
-          <div class="toolbar"><label class="search-box"><Icon name="search" size={16} /><input bind:value={archiveSearch} type="search" placeholder="Найти в архиве…" aria-label="Поиск в архиве" /></label></div>
-          <div class="task-list archive-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>В АРХИВЕ С</span><span></span><span></span></div>{#each archiveResults as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name="archive" size={17} /></span><span><strong>{task.title}</strong><small>{shortPath(task.cwd)}</small></span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{dateTime(task.archivedAt!)}</span><div class="archive-row-actions"><button class="button secondary" disabled={pending.includes(task.id)} aria-label={'Восстановить: ' + task.title} onclick={() => act(task, 'restore')}><Icon name={pending.includes(task.id) ? 'refresh' : 'restore'} size={15} class={pending.includes(task.id) ? 'spin' : ''} />Восстановить</button></div><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="search" size={20} /><span>В архиве ничего не найдено</span></div>{/each}</div>
+          <div class="toolbar"><label class="search-box"><Icon name="search" size={16} /><input bind:value={archiveSearch} type="search" placeholder="Найти в архиве…" aria-label="Поиск в архиве" /></label><label class="provider-filter tag-filter"><Icon name="tag" size={15} /><select bind:value={archiveTagFilter} aria-label="Фильтр по тегу" disabled={tagsLoading}><option value="all">Все теги</option><option value="untagged">Без тегов</option>{#each tags as tag (tag.id)}<option value={tag.id}>{tag.name}</option>{/each}</select><Icon name="down" size={13} /></label></div>
+          {#if tagsError}<div class="connection-error" role="alert"><span>{tagsError}</span><button onclick={() => { void loadTags(); }}>Повторить загрузку тегов</button></div>{/if}
+          <div class="task-list archive-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>В АРХИВЕ С</span><span></span><span></span></div>{#each archiveResults as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name="archive" size={17} /></span><span><strong>{task.title}</strong><small>{shortPath(task.cwd)}</small>{@render taskTags(task)}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{dateTime(task.archivedAt!)}</span><div class="archive-row-actions"><button class="button secondary" disabled={pending.includes(task.id)} aria-label={'Восстановить: ' + task.title} onclick={() => act(task, 'restore')}><Icon name={pending.includes(task.id) ? 'refresh' : 'restore'} size={15} class={pending.includes(task.id) ? 'spin' : ''} />Восстановить</button></div><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="search" size={20} /><span>В архиве ничего не найдено</span></div>{/each}</div>
         {/if}
       {:else if page === 'workers'}
         <Workers {workers} loading={workersLoading} error={workersError} retry={() => { void loadWorkers(); }} onchange={workerChanged} {notify} {models} {modelsLoading} {modelsError} retryModels={() => { void loadModels(); }} />
@@ -701,13 +831,15 @@
           <label class="search-box"><Icon name="search" size={16} /><input bind:this={searchInput} bind:value={search} type="search" placeholder="Найти задачу…" aria-label="Поиск задач" /><span class="key-hint">⌘ K</span></label>
           <label class="provider-filter"><Icon name="inbox" size={15} /><select value={scope} onchange={(event) => setScope(event.currentTarget.value as Scope)} aria-label="Фильтр задач"><option value="all">Все задачи</option><option value="attention">Требуют внимания</option><option value="scheduled">По расписанию</option><option value="completed">Завершённые</option></select><Icon name="down" size={13} /></label>
           <label class="provider-filter"><Icon name="sliders" size={15} /><select bind:value={provider} aria-label="Фильтр по агенту"><option value="all">Все агенты</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select><Icon name="down" size={13} /></label>
+          <label class="provider-filter tag-filter"><Icon name="tag" size={15} /><select bind:value={tagFilter} aria-label="Фильтр по тегу" disabled={tagsLoading}><option value="all">Все теги</option><option value="untagged">Без тегов</option>{#each tags as tag (tag.id)}<option value={tag.id}>{tag.name}</option>{/each}</select><Icon name="down" size={13} /></label>
         </div>
       </div>
+      {#if tagsError}<div class="connection-error" role="alert"><span>{tagsError}</span><button onclick={() => { void loadTags(); }}>Повторить загрузку тегов</button></div>{/if}
 
       {#if loading}
         <div class="board-grid skeleton-grid" aria-label="Загружаем задачи" aria-busy="true">{#each [1, 2, 3, 4] as column}<div class="skeleton-column"><div class="skeleton skeleton-heading"></div><div class="skeleton skeleton-card"></div>{#if column < 3}<div class="skeleton skeleton-card short"></div>{/if}</div>{/each}</div>
       {:else if filtered.length === 0 && activeTasks.length > 0}
-        <div class="no-results"><span class="empty-icon"><Icon name={scope === 'attention' ? 'circlecheck' : 'search'} size={28} /></span><h2>{scope === 'attention' && !search && provider === 'all' ? 'Всё под контролем' : 'Задачи не найдены'}</h2><p>{scope === 'attention' && !search && provider === 'all' ? 'Сейчас нет задач, которым нужно ваше внимание.' : 'Попробуйте другой запрос или измените фильтры.'}</p><button class="button secondary" onclick={resetFilters}>Показать все задачи</button></div>
+        <div class="no-results"><span class="empty-icon"><Icon name={scope === 'attention' && tagFilter === 'all' ? 'circlecheck' : 'search'} size={28} /></span><h2>{scope === 'attention' && !search && provider === 'all' && tagFilter === 'all' ? 'Всё под контролем' : 'Задачи не найдены'}</h2><p>{scope === 'attention' && !search && provider === 'all' && tagFilter === 'all' ? 'Сейчас нет задач, которым нужно ваше внимание.' : 'Попробуйте другой запрос или измените фильтры.'}</p><button class="button secondary" onclick={resetFilters}>Показать все задачи</button></div>
       {:else}
         {#if activeTasks.length === 0 && !connectionError}
           <section class="welcome-card"><div class="welcome-art" aria-hidden="true"><span class="art-orbit orbit-one"></span><span class="art-orbit orbit-two"></span><span class="art-mini art-code"><Icon name="code" size={19} /></span><span class="art-main"><BrigLogo size={39} /></span><span class="art-mini art-star">✳</span><span class="art-spark">✦</span></div><div class="welcome-copy"><span class="welcome-kicker">С ЧЕГО НАЧНЁМ?</span><h2>Освободите время для своих идей</h2><p>Поручите агенту проверить проект, собрать сводку или помочь с кодом.<br class="desktop-break" /> Запустите один раз или настройте регулярную работу.</p><button class="button primary" onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={16} />Создать первую задачу<Icon name="arrow" size={16} /></button></div><div class="welcome-steps"><div><span>1</span>Опишите задачу</div><div><span>2</span>Выберите агента</div><div><span>3</span>Следите за результатом</div></div></section>
@@ -727,7 +859,7 @@
             <section class="archive-section"><button class="archive-toggle" aria-expanded={showOtherStatuses} onclick={() => showOtherStatuses = !showOtherStatuses}><Icon name={showOtherStatuses ? 'down' : 'chevron'} size={15} /><Icon name="alert" size={15} /><strong>Другие статусы</strong><span>{otherStatusTasks.length}</span><small>Прерванные, отменённые и задачи с ошибками</small></button>{#if showOtherStatuses}<div class="archive-grid">{#each otherStatusTasks as task (task.id)}<div class="archive-card-wrapper">{@render statusBadge(task.status)}{@render taskCard(task)}</div>{/each}</div>{/if}</section>
           {/if}
         {:else}
-          <div class="task-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>ЗАПУСК</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{shortPath(task.cwd)}</small>{#if task.latestRun?.followup}<small class="list-followup-label">Дополнительный запрос{#if followupStage(task.latestRun)} · Этап {followupStage(task.latestRun)!.index + 1}{/if}</small>{/if}{#if workflowSteps(task).length}<small class="list-workflow-progress">{workflowProgress(task)}</small>{/if}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{task.paused ? 'На паузе' : task.schedule === 'interval' ? intervalLabel(task.intervalMinutes) : 'Вручную'}</span><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>Новые задачи появятся здесь</span></div>{/each}</div>
+          <div class="task-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>ЗАПУСК</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{shortPath(task.cwd)}</small>{@render taskTags(task)}{#if task.latestRun?.followup}<small class="list-followup-label">Дополнительный запрос{#if followupStage(task.latestRun)} · Этап {followupStage(task.latestRun)!.index + 1}{/if}</small>{/if}{#if workflowSteps(task).length}<small class="list-workflow-progress">{workflowProgress(task)}</small>{/if}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{task.paused ? 'На паузе' : task.schedule === 'interval' ? intervalLabel(task.intervalMinutes) : 'Вручную'}</span><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>Новые задачи появятся здесь</span></div>{/each}</div>
         {/if}
       {/if}
       {/if}
@@ -737,7 +869,7 @@
 
 <dialog class="task-drawer" bind:this={drawer} aria-labelledby="detail-title" oncancel={(event) => { event.preventDefault(); closeDrawer(); }} onclick={(event) => backdropClick(event, drawer, closeDrawer)}>
   <div class="drawer-content">
-    <header class="drawer-topbar"><span><Icon name="terminal" size={16} />Задача <span class="detail-ref">{selectedId?.slice(0, 8).toUpperCase()}</span></span><button class="icon-button" aria-label="Закрыть задачу" disabled={followupSending} onclick={closeDrawer}><Icon name="close" size={20} /></button></header>
+    <header class="drawer-topbar"><span><Icon name="terminal" size={16} />Задача <span class="detail-ref">{selectedId?.slice(0, 8).toUpperCase()}</span></span><button class="icon-button" aria-label="Закрыть задачу" disabled={followupSending || tagsSaving} onclick={closeDrawer}><Icon name="close" size={20} /></button></header>
     {#if selectedTask}
       <div class="task-detail-layout">
       <section class="task-information" aria-label="Информация о задаче">
@@ -765,6 +897,17 @@
       {#if toast}<div class="drawer-notice {toast.type}" role={toast.type === 'error' ? 'alert' : 'status'}><Icon name={toast.type === 'error' ? 'alert' : 'circlecheck'} size={16} /><span>{toast.text}</span><button class="icon-button" aria-label="Закрыть уведомление" onclick={() => toast = null}><Icon name="close" size={14} /></button></div>{/if}
       {#if detailError}<div class="detail-error" role="alert">{detailError}</div>{/if}
       <div class="task-properties">{#if !selectedTask.steps?.length && (selectedTask.worker || activeStatuses.includes(selectedTask.status))}<div><span><Icon name="spark" size={14} />{activeStatuses.includes(selectedTask.status) ? 'Следующий запуск' : 'Работник'}</span><div>{#if selectedTask.worker}{@render workerBadge(selectedTask.worker, true)}{:else}<strong>Без работника · {providerName(selectedTask.provider)}</strong>{/if}</div></div>{/if}<div><span><Icon name="folder" size={14} />Рабочая папка</span><code title={selectedTask.cwd}>{selectedTask.cwd}</code></div><div><span><Icon name="clock" size={14} />Расписание</span><strong>{selectedTask.schedule === 'interval' ? intervalLabel(selectedTask.intervalMinutes) : 'Ручной запуск'}{#if selectedTask.paused}<span class="paused-label">На паузе</span>{/if}</strong></div>{#if selectedTask.nextRunAt && !selectedTask.paused && selectedTask.archivedAt === null}<div><span><Icon name="arrow" size={14} />Следующий запуск</span><strong>{dateTime(selectedTask.nextRunAt)}</strong></div>{/if}<div><span><Icon name="history" size={14} />Всего запусков</span><strong>{selectedTask.runCount}</strong></div></div>
+      <section class="task-tag-section" aria-label="Теги задачи">
+        <div class="task-tag-heading"><h3><Icon name="tag" size={14} />Теги</h3>{#if selectedTask.archivedAt === null && !editingTags}<button class="tag-edit-button" data-edit-task-tags disabled={taskBusy} onclick={() => selectedTask && openTaskTags(selectedTask)}><Icon name="edit" size={13} />Изменить теги</button>{/if}</div>
+        {#if editingTags && selectedTask.archivedAt === null}
+          <TagPicker {tags} bind:selected={taskTagIds} disabled={tagsSaving} loading={tagsLoading} error={tagsError} onreload={loadTags} />
+          {#if taskTagsError}<p class="tag-save-error" role="alert">{taskTagsError}</p>{/if}
+          <div class="task-tag-actions"><button type="button" class="button secondary" disabled={tagsSaving} onclick={closeTaskTags}>Отмена</button><button type="button" class="button primary" disabled={taskBusy || tagsLoading} onclick={() => selectedTask && saveTaskTags(selectedTask)}>{#if tagsSaving}<Icon name="refresh" size={14} class="spin" />{/if}{tagsSaving ? 'Сохраняем…' : 'Сохранить теги'}</button></div>
+        {:else if selectedTask.tags?.length}
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex (Scrollable regions need keyboard focus for native scrolling.) -->
+          <div class="assigned-task-tags" role="region" aria-label="Назначенные теги" tabindex="0">{@render taskTags(selectedTask)}</div>
+        {:else}<p class="task-tags-empty">Теги не назначены</p>{/if}
+      </section>
       <section class="instruction-section"><h3>{selectedTask.steps?.length ? 'ОБЩАЯ ЦЕЛЬ ЗАДАЧИ' : 'ЗАДАНИЕ ДЛЯ АГЕНТА'}</h3><p>{selectedTask.instruction}</p></section>
       {#if selectedTask.attachments?.some(file => file.source === 'user')}<section class="task-attachments" aria-label="Файлы задачи"><h3>Файлы задачи</h3><AttachmentList attachments={selectedTask.attachments.filter(file => file.source === 'user')} taskId={selectedTask.id} author={attachmentAuthor} /></section>{/if}
       {#if detail?.attachments?.some(file => file.source === 'agent' && !file.commentId)}<section class="task-attachments" aria-label="Файлы агента"><h3>Файлы агента</h3><AttachmentList attachments={detail.attachments.filter(file => file.source === 'agent' && !file.commentId)} taskId={selectedTask.id} author={attachmentAuthor} /></section>{/if}
@@ -896,6 +1039,7 @@
         {#if formError}<div class="form-error" role="alert"><Icon name="alert" size={17} />{formError}</div>{/if}
         {#if editingId && selectedTask && taskIsOccupied(selectedTask)}<div class="form-note">Изменения применятся к следующему запуску. Текущий запуск сохраняет план этапов, работников, настройки, инструкции и рабочую папку. Для повтора этапа используется сохранённый план.</div>{/if}
         <label class="form-field"><span>Название задачи <span class="required">*</span></span><input bind:value={formTitle} name="title" placeholder="Например, проверить новые изменения" required maxlength="140" disabled={submitting} /></label>
+        <TagPicker {tags} bind:selected={formTagIds} disabled={submitting} loading={tagsLoading} error={tagsError} onreload={loadTags} />
         <div class="task-type-switch" role="group" aria-label="Тип задачи"><button type="button" class:selected={!formComplex} aria-pressed={!formComplex} disabled={submitting} onclick={() => formComplex = false}>Простая задача</button><button type="button" class:selected={formComplex} aria-pressed={formComplex} disabled={submitting} onclick={() => formComplex = true}>Сложная задача</button></div>
         {#if formComplex}<p class="workflow-help">Одна общая цель, несколько работников по очереди. Порядок и задания можно изменить до запуска.</p>{/if}
         <label class="form-field"><span>{formComplex ? 'Общая цель и ограничения' : 'Что нужно сделать?'} <span class="required">*</span></span><textarea bind:value={formInstruction} name="instruction" maxlength="16000" rows="4" placeholder="Опишите результат, важные детали и ограничения. Агент получит эту инструкцию при каждом запуске." required disabled={submitting}></textarea></label>

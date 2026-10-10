@@ -10,6 +10,7 @@ import { attachmentIds, attachmentDisposition, prepareAttachment } from './attac
 import { INSTRUCTION_JSON_LIMIT, validateInstruction, validateInstructionPatch } from './instructions';
 import { validateModel, validateModelPatch } from './models';
 import { validateFollowup } from './followups';
+import { validateTag, validateTagPatch, validateTaskTags } from './tags';
 
 export interface HttpOptions { port: number; dev?: boolean; root?: string; startedAt?: number; allowedHosts?: string[]; allowedOrigins?: string[]; defaultCwd?: string; }
 const JSON_LIMIT = 32_768;
@@ -137,15 +138,25 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         if (method === 'PATCH') return json(engine.store.updateInstruction(id, validateInstructionPatch(await body(req, INSTRUCTION_JSON_LIMIT))));
         if (method === 'DELETE') { engine.store.deleteInstruction(id); return json({ ok: true }); }
       }
-      if (path === '/api/tasks' && method === 'GET') return json(engine.store.listTasks());
+      if (path === '/api/tags' && method === 'GET') return json(engine.store.listTags());
+      if (path === '/api/tags' && method === 'POST') return json(engine.store.createTag(validateTag(await body(req))), 201);
+      const tagMatch = path.match(/^\/api\/tags\/([a-zA-Z0-9-]+)$/);
+      if (tagMatch) {
+        const id = tagMatch[1]!;
+        if (method === 'GET') return json(engine.store.getTag(id));
+        if (method === 'PATCH') return json(engine.store.updateTag(id, validateTagPatch(await body(req))));
+        if (method === 'DELETE') { engine.store.deleteTag(id); return json({ ok: true }); }
+      }
+      if (path === '/api/tasks' && method === 'GET') return json(engine.store.listTasks(url.searchParams.get('tagId') ?? undefined));
       if (path === '/api/tasks' && method === 'POST') return json(engine.store.createTask(await validateTask(await body(req, TASK_JSON_LIMIT))), 201);
-      const taskMatch = path.match(/^\/api\/tasks\/([a-zA-Z0-9-]+)(?:\/(run|comments|followups|archive|restore))?$/);
+      const taskMatch = path.match(/^\/api\/tasks\/([a-zA-Z0-9-]+)(?:\/(run|comments|followups|archive|restore|tags))?$/);
       if (taskMatch) {
         const [, id, action] = taskMatch;
         if (!action && method === 'GET') return json(engine.store.detail(id));
         if (!action && method === 'PATCH') {
           const current = engine.store.getTask(id);
           const patch = await body(req, TASK_JSON_LIMIT);
+          if (Object.keys(patch).length === 1 && 'tagIds' in patch) return json(engine.store.setTaskTags(id, validateTaskTags(patch)));
           // Stopping a schedule must remain possible after its project mount disappears.
           if (Object.keys(patch).length === 1 && 'paused' in patch) {
             if (typeof patch.paused !== 'boolean') throw new AppError('paused должен быть boolean');
@@ -153,6 +164,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
           }
           return json(engine.store.updateTask(id, await validateTask({ ...current, ...patch })));
         }
+        if (action === 'tags' && method === 'PATCH') return json(engine.store.setTaskTags(id, validateTaskTags(await body(req))));
         if (action === 'run' && method === 'POST') { await body(req); return json(engine.start(id), 201); }
         if (action === 'archive' && method === 'POST') { await body(req); return json(engine.store.archiveTask(id)); }
         if (action === 'restore' && method === 'POST') { await body(req); return json(engine.store.restoreTask(id)); }

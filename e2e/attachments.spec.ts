@@ -582,6 +582,7 @@ function fixtureDetail(): TaskDetail {
     previewable: false, source: 'agent', runId: run.id, commentId: null, size: 64,
   });
   const task: Task = {
+    tagIds: [], tags: [],
     id: input.taskId!, title: 'Файлы пользователя и результат агента', instruction: run.instruction,
     workerId: null, worker: null, steps: [], provider: 'codex', cwd: run.cwd,
     schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false,

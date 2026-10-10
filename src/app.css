@@ -472,6 +472,23 @@ input[type='checkbox'], input[type='radio'] { flex-shrink: 0; }
 .key-hint { font-size: .69rem; white-space: nowrap; padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; color: var(--muted); }
 .provider-filter { display: flex; flex: 0 1 auto; max-width: 100%; min-width: 0; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--line); padding: 8px 10px; border-radius: 6px; color: var(--muted); min-height: 36px; }
 .provider-filter select { appearance: none; border: 0; color: var(--secondary); background: var(--surface); font-size: .85rem; padding-right: 4px; cursor: pointer; width: auto; }
+.tag-filter select { min-width: 0; max-width: 15rem; text-overflow: ellipsis; }
+.tag-filter > svg { flex-shrink: 0; }
+.task-tags { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
+.task-tag { display: inline-flex; align-items: center; max-width: 100%; min-width: 0; padding: 3px 6px; border: 1px solid var(--tag-border-color); border-radius: 4px; background: var(--tag-background); color: #fff; font-size: .73rem; font-weight: 400; line-height: 1.5; }
+.task-tag > span { min-width: 0; overflow-wrap: anywhere; }
+.card-main > .task-tags { margin: 10px 0; }
+.list-task-name .task-tags { margin-top: 7px; }
+.task-tag-section { margin: 0 26px; padding: 17px 0; border-bottom: 1px solid var(--line); min-width: 0; }
+.assigned-task-tags { max-height: min(8rem, 20dvh); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 2px; }
+.task-tag-heading { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.task-tag-heading h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: .85rem; font-weight: 500; color: var(--secondary); }
+.tag-edit-button { display: flex; align-items: center; gap: 5px; color: var(--accent-text); font-size: .77rem; padding: 4px; border-radius: 4px; }
+.tag-edit-button:hover { background: var(--soft); }
+.task-tags-empty { margin: 0; color: var(--muted); font-size: .85rem; }
+.task-tag-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.tag-save-error { color: var(--error); font-size: .85rem; overflow-wrap: anywhere; }
+@media (max-width: 700px) { .task-tag-section { margin-inline: 20px; } }
 .board-grid, .archive-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: 24px 17px; }
 .board-column { min-width: 0; }
 .column-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 14px; padding: 2px 1px; min-height: 28px; }

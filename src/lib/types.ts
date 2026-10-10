@@ -62,6 +62,14 @@ export interface Instruction extends InstructionInput {
 /** Reusable guidance frozen when a run is created, never reloaded on resume. */
 export interface InstructionSnapshot { id: string; title: string; body: string; }
 
+export interface TagInput { name: string; color?: string; }
+export interface Tag extends TagInput {
+  color: string;
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export type RunStatus = 'running' | 'cancelling' | 'waiting_input' | 'completed' | 'blocked' | 'failed' | 'interrupted' | 'cancelled';
 export type TaskStatus = 'ready' | RunStatus;
 export interface TaskStepInput {
@@ -94,6 +102,7 @@ export interface RunStep extends TaskStepInput {
   attempts: StepAttempt[];
 }
 export interface TaskInput {
+  tagIds?: string[];
   attachmentIds?: string[];
   steps?: TaskStepInput[];
   workerId?: string | null;
@@ -107,6 +116,8 @@ export interface TaskInput {
   paused: boolean;
 }
 export interface Task extends TaskInput {
+  tagIds: string[];
+  tags: Tag[];
   /** Once completed, new work continues a saved session instead of rerunning. */
   hasCompletedRun?: boolean;
   attachments?: Attachment[];

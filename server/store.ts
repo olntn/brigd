@@ -2,8 +2,10 @@ import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunStatus, RunStep, StepAttempt, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot } from '../src/lib/types';
+import type { Attachment, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot } from '../src/lib/types';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
+import { DEFAULT_TAG_COLOR, TAG_COUNT_LIMIT } from '../src/lib/tags';
+import { tagNameKey, validateTag, validateTagIds, validateTagPatch } from './tags';
 import { validateInstruction, validateInstructionPatch, validateInstructionSnapshots } from './instructions';
 import { AppError } from './errors';
 import { validateWorkflowSteps } from './workflows';
@@ -171,6 +173,17 @@ export class Store {
         cwd TEXT NOT NULL, schedule TEXT NOT NULL, interval_minutes INTEGER, first_run_at INTEGER,
         next_run_at INTEGER, paused INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS tags (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL, name_key TEXT UNIQUE NOT NULL, color TEXT NOT NULL DEFAULT '${DEFAULT_TAG_COLOR}',
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS task_tags (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE, position INTEGER NOT NULL,
+        PRIMARY KEY(task_id,tag_id)
+      );
+      CREATE INDEX IF NOT EXISTS tagged_tasks ON task_tags(tag_id,task_id);
       CREATE TABLE IF NOT EXISTS runs (
         id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), provider TEXT NOT NULL,
         cwd TEXT NOT NULL, instruction TEXT NOT NULL, trigger TEXT NOT NULL, scheduled_for INTEGER,
@@ -197,6 +210,7 @@ export class Store {
     // Additive migrations preserve existing task IDs, runs, comments, and CLI sessions.
     this.db.transaction(() => {
       for (const [table, column, definition] of [
+        ['tags', 'color', `TEXT NOT NULL DEFAULT '${DEFAULT_TAG_COLOR}'`],
         ['workers', 'model', 'TEXT'],
         ['workers', 'description', "TEXT NOT NULL DEFAULT ''"],
         ['tasks', 'worker_id', 'TEXT REFERENCES workers(id)'],
@@ -393,6 +407,70 @@ export class Store {
   deleteInstruction(id: string): void {
     const result = this.db.query('DELETE FROM instructions WHERE id=?').run(id);
     if (!result.changes) throw new AppError('Инструкция не найдена', 404);
+  }
+  private mapTag(row: Row): Tag {
+    return { id: row.id, name: row.name, color: row.color ?? DEFAULT_TAG_COLOR, createdAt: row.created_at, updatedAt: row.updated_at };
+  }
+  listTags(): Tag[] {
+    return (this.db.query('SELECT * FROM tags ORDER BY seq').all() as Row[]).map(row => this.mapTag(row));
+  }
+  getTag(id: string): Tag {
+    const row = this.db.query('SELECT * FROM tags WHERE id=?').get(id) as Row | null;
+    if (!row) throw new AppError('Тег не найден', 404);
+    return this.mapTag(row);
+  }
+  private checkTagName(name: string, excludingId: string | null = null): void {
+    if (this.db.query('SELECT id FROM tags WHERE name_key=? AND id IS NOT ?').get(tagNameKey(name), excludingId)) {
+      throw new AppError('Тег с таким названием уже существует', 409);
+    }
+  }
+  createTag(value: TagInput, now = Date.now()): Tag {
+    const input = validateTag(value);
+    return this.db.transaction(() => {
+      this.checkTagName(input.name);
+      if ((this.db.query('SELECT count(*) AS n FROM tags').get() as Row).n >= TAG_COUNT_LIMIT) {
+        throw new AppError(`Можно сохранить не больше ${TAG_COUNT_LIMIT} тегов. Удалите ненужный тег.`, 409);
+      }
+      const id = crypto.randomUUID();
+      this.db.query('INSERT INTO tags(id,name,name_key,color,created_at,updated_at) VALUES (?,?,?,?,?,?)')
+        .run(id, input.name, tagNameKey(input.name), input.color, now, now);
+      return this.getTag(id);
+    }).immediate();
+  }
+  updateTag(id: string, value: Partial<TagInput>, now = Date.now()): Tag {
+    return this.db.transaction(() => {
+      const current = this.getTag(id);
+      const input = { ...current, ...validateTagPatch(value) };
+      this.checkTagName(input.name, id);
+      this.db.query('UPDATE tags SET name=?,name_key=?,color=?,updated_at=? WHERE id=?')
+        .run(input.name, tagNameKey(input.name), input.color, now, id);
+      return this.getTag(id);
+    }).immediate();
+  }
+  deleteTag(id: string): void {
+    const result = this.db.query('DELETE FROM tags WHERE id=?').run(id);
+    if (!result.changes) throw new AppError('Тег не найден', 404);
+  }
+  private taskTags(taskId: string): Tag[] {
+    return (this.db.query('SELECT t.* FROM tags t JOIN task_tags tt ON tt.tag_id=t.id WHERE tt.task_id=? ORDER BY tt.position').all(taskId) as Row[])
+      .map(row => this.mapTag(row));
+  }
+  private replaceTaskTags(taskId: string, value: unknown): void {
+    const ids = validateTagIds(value);
+    // Check the complete assignment before removing any existing relation.
+    for (const id of ids) if (!this.db.query('SELECT id FROM tags WHERE id=?').get(id)) throw new AppError('Выбранный тег не найден. Обновите список тегов.');
+    this.db.query('DELETE FROM task_tags WHERE task_id=?').run(taskId);
+    const insert = this.db.query('INSERT INTO task_tags(task_id,tag_id,position) VALUES (?,?,?)');
+    ids.forEach((id, position) => insert.run(taskId, id, position));
+  }
+  /** Tag assignment is metadata: it never rewrites execution settings or run snapshots. */
+  setTaskTags(id: string, ids: string[], now = Date.now()): Task {
+    return this.db.transaction(() => {
+      this.assertNotArchived(this.getTask(id));
+      this.replaceTaskTags(id, ids);
+      this.db.query('UPDATE tasks SET updated_at=? WHERE id=?').run(now, id);
+      return this.getTask(id);
+    }).immediate();
   }
   private mapWorker(row: Row): Worker {
     return { id: row.id, name: row.name, description: validatedDescription(row.description), provider: row.provider, model: validatedModel(row.model), effort: row.effort,
@@ -676,13 +754,19 @@ export class Store {
     const latest = this.db.query('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1').get(row.id) as Row | null;
     const worker = row.worker_id ? this.getWorker(row.worker_id) : null;
     const hasCompletedRun = !!this.db.query("SELECT 1 FROM runs WHERE task_id=? AND status='completed' LIMIT 1").get(row.id);
-    return { hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd,
+    const tags = this.taskTags(row.id);
+    return { tagIds: tags.map(tag => tag.id), tags, hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd,
       schedule: row.schedule, intervalMinutes: row.interval_minutes, firstRunAt: row.first_run_at,
       nextRunAt: row.next_run_at, paused: !!row.paused, createdAt: row.created_at, updatedAt: row.updated_at, archivedAt: row.archived_at ?? null,
       status: latest?.status ?? 'ready', latestRun: latest ? this.mapRun(latest) : null,
       runCount: (this.db.query('SELECT count(*) AS n FROM runs WHERE task_id = ?').get(row.id) as Row).n };
   }
-  listTasks(): Task[] { return (this.db.query('SELECT * FROM tasks ORDER BY created_at DESC, rowid DESC').all() as Row[]).map(row => this.mapTask(row)); }
+  listTasks(tagId?: string): Task[] {
+    const rows = tagId === undefined
+      ? this.db.query('SELECT * FROM tasks ORDER BY created_at DESC, rowid DESC').all()
+      : this.db.query('SELECT * FROM tasks WHERE id IN (SELECT task_id FROM task_tags WHERE tag_id=?) ORDER BY created_at DESC, rowid DESC').all(validateTagIds([tagId])[0]!);
+    return (rows as Row[]).map(row => this.mapTask(row));
+  }
   getTask(id: string): Task {
     const row = this.db.query('SELECT * FROM tasks WHERE id = ?').get(id) as Row | null;
     if (!row) throw new AppError('Задача не найдена', 404);
@@ -749,6 +833,7 @@ export class Store {
         input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt,
         input.schedule === 'interval' ? (input.firstRunAt ?? now) : null, +input.paused, now, now, worker?.id ?? null, JSON.stringify(steps));
       this.replaceTaskAttachments(id, input.attachmentIds, now);
+      this.replaceTaskTags(id, input.tagIds === undefined ? [] : input.tagIds);
       return this.getTask(id);
     }).immediate();
   }
@@ -765,6 +850,7 @@ export class Store {
       this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=? WHERE id=?`)
         .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), id);
       this.replaceTaskAttachments(id, input.attachmentIds, now);
+      if (input.tagIds !== undefined) this.replaceTaskTags(id, input.tagIds);
       return this.getTask(id);
     }).immediate();
   }

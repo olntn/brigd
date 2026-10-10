@@ -18,6 +18,7 @@ function fixtureDetail(waitingForAnswer = false): TaskDetail {
     error: null, turn: 1, mock: true,
   };
   const task: Task = {
+    tagIds: [], tags: [],
     id: taskId, title: 'Проверка карточки задачи', instruction: run.instruction, workerId: null,
     worker: null, steps: [], provider: 'codex', cwd: run.cwd, schedule: 'manual', intervalMinutes: null,
     firstRunAt: null, paused: false, createdAt: timestamp, updatedAt: timestamp + 5_000,
