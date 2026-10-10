@@ -869,13 +869,17 @@
 
 <dialog class="task-drawer" bind:this={drawer} aria-labelledby="detail-title" oncancel={(event) => { event.preventDefault(); closeDrawer(); }} onclick={(event) => backdropClick(event, drawer, closeDrawer)}>
   <div class="drawer-content">
-    <header class="drawer-topbar"><span><Icon name="terminal" size={16} />Задача <span class="detail-ref">{selectedId?.slice(0, 8).toUpperCase()}</span></span><button class="icon-button" aria-label="Закрыть задачу" disabled={followupSending || tagsSaving} onclick={closeDrawer}><Icon name="close" size={20} /></button></header>
+    <header class="drawer-topbar">
+      <span class="drawer-task-ref"><Icon name="terminal" size={16} />Задача <span class="detail-ref">{selectedId?.slice(0, 8).toUpperCase()}</span></span>
+      {#if selectedTask}<div class="drawer-badges">{@render statusBadge(selectedTask.status)}{#if currentRun?.followup}<span class="followup-type-badge">Дополнительный запрос</span>{/if}{#if visibleWorker(selectedTask)}{@render workerBadge(visibleWorker(selectedTask)!)}{:else}{@render providerBadge(visibleProvider(selectedTask), true)}{/if}{#if selectedTask.latestRun?.mock}<span class="demo-badge">MOCK</span>{/if}{#if workflowSteps(selectedTask).length}<span class="workflow-type-badge">Сложная задача</span>{/if}</div>{/if}
+      <button class="icon-button" aria-label="Закрыть задачу" disabled={followupSending || tagsSaving} onclick={closeDrawer}><Icon name="close" size={20} /></button>
+    </header>
     {#if selectedTask}
       <div class="task-detail-layout">
       <section class="task-information" aria-label="Информация о задаче">
       <div class="drawer-heading">
-        <div class="drawer-badges">{@render statusBadge(selectedTask.status)}{#if currentRun?.followup}<span class="followup-type-badge">Дополнительный запрос</span>{/if}{#if visibleWorker(selectedTask)}{@render workerBadge(visibleWorker(selectedTask)!)}{:else}{@render providerBadge(visibleProvider(selectedTask), true)}{/if}{#if selectedTask.latestRun?.mock}<span class="demo-badge">MOCK</span>{/if}{#if workflowSteps(selectedTask).length}<span class="workflow-type-badge">Сложная задача</span>{/if}</div>
         <h2 id="detail-title">{selectedTask.title}</h2><p class="detail-created">Создано {dateTime(selectedTask.createdAt)}</p>
+        {#if selectedTask.nextRunAt && !selectedTask.paused && selectedTask.archivedAt === null}<p class="detail-next-run"><Icon name="clock" size={14} /><span>Следующий запуск {dateTime(selectedTask.nextRunAt)}</span></p>{/if}
         <div class="detail-actions">
           {#if selectedTask.archivedAt !== null}
             <button class="button primary" disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'restore')}><Icon name={taskBusy ? 'refresh' : 'restore'} size={15} class={taskBusy ? 'spin' : ''} />Восстановить</button>
@@ -896,7 +900,6 @@
       {#if selectedTask.status === 'cancelling'}<div class="cancelling-note" role="status"><Icon name="refresh" size={16} class="spin" /><span>Ожидаем завершения процесса агента и его дочерних процессов. {taskHasCompletedRun(selectedTask) ? 'После остановки можно отправить дополнительный запрос в завершённую сессию.' : 'Новый запуск станет доступен после остановки.'} Уже выполненные действия не откатываются.</span></div>{/if}
       {#if toast}<div class="drawer-notice {toast.type}" role={toast.type === 'error' ? 'alert' : 'status'}><Icon name={toast.type === 'error' ? 'alert' : 'circlecheck'} size={16} /><span>{toast.text}</span><button class="icon-button" aria-label="Закрыть уведомление" onclick={() => toast = null}><Icon name="close" size={14} /></button></div>{/if}
       {#if detailError}<div class="detail-error" role="alert">{detailError}</div>{/if}
-      <div class="task-properties">{#if !selectedTask.steps?.length && (selectedTask.worker || activeStatuses.includes(selectedTask.status))}<div><span><Icon name="spark" size={14} />{activeStatuses.includes(selectedTask.status) ? 'Следующий запуск' : 'Работник'}</span><div>{#if selectedTask.worker}{@render workerBadge(selectedTask.worker, true)}{:else}<strong>Без работника · {providerName(selectedTask.provider)}</strong>{/if}</div></div>{/if}<div><span><Icon name="folder" size={14} />Рабочая папка</span><code title={selectedTask.cwd}>{selectedTask.cwd}</code></div><div><span><Icon name="clock" size={14} />Расписание</span><strong>{selectedTask.schedule === 'interval' ? intervalLabel(selectedTask.intervalMinutes) : 'Ручной запуск'}{#if selectedTask.paused}<span class="paused-label">На паузе</span>{/if}</strong></div>{#if selectedTask.nextRunAt && !selectedTask.paused && selectedTask.archivedAt === null}<div><span><Icon name="arrow" size={14} />Следующий запуск</span><strong>{dateTime(selectedTask.nextRunAt)}</strong></div>{/if}<div><span><Icon name="history" size={14} />Всего запусков</span><strong>{selectedTask.runCount}</strong></div></div>
       <section class="task-tag-section" aria-label="Теги задачи">
         <div class="task-tag-heading"><h3><Icon name="tag" size={14} />Теги</h3>{#if selectedTask.archivedAt === null && !editingTags}<button class="tag-edit-button" data-edit-task-tags disabled={taskBusy} onclick={() => selectedTask && openTaskTags(selectedTask)}><Icon name="edit" size={13} />Изменить теги</button>{/if}</div>
         {#if editingTags && selectedTask.archivedAt === null}

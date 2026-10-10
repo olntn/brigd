@@ -177,10 +177,15 @@ test('profile avatar, task assignment and immutable identity through edit and re
   await page.getByRole('button', { name: 'Доска', exact: true }).click();
   await taskCard.click();
   await expect(drawer.locator('.drawer-badges .worker-identity')).toContainText(name);
-  await expect(drawer.locator('.task-properties')).toContainText(renamed);
-  await expect(drawer.locator('.task-properties')).toContainText(claude.label);
   await expect(drawer.locator('.drawer-badges .worker-description')).toHaveText(publicDescription);
-  await expect(drawer.locator('.task-properties .worker-description')).toHaveText(changedDescription);
+  await drawer.getByRole('button', { name: 'Изменить', exact: true }).click();
+  const assignmentEditor = page.getByRole('dialog', { name: 'Редактировать задачу', exact: true });
+  await expect(assignmentEditor.locator('.worker-assignment')).toContainText(renamed);
+  await expect(assignmentEditor.locator('.worker-assignment')).toContainText(claude.label);
+  await expect(assignmentEditor.locator('.worker-assignment .worker-description')).toHaveText(changedDescription);
+  await noPrivateInstructions(assignmentEditor);
+  await assignmentEditor.getByRole('button', { name: 'Отмена', exact: true }).click();
+  await expect(assignmentEditor).not.toBeVisible();
   await drawer.locator('.current-run-instructions summary').click();
   await expect(drawer.locator('.current-run-instructions .worker-run-settings')).toContainText(codexModel);
   await expect(drawer.locator('.current-run-instructions .worker-run-settings')).not.toContainText(claudeModel);
