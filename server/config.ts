@@ -39,5 +39,7 @@ export function readConfig(root: string, env: Environment = process.env) {
       throw new Error('BRIGD_INTEGRATION_CHECKS: укажите 1–10 непустых команд массивами аргументов');
     }
   }
-  return { mode, port, hostname, allowedHosts, allowedOrigins, dbPath, workspacesDir, maxParallel, maxPerRepository, integrationChecks, dev: setting('DEV') === '1', defaultCwd: setting('DEFAULT_CWD') };
+  const integrator = setting('INTEGRATOR') ?? 'auto';
+  if (!['auto', 'manual'].includes(integrator)) throw new Error('BRIGD_INTEGRATOR должен быть auto или manual');
+  return { mode, port, hostname, allowedHosts, allowedOrigins, dbPath, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile: integrator === 'auto', dev: setting('DEV') === '1', defaultCwd: setting('DEFAULT_CWD') };
 }

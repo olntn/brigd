@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import type { Run } from '../src/lib/types';
 import { AppError } from './errors';
-import { ARTIFACT_PATHSPECS, artifact } from './integration';
+import { ARTIFACT_PATHSPECS, artifact, mergeInProgress, unmergedPaths, unresolvedConflicts } from './integration';
 
 export interface CommitResult { committed: boolean; commit: string | null; branch: string | null; files: string[]; fileCount: number; }
 
@@ -48,15 +48,25 @@ export async function commitWorkspace(run: Run, message: string, paths?: string[
   // Hooks and fsmonitor would execute files the agent controls (husky scripts,
   // for example) outside the sandbox. Worktree results are still checked on merge.
   const base = ['git', `--git-dir=${gitDir}`, `--work-tree=${workTree}`, '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
-  const scope = paths ? paths.map(path => `:(literal)${path}`) : ['.'];
+  // Git cannot commit a subset of files while a merge is in progress, so the
+  // integrator's merge (or a resolved conflict) always commits the whole tree.
+  const merging = mergeInProgress(base, workspace.cwd);
+  if (merging) {
+    if (paths) throw new AppError('A merge is in progress: Git cannot commit a subset of files. Call commit_changes without paths once every conflict is resolved.', 409);
+    let unresolved: string[];
+    try { unresolved = unresolvedConflicts(workTree, unmergedPaths(base, workspace.cwd)); }
+    catch { throw new AppError('Could not inspect the merge state. Nothing was committed.', 409); }
+    if (unresolved.length) throw new AppError(`Conflict markers remain in: ${unresolved.slice(0, 20).join(', ')}. Resolve them before committing; nothing was committed.`, 409);
+  }
+  const scope = merging ? [':/'] : paths ? paths.map(path => `:(literal)${path}`) : ['.'];
   await git([...base, 'add', '-A', '--', ...scope, ...ARTIFACT_PATHSPECS], workspace.cwd);
   const files = (await git([...base, 'diff', '--cached', '--name-only', '-z', '--', ...scope], workspace.cwd)).split('\0').filter(Boolean);
   if (files.some(artifact)) throw new AppError('Task artifact directories are staged. Unstage them; nothing was committed.', 409);
-  if (files.length) {
+  if (files.length || merging) {
     const identity = await git([...base, 'var', 'GIT_AUTHOR_IDENT'], workspace.cwd, true);
     // Paths after -- commit only this scope, never unrelated changes staged elsewhere.
     await git([...base, ...(identity ? [] : ['-c', 'user.name=brigd', '-c', 'user.email=brigd@localhost']),
-      'commit', '-m', message, '-m', `Brigd-Run: ${run.id}`, '--', ...scope], workspace.cwd);
+      'commit', '-m', message, '-m', `Brigd-Run: ${run.id}`, ...(merging ? [] : ['--', ...scope])], workspace.cwd);
   }
   const branch = (await git([...base, 'symbolic-ref', '--quiet', '--short', 'HEAD'], workspace.cwd, true)).trim() || null;
   const commit = (await git([...base, 'rev-parse', '--verify', '--quiet', 'HEAD'], workspace.cwd, true)).trim() || null;
@@ -64,5 +74,5 @@ export async function commitWorkspace(run: Run, message: string, paths?: string[
   const listed: string[] = [];
   let bytes = 0;
   for (const file of files) { bytes += Buffer.byteLength(JSON.stringify(file)) + 1; if (bytes > 2048) break; listed.push(file); }
-  return { committed: files.length > 0, commit, branch, files: listed, fileCount: files.length };
+  return { committed: files.length > 0 || merging, commit, branch, files: listed, fileCount: files.length };
 }

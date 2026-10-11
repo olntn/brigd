@@ -4,7 +4,7 @@
   import WorkerAvatar from './WorkerAvatar.svelte';
   import AvatarEditor from './AvatarEditor.svelte';
   import { defaultAvatarCrop, exportAvatar, type AvatarCrop } from './avatar';
-  import { effortOptions, effortLabel, modelLabel, normalizeModel, MODEL_ID_LIMIT } from './workers';
+  import { effortOptions, effortLabel, modelLabel, normalizeModel, INTEGRATOR_WORKER, MODEL_ID_LIMIT } from './workers';
   import type { Effort, ModelCatalogEntry, Provider, Worker, WorkerInput } from './types';
 
   let { workers, loading, error, retry, onchange, notify, models, modelsLoading, modelsError, retryModels }: {
@@ -259,6 +259,13 @@
 {#if loading}<div class="detail-loading" role="status"><Icon name="refresh" class="spin" />Загружаем работников…</div>
 {:else if activeWorkers.length}<div class="workers-grid">{#each activeWorkers as worker (worker.id)}{@render workerCard(worker)}{/each}</div>
 {:else if !error}<div class="no-results"><span class="empty-icon"><Icon name="spark" size={27} /></span><h2>Знакомьтесь, ваша будущая команда</h2><p>Создайте работника для обзоров кода, исследований или ежедневных задач.</p><button class="button primary" onclick={() => openEditor()}><Icon name="plus" size={16} />Создать первого работника</button></div>{/if}
+<section class="builtin-section" aria-label="Встроенные работники">
+  <h2 class="builtin-heading">Встроенный работник</h2>
+  <article class="worker-card builtin-worker" aria-label={'Встроенный работник: ' + INTEGRATOR_WORKER.name}>
+    <div class="worker-card-heading"><WorkerAvatar name={INTEGRATOR_WORKER.name} size={64} /><div><h2>{INTEGRATOR_WORKER.name}</h2><p class="worker-description">{INTEGRATOR_WORKER.description}</p><p>Провайдер, модель и усилия — как у запуска, результат которого объединяется</p></div><span class="worker-archived-label">Встроенный</span></div>
+    <p class="builtin-worker-note">Запускается сам при конфликте слияния (или кнопкой «Поручить интегратору» в карточке задачи), разрешает конфликты в worktree задачи, после чего brigd заново проверяет и переносит результат. Профиль нельзя изменить, назначить задаче или архивировать.</p>
+  </article>
+</section>
 {#if archivedWorkers.length}<section class="archive-section"><button class="archive-toggle" aria-expanded={archivedVisible} onclick={() => archivedVisible = !archivedVisible}><Icon name={archivedVisible ? 'down' : 'chevron'} size={16} /><strong>Архив работников</strong></button>{#if archivedVisible}<p class="workers-archive-help">Архивные работники сохраняются в назначенных задачах и истории; их расписания продолжают работать. Для новых назначений восстановите профиль.</p><div class="workers-grid">{#each archivedWorkers as worker (worker.id)}{@render workerCard(worker)}{/each}</div>{/if}</section>{/if}
 
 <dialog bind:this={dialog} class="editor-dialog worker-editor" aria-labelledby="worker-editor-title" oncancel={(event) => { event.preventDefault(); closeEditor(); }} onclick={backdropClick}>

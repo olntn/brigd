@@ -591,14 +591,14 @@
     finally { pending = pending.filter(id => id !== task.id); }
   }
 
-  async function integrationAction(runId: string, action: 'integrate' | 'cancel-integration', acknowledgement: boolean) {
+  async function integrationAction(runId: string, action: 'integrate' | 'cancel-integration' | 'reconcile', acknowledgement: boolean) {
     const task = selectedTask;
     const context = drawerContext;
     if (!task || pending.includes(task.id)) return;
     pending = [...pending, task.id];
     try {
       await api(`/api/runs/${encodeURIComponent(runId)}/${action}`, { method: 'POST', body: JSON.stringify({ acknowledgeInterruption: acknowledgement }) });
-      notifyForTask(task.id, context, action === 'integrate' ? 'Результат поставлен в очередь проверки и слияния' : 'Остановка слияния запрошена');
+      notifyForTask(task.id, context, action === 'integrate' ? 'Результат поставлен в очередь проверки и слияния' : action === 'reconcile' ? 'Интегратор объединит результат с целевой веткой и повторит проверку' : 'Остановка слияния запрошена');
       await refresh();
     } catch (error) { notifyForTask(task.id, context, error instanceof Error ? error.message : 'Не удалось изменить состояние слияния', 'error'); }
     finally { pending = pending.filter(id => id !== task.id); }
@@ -671,7 +671,7 @@
   }
 
   function recipientLabel(target: FollowupTarget): string {
-    return `${target.worker?.name ?? providerName(target.provider)}${target.stageIndex != null ? ` · Этап ${target.stageIndex + 1}: ${target.stageTitle}` : ''} · ${dateTime(target.startedAt)} · ${target.isFollowup ? 'Доп. запрос' : 'Запуск'} ${target.sourceRunId.slice(0, 6)}${target.sessionId ? '' : ' · Сессия не сохранена'}`;
+    return `${target.worker?.name ?? providerName(target.provider)}${target.stageIndex != null ? ` · Этап ${target.stageIndex + 1}: ${target.stageTitle}` : ''} · ${dateTime(target.startedAt)} · ${target.isFollowup ? 'Доп. запрос' : target.isReconcile ? 'Конфликт' : 'Запуск'} ${target.sourceRunId.slice(0, 6)}${target.sessionId ? '' : ' · Сессия не сохранена'}`;
   }
 
   function dateTime(timestamp: number | null, short = false): string {
@@ -690,9 +690,12 @@
   function canStartManual(task: Task) { return !taskIsOccupied(task) && !taskHasCompletedRun(task); }
   function workflowSteps(task: Task) { const saved = runWorkflowSteps(task.latestRun); return saved.length ? saved : task.steps ?? []; }
   function workflowProgress(task: Task) { const steps = workflowSteps(task); return `${runWorkflowSteps(task.latestRun).filter(step => step.status === 'completed').length} из ${steps.length} этапов завершено`; }
-  function visibleWorker(task: Task) { return (taskIsOccupied(task) || !!task.latestRun?.steps?.length || !!task.latestRun?.followup) && task.latestRun ? task.latestRun.worker : task.worker ?? workers.find(worker => worker.id === task.steps?.[0]?.workerId) ?? null; }
+  function visibleWorker(task: Task) { return (taskIsOccupied(task) || !!task.latestRun?.steps?.length || !!task.latestRun?.followup || !!task.latestRun?.reconcile) && task.latestRun ? task.latestRun.worker : task.worker ?? workers.find(worker => worker.id === task.steps?.[0]?.workerId) ?? null; }
   function taskProviders(task: Task): Provider[] { return [visibleProvider(task), ...(task.steps ?? []).flatMap(step => { const worker = workers.find(item => item.id === step.workerId); return worker ? [worker.provider] : []; }), ...runWorkflowSteps(task.latestRun).map(step => step.worker.provider)]; }
-  function visibleProvider(task: Task) { return (taskIsOccupied(task) || !!task.latestRun?.steps?.length || !!task.latestRun?.followup) && task.latestRun ? task.latestRun.provider : task.provider; }
+  function visibleProvider(task: Task) { return (taskIsOccupied(task) || !!task.latestRun?.steps?.length || !!task.latestRun?.followup || !!task.latestRun?.reconcile) && task.latestRun ? task.latestRun.provider : task.provider; }
+  /** A finished integrator turn without its own merge keeps the conflicted result's merge controls in reach. */
+  let sourceIntegration = $derived(currentRun?.reconcile && !currentRun.integration && !activeStatuses.includes(currentRun.status)
+    ? detail?.runs.find(run => run.id === currentRun!.reconcile!.sourceRunId)?.integration ?? null : null);
   function attachmentAuthor(file: Attachment) {
     if (file.source === 'user') return 'Вы';
     const run = detail?.runs.find(item => item.id === file.runId);
@@ -790,7 +793,8 @@
       <p class="card-description">{task.latestRun?.summary || task.instruction}</p>
       {@render taskTags(task)}
       {#if workflowSteps(task).length}<div class="card-workflow-progress"><Icon name="list" size={14} /><span>{workflowProgress(task)}</span></div>{/if}
-      {#if task.latestRun?.followup}<div class="card-followup-label"><Icon name="message" size={14} /><span>Дополнительный запрос{#if followupStage(task.latestRun)} · Этап {followupStage(task.latestRun)!.index + 1}{/if}</span></div>{/if}
+      {#if task.latestRun?.followup}<div class="card-followup-label"><Icon name="message" size={14} /><span>Дополнительный запрос{#if followupStage(task.latestRun)} · Этап {followupStage(task.latestRun)!.index + 1}{/if}</span></div>
+      {:else if task.latestRun?.reconcile}<div class="card-followup-label"><Icon name="refresh" size={14} /><span>Разрешение конфликта слияния</span></div>{/if}
       {#if task.status === 'cancelling'}<div class="card-cancelling"><Icon name="refresh" size={13} class="spin" />Останавливается</div>{/if}
       {#if task.status === 'waiting_input'}<div class="card-signal"><Icon name="message" size={13} /> Агент ждёт вашего ответа</div>{/if}
       {#if task.status === 'queued'}<div class="card-signal"><Icon name="clock" size={13} /> Ожидает свободного места для запуска</div>{/if}
@@ -896,7 +900,7 @@
   <div class="drawer-content">
     <header class="drawer-topbar">
       <span class="drawer-task-ref"><Icon name="terminal" size={16} />Задача <span class="detail-ref">{selectedId?.slice(0, 8).toUpperCase()}</span></span>
-      {#if selectedTask}<div class="drawer-badges">{@render statusBadge(selectedTask.status)}{#if currentRun?.followup}<span class="followup-type-badge">Дополнительный запрос</span>{/if}{#if visibleWorker(selectedTask)}{@render workerBadge(visibleWorker(selectedTask)!)}{:else}{@render providerBadge(visibleProvider(selectedTask), true)}{/if}{#if selectedTask.latestRun?.mock}<span class="demo-badge">MOCK</span>{/if}{#if workflowSteps(selectedTask).length}<span class="workflow-type-badge">Сложная задача</span>{/if}</div>{/if}
+      {#if selectedTask}<div class="drawer-badges">{@render statusBadge(selectedTask.status)}{#if currentRun?.followup}<span class="followup-type-badge">Дополнительный запрос</span>{/if}{#if currentRun?.reconcile}<span class="followup-type-badge">Разрешение конфликта</span>{/if}{#if visibleWorker(selectedTask)}{@render workerBadge(visibleWorker(selectedTask)!)}{:else}{@render providerBadge(visibleProvider(selectedTask), true)}{/if}{#if selectedTask.latestRun?.mock}<span class="demo-badge">MOCK</span>{/if}{#if workflowSteps(selectedTask).length}<span class="workflow-type-badge">Сложная задача</span>{/if}</div>{/if}
       <button class="icon-button" aria-label="Закрыть задачу" disabled={followupSending || tagsSaving} onclick={closeDrawer}><Icon name="close" size={20} /></button>
     </header>
     {#if selectedTask}
@@ -947,12 +951,20 @@
           <p class="workflow-help">Продолжение сохранённой сессии. Остальные этапы не запускаются.</p>
         </section>
         {#if currentRun.followup.workflow?.steps.length}<div class="current-workflow"><WorkflowChecklist run={currentRun} historical /></div>{/if}
+      {:else if currentRun?.reconcile}
+        <section class="current-followup" aria-label="Разрешение конфликта">
+          <div class="followup-heading"><h3>Разрешение конфликта слияния</h3>{@render statusBadge(currentRun.status)}</div>
+          <p class="followup-stage">{currentRun.worker?.name ?? 'Интегратор'} · целевая ветка {currentRun.reconcile.targetBranch}{#if currentRun.reconcile.depth > 1} · попытка {currentRun.reconcile.depth}{/if}</p>
+          {#if currentRun.reconcile.conflicts.length}<p class="followup-request">{currentRun.reconcile.conflicts.join('\n')}</p>{/if}
+          <p class="workflow-help">Целевая ветка объединена в worktree задачи. Интегратор разрешает конфликты в файлах, затем brigd создаёт merge-коммит и заново проверяет результат.</p>
+        </section>
       {:else if currentRun?.steps?.length}<div class="current-workflow"><WorkflowChecklist run={currentRun} /></div>{/if}
       {#if selectedTask.steps?.length}
         <details class="workflow-template" open={!currentRun}><summary>{currentRun && selectedTask.schedule === 'interval' ? 'План следующего запуска по расписанию' : 'План задачи'}</summary><p class="workflow-help">Все работники используют общую рабочую папку, цель задачи и общие инструкции. Этапы идут по порядку.</p><ol>{#each selectedTask.steps as step}{@const worker = workers.find(worker => worker.id === step.workerId)}<li><strong>{step.title}</strong><div class="workflow-template-worker">{#if worker}<WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={36} /><span>{worker.name}{#if worker.description?.trim()}<small class="worker-description">{worker.description}</small>{/if}</span>{:else}<span>Работник недоступен</span>{/if}</div><p>{step.instruction}</p></li>{/each}</ol></details>
       {/if}
       {#if currentRun}<div class="current-run-instructions">{@render instructionSnapshot(currentRun)}</div>{/if}
-      {#if currentRun?.integration}<IntegrationPanel integration={currentRun.integration} busy={taskBusy} historical={selectedTask.archivedAt !== null} onaction={(action, acknowledgement) => integrationAction(currentRun!.id, action, acknowledgement)} />{/if}
+      {#if currentRun?.integration}<IntegrationPanel integration={currentRun.integration} busy={taskBusy} historical={selectedTask.archivedAt !== null} onaction={(action, acknowledgement) => integrationAction(currentRun!.id, action, acknowledgement)} />
+      {:else if currentRun?.reconcile && !activeStatuses.includes(currentRun.status) && sourceIntegration}<IntegrationPanel integration={sourceIntegration} busy={taskBusy} historical={selectedTask.archivedAt !== null} onaction={(action, acknowledgement) => integrationAction(currentRun!.reconcile!.sourceRunId, action, acknowledgement)} />{/if}
       {#if currentRun?.error}<div class="run-error"><Icon name="alert" size={17} /><div><strong>{labels[currentRun.status]}</strong><p>{currentRun.error}</p></div></div>{/if}
       {#if currentRun?.status === 'interrupted' && !currentRun.sessionId && !currentRun.steps?.length}<div class="resume-warning">Идентификатор сессии не сохранён. {taskHasCompletedRun(selectedTask) ? 'Продолжение недоступно. Для работы в новой сессии создайте отдельную задачу.' : 'Продолжение недоступно; отмените запуск, чтобы начать заново.'}</div><label class="interruption-confirm"><input type="checkbox" bind:checked={acknowledgeInterruption} disabled={taskBusy} /><span>Я проверил(а), что предыдущий процесс CLI остановлен</span></label>{/if}
       {#if currentRun?.status === 'interrupted' && currentRun.steps?.slice((currentRun.currentStepIndex ?? -1) + 1).some(step => step.status === 'cancelled')}<div class="cancelling-note" role="status"><Icon name="alert" size={16} /><span>Отмена уже запрошена. Продолжение касается только текущего этапа; остальные этапы отменены.</span></div>{/if}
@@ -980,7 +992,7 @@
       {:else if detailTab === 'logs'}
         <div id="logs-panel" tabindex="0" role="tabpanel" aria-labelledby="logs-tab" class="logs-panel"><TaskLogs logs={activity.logs} runs={detail.runs} taskId={selectedTask.id} author={attachmentAuthor} /></div>
       {:else}
-        <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name={run.followup ? "message" : "play"} size={14} />{run.followup ? "Дополнительный запрос" : "Запуск"} {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{#if run.worker}{@render workerBadge(run.worker, true)}{:else}{@render providerBadge(run.provider, true)}{/if}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'followup' ? 'Из обсуждения' : run.trigger === 'schedule' ? 'По расписанию' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.followup}<div class="run-followup-request"><strong>Запрос{#if followupStage(run)} · Этап {followupStage(run)!.index + 1}: {followupStage(run)!.title}{/if}</strong><p>{run.followup.request || 'Запрос с вложениями'}</p></div>{/if}{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}{#if run.steps?.length}<WorkflowChecklist {run} />{:else if run.followup?.workflow?.steps.length}<WorkflowChecklist {run} historical />{/if}{@render instructionSnapshot(run)}{#if run.integration}<IntegrationPanel integration={run.integration} historical />{/if}<div class="run-details">Ход {run.turn}{#if run.worker}<span> · Усилия: {effortLabel(run.worker.effort)}</span>{/if}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
+        <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name={run.followup ? "message" : run.reconcile ? "refresh" : "play"} size={14} />{run.followup ? "Дополнительный запрос" : run.reconcile ? "Разрешение конфликта" : "Запуск"} {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{#if run.worker}{@render workerBadge(run.worker, true)}{:else}{@render providerBadge(run.provider, true)}{/if}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'followup' ? 'Из обсуждения' : run.trigger === 'reconcile' ? 'Конфликт слияния' : run.trigger === 'schedule' ? 'По расписанию' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.followup}<div class="run-followup-request"><strong>Запрос{#if followupStage(run)} · Этап {followupStage(run)!.index + 1}: {followupStage(run)!.title}{/if}</strong><p>{run.followup.request || 'Запрос с вложениями'}</p></div>{:else if run.reconcile}<div class="run-followup-request"><strong>Целевая ветка: {run.reconcile.targetBranch}</strong>{#if run.reconcile.conflicts.length}<ul class="integration-conflicts">{#each run.reconcile.conflicts as path}<li><code>{path}</code></li>{/each}</ul>{/if}</div>{/if}{#if run.reconcile}<div class="run-followup-request"><strong>Целевая ветка {run.reconcile.targetBranch}{#if run.reconcile.depth > 1} · попытка {run.reconcile.depth}{/if}</strong>{#if run.reconcile.conflicts.length}<p>{run.reconcile.conflicts.join('\n')}</p>{/if}</div>{/if}{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}{#if run.steps?.length}<WorkflowChecklist {run} />{:else if run.followup?.workflow?.steps.length}<WorkflowChecklist {run} historical />{/if}{@render instructionSnapshot(run)}{#if run.integration}<IntegrationPanel integration={run.integration} historical />{/if}<div class="run-details">Ход {run.turn}{#if run.worker}<span> · Усилия: {effortLabel(run.worker.effort)}</span>{/if}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
       {/if}
       {#if runCanResume && !interruptedWithoutSession}
         <form class="resume-panel" hidden={detailTab !== 'conversation'} onpaste={(event) => answerComposer?.handlePaste(event)} onsubmit={(event) => { event.preventDefault(); if (selectedTask && (answer.trim() || answerAttachmentCount || currentRun?.status === 'interrupted')) void act(selectedTask, 'resume', answer); }}>

@@ -727,6 +727,8 @@ dialog::backdrop { background: var(--overlay); }
 .workers-note { display: flex; gap: 10px; align-items: flex-start; padding: 16px; margin-bottom: 24px; border: 1px solid var(--line); background: var(--soft); border-radius: var(--radius-md); color: var(--secondary); }
 .workers-note svg { color: var(--accent-text); margin-top: 3px; }.workers-note p { margin: 0; font-size: .85rem; line-height: 1.8; min-width: 0; overflow-wrap: anywhere; }
 .workers-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 25rem), 1fr)); gap: 18px; align-items: start; }
+.builtin-workers { margin-top: 28px; }.builtin-workers > h2 { margin: 0 0 12px; font-size: 1rem; line-height: 1.6; }
+.builtin-worker { background: var(--subtle); }.builtin-worker-note { margin: 12px 0 0; font-size: .85rem; line-height: 1.7; color: var(--secondary); overflow-wrap: anywhere; }
 .worker-card { min-width: 0; padding: 20px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
 .worker-card-heading { display: flex; align-items: flex-start; gap: 15px; flex-wrap: wrap; }.worker-card-heading > div { flex: 1 1 min(10rem, 50%); min-width: 0; }
 .worker-card h2 { margin: 0; font-size: 1.15rem; line-height: 1.5; font-weight: 550; overflow-wrap: anywhere; }.worker-card-heading p { margin: 5px 0 0; color: var(--muted); font-size: .77rem; overflow-wrap: anywhere; }.worker-card-heading p > span:not(.worker-model-label) { padding-inline: 4px; }
@@ -942,6 +944,13 @@ dialog::backdrop { background: var(--overlay); }
 .integration-panel h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 14px; }
 .integration-panel p { margin: 8px 0; font-size: 13px; line-height: 1.5; }
 .integration-panel code { font-size: 12px; overflow-wrap: anywhere; }
+.integration-conflicts { margin: 0 0 8px; padding-left: 20px; font-size: 13px; line-height: 1.6; }
+.integration-conflicts code { overflow-wrap: anywhere; }
+.builtin-section { margin-top: 24px; }
+.builtin-heading { margin: 0 0 12px; font-size: 1rem; line-height: 1.6; font-weight: 600; }
+.builtin-worker-note { margin: 12px 0 0; color: var(--secondary); font-size: .85rem; line-height: 1.7; overflow-wrap: anywhere; }
+.integration-conflicts { margin: 6px 0 10px; padding-left: 20px; font-size: 13px; line-height: 1.7; }
+.integration-conflicts code { overflow-wrap: anywhere; }
 .integration-checks { padding-left: 20px; font-size: 13px; }
 .integration-checks code { display: block; margin: 4px 0 8px; }
 .integration-path { display: block; padding-top: 8px; }

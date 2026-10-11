@@ -21,9 +21,13 @@ afterEach(async () => {
   for (const call of agent.calls) call.reject(new Error('cleanup'));
   await engine.shutdown(); store.close(); rmSync(folder, { recursive: true, force: true });
 });
-async function configure(argv: string[][], maxPerRepository = 1) {
+async function configure(argv: string[][], maxPerRepository = 1, autoReconcile = true) {
   await engine.shutdown();
-  engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces'), argv), maxParallel: 2, maxPerRepository });
+  engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces'), argv), maxParallel: 2, maxPerRepository, autoReconcile });
+}
+function conflictingTarget(content: string) {
+  writeFileSync(join(root, 'src/value.txt'), content); git(root, 'add', '.'); git(root, 'commit', '-m', 'target edit');
+  return git(root, 'rev-parse', 'HEAD');
 }
 async function start() {
   const run = engine.start(store.createTask(taskInput(root)).id);
@@ -68,6 +72,7 @@ test('failed checks preserve the target and retain the candidate with failure de
 });
 
 test('a textual merge conflict is retained and does not advance the target', async () => {
+  await configure(checks, 1, false);
   const run = await start();
   writeFileSync(join(root, 'src/value.txt'), 'conflicting target\n'); git(root, 'add', '.'); git(root, 'commit', '-m', 'target edit');
   const target = git(root, 'rev-parse', 'HEAD'); complete(run);
@@ -75,6 +80,99 @@ test('a textual merge conflict is retained and does not advance the target', asy
   expect(integration.status).toBe('conflict'); expect(git(root, 'rev-parse', 'HEAD')).toBe(target);
   expect(git(integration.candidatePath!, 'ls-files', '-u')).not.toBe('');
   expect(store.getTask(run.taskId).status).toBe('merge_conflict');
+});
+
+test('a conflict is handed to the built-in integrator in the same worktree and its resolution becomes a checked merge commit', async () => {
+  const run = await start();
+  conflictingTarget('conflicting target\n'); complete(run);
+  await until(() => agent.calls.length === 2);
+  const call = agent.calls[1]!;
+  expect(call.input).toMatchObject({ cwd: run.workspace!.cwd, provider: 'codex', instruction: 'Update the project.', reconcile: { targetBranch: 'main', conflicts: ['src/value.txt'], resultSummary: 'Synthetic result.' } });
+  expect(call.input.sessionId).toBeUndefined(); expect(call.input.followup).toBeUndefined();
+  const integrator = store.getTask(run.taskId).latestRun!;
+  expect(integrator).toMatchObject({ trigger: 'reconcile', status: 'running', workerId: null, worker: { id: 'brigd-integrator', name: 'Интегратор', provider: 'codex', model: null },
+    reconcile: { sourceRunId: run.id, targetBranch: 'main', conflicts: ['src/value.txt'], depth: 1 }, workspace: { id: run.workspace!.id } });
+  expect(store.integrationForRun(run.id)).toMatchObject({ status: 'conflict', conflicts: ['src/value.txt'] });
+  expect(store.integrationForRun(run.id)!.error).toContain('передан Интегратору');
+  expect(readFileSync(join(run.workspace!.path, 'src/value.txt'), 'utf8')).toContain('<<<<<<<');
+  expect(store.getTask(run.taskId).status).toBe('running');
+  writeFileSync(join(run.workspace!.path, 'src/value.txt'), 'resolved by integrator\n'); call.resolve(outcome('integrator-session'));
+  const merged = await settled(integrator);
+  expect(merged.status).toBe('merged'); expect(git(root, 'rev-parse', 'HEAD')).toBe(merged.resultCommit!);
+  expect(readFileSync(join(root, 'src/value.txt'), 'utf8')).toBe('resolved by integrator\n');
+  expect(git(run.workspace!.path, 'log', '-1', '--format=%P', merged.sourceCommit!).split(' ')).toHaveLength(2);
+  expect(git(run.workspace!.path, 'log', '-1', '--format=%s', merged.sourceCommit!)).toBe(`brigd: объединение main в brigd/run-${run.id}`);
+  expect(store.getTask(run.taskId).status).toBe('completed'); expect(store.getRun(integrator.id).sessionId).toBe('integrator-session');
+  expect(store.integrationForRun(run.id)!.status).toBe('conflict');
+  // The integrator's saved session can be continued like any other completed run.
+  const followup = engine.followup(run.taskId, { sourceRunId: integrator.id, sourceStepIndex: null, body: 'Keep the target version of the comment.', attachmentIds: [], requestId: crypto.randomUUID() });
+  expect(followup).toMatchObject({ trigger: 'followup', workerId: null, worker: { id: 'brigd-integrator' }, sessionId: 'integrator-session' });
+  await until(() => agent.calls.length === 3);
+  expect(agent.calls[2]!.input).toMatchObject({ sessionId: 'integrator-session', cwd: run.workspace!.cwd });
+});
+
+test('manual mode keeps the conflict until the HTTP hand-over, which is refused while the integrator is busy or after success', async () => {
+  await configure(checks, 1, false);
+  const run = await start(); conflictingTarget('conflicting target\n'); complete(run);
+  expect((await settled(run)).status).toBe('conflict'); await Bun.sleep(40); expect(agent.calls).toHaveLength(1);
+  expect(store.getTask(run.taskId).status).toBe('merge_conflict');
+  const handler = createHandler(engine, { port: 4310, root: folder, startedAt: 0 });
+  const post = (action: string) => handler(new Request(`http://127.0.0.1:4310/api/runs/${run.id}/${action}`, { method: 'POST', headers: { origin: 'http://127.0.0.1:4310', 'content-type': 'application/json' }, body: '{}' }));
+  const created = await post('reconcile');
+  expect(created.status).toBe(201); expect(await created.json()).toMatchObject({ trigger: 'reconcile', reconcile: { sourceRunId: run.id } });
+  await until(() => agent.calls.length === 2);
+  expect((await post('reconcile')).status).toBe(409); expect((await post('integrate')).status).toBe(409);
+  writeFileSync(join(run.workspace!.path, 'src/value.txt'), 'resolved\n'); agent.calls[1]!.resolve(outcome('integrator-session'));
+  await until(() => store.getTask(run.taskId).status === 'completed');
+  expect((await post('reconcile')).status).toBe(409);
+});
+
+test('repeated conflicts stop after three reconciliations and leave the conflict to a human', async () => {
+  const run = await start(); conflictingTarget('target 1\n'); complete(run);
+  let latest = run;
+  for (let depth = 1; depth <= 3; depth++) {
+    await until(() => agent.calls.length === depth + 1);
+    latest = store.detail(run.taskId).runs.find(candidate => candidate.reconcile?.depth === depth)!;
+    expect(latest.reconcile!.sourceRunId).toBe(depth === 1 ? run.id : store.detail(run.taskId).runs.find(candidate => candidate.reconcile?.depth === depth - 1)!.id);
+    expect(store.getTask(run.taskId).latestRun!.id).toBe(latest.id);
+    conflictingTarget(`target ${depth + 1}\n`);
+    writeFileSync(join(latest.workspace!.path, 'src/value.txt'), `resolved ${depth}\n`); agent.calls[depth]!.resolve(outcome(`integrator-${depth}`));
+    await settled(latest);
+  }
+  const last = store.integrationForRun(latest.id)!;
+  expect(last.status).toBe('conflict'); expect(last.error).toContain('3 раза'); expect(agent.calls).toHaveLength(4);
+  expect(store.getTask(run.taskId).status).toBe('merge_conflict'); expect(readFileSync(join(root, 'src/value.txt'), 'utf8')).toBe('target 4\n');
+  expect(() => engine.reconcile(latest.id)).toThrow('3 раза');
+});
+
+test('conflict markers left in the source worktree are reported as a conflict; a resolved merge is committed on retry without an agent', async () => {
+  await configure(checks, 1, false);
+  const run = await start(); const target = conflictingTarget('conflicting target\n'); complete(run);
+  expect((await settled(run)).status).toBe('conflict');
+  Bun.spawnSync(['git', '-C', run.workspace!.path, 'merge', 'main'], { stdout: 'ignore', stderr: 'ignore' });
+  engine.integrate(run.id);
+  const again = await settled(run);
+  expect(again).toMatchObject({ status: 'conflict', attempt: 2, conflicts: ['src/value.txt'] }); expect(again.error).toContain('маркеры');
+  expect(git(root, 'rev-parse', 'HEAD')).toBe(target);
+  writeFileSync(join(run.workspace!.path, 'src/value.txt'), 'by hand\n');
+  engine.integrate(run.id);
+  const merged = await settled(run);
+  expect(merged.status).toBe('merged'); expect(readFileSync(join(root, 'src/value.txt'), 'utf8')).toBe('by hand\n');
+  expect(git(root, 'log', '-1', '--format=%P', merged.sourceCommit!).split(' ')).toHaveLength(2); expect(agent.calls).toHaveLength(1);
+});
+
+test('an integrator prepared after the target was repaired finishes without an agent and merges', async () => {
+  await configure(checks, 1, false);
+  const run = await start(); conflictingTarget('conflicting target\n'); complete(run);
+  expect((await settled(run)).status).toBe('conflict');
+  git(root, 'revert', '--no-edit', 'HEAD');
+  const integrator = engine.reconcile(run.id);
+  expect(integrator.trigger).toBe('reconcile');
+  const merged = await settled(integrator);
+  expect(merged.status).toBe('merged'); expect(agent.calls).toHaveLength(1);
+  expect(store.getRun(integrator.id)).toMatchObject({ status: 'completed', sessionId: null });
+  expect(readFileSync(join(root, 'src/value.txt'), 'utf8')).toBe('worker result\n');
+  expect(git(run.workspace!.path, 'status', '--porcelain')).toBe('');
 });
 
 test('dirty target files survive a blocked transfer and explicit retry rechecks before applying', async () => {

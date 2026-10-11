@@ -149,10 +149,22 @@ export interface RunFollowup {
   /** Historical context only. These stages are never scheduled again. */
   workflow: { steps: RunStep[]; currentStepIndex: number } | null;
 }
+/** A built-in integrator turn that resolves a merge conflict of an earlier result in its worktree. */
+export interface RunReconcile {
+  sourceRunId: string;
+  integrationId: string;
+  targetBranch: string;
+  targetCommit: string | null;
+  /** Conflicted paths relative to the worktree root; refreshed when the merge is prepared. */
+  conflicts: string[];
+  /** 1 for the first resolution of a result; grows when a resolved result conflicts again. */
+  depth: number;
+}
 export interface Run {
   integration?: Integration | null;
   workspace?: WorkspaceSnapshot | null;
   followup?: RunFollowup | null;
+  reconcile?: RunReconcile | null;
   inputAttachments?: Attachment[];
   steps: RunStep[];
   currentStepIndex: number | null;
@@ -164,7 +176,7 @@ export interface Run {
   provider: Provider;
   cwd: string;
   instruction: string;
-  trigger: 'manual' | 'schedule' | 'followup';
+  trigger: 'manual' | 'schedule' | 'followup' | 'reconcile';
   scheduledFor: number | null;
   status: RunStatus;
   sessionId: string | null;
@@ -204,6 +216,8 @@ export interface Integration {
   targetCommit: string | null;
   resultCommit: string | null;
   candidatePath: string | null;
+  /** Paths that failed to merge automatically, relative to the repository root. */
+  conflicts?: string[];
   checks: { argv: string[]; exitCode: number }[];
   error: string | null;
   updatedAt: number;

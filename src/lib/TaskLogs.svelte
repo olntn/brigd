@@ -28,7 +28,7 @@
         <Icon name="chevron" size={15} class="log-chevron" />
       </summary>
       <div class="log-details">
-        {#if run}<p class="log-run-reference">{run.followup ? 'Дополнительный запрос' : 'Запуск'} {run.id.slice(0, 6)}</p>{/if}
+        {#if run}<p class="log-run-reference">{run.followup ? 'Дополнительный запрос' : run.reconcile ? 'Разрешение конфликта' : 'Запуск'} {run.id.slice(0, 6)}</p>{/if}
         {#each entry.details as line}<p>{line}</p>{:else}<p>Дополнительные детали для этого события не сохранены.</p>{/each}
         <AttachmentList attachments={entry.attachments ?? []} {taskId} label="Вложения события" {author} />
       </div>

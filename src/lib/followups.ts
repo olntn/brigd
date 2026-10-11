@@ -11,6 +11,8 @@ export interface FollowupTarget {
   stageIndex: number | null;
   stageTitle: string | null;
   isFollowup: boolean;
+  /** The saved session belongs to the built-in integrator rather than an assigned worker. */
+  isReconcile: boolean;
 }
 
 /** Frozen workflow context is display-only; a follow-up always has zero executable steps. */
@@ -43,14 +45,14 @@ export function followupTargets(runs: Run[]): FollowupTarget[] {
         if (step.status !== 'completed') continue;
         add({ key: `${run.id}:${index}`, sourceRunId: run.id, sourceStepIndex: index,
           worker: step.worker, provider: step.worker.provider, sessionId: step.sessionId,
-          startedAt: run.startedAt, stageIndex: index, stageTitle: step.title, isFollowup: false });
+          startedAt: run.startedAt, stageIndex: index, stageTitle: step.title, isFollowup: false, isReconcile: false });
       }
     } else {
       const stage = followupStage(run);
       add({ key: `${run.id}:scalar`, sourceRunId: run.id, sourceStepIndex: null,
         worker: run.worker, provider: run.provider, sessionId: run.sessionId,
         startedAt: run.startedAt, stageIndex: stage?.index ?? null, stageTitle: stage?.title ?? null,
-        isFollowup: !!run.followup });
+        isFollowup: !!run.followup, isReconcile: !!run.reconcile });
     }
   }
   return result;
