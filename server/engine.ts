@@ -1,11 +1,11 @@
-import type { FollowupInput, Integration, Run } from '../src/lib/types';
+import type { AutopilotInput, AutopilotOverview, FollowupInput, Integration, Run } from '../src/lib/types';
 import { startAgent, buildPrompt, type AgentHandle, type AgentInput, type AgentCallbacks } from './adapter';
 import { AppError, Store, runFence, type RunFence } from './store';
 import { validateEnvelope, validateSessionId } from './protocol';
 import { workflowContext } from './workflows';
 import { createTaskBridge } from './task-mcp';
 import { dirname, join, resolve } from 'node:path';
-import { DirectWorkspaces, GitWorkspaces, WorkspaceError, type WorkspaceProvider } from './workspaces';
+import { DirectWorkspaces, GitWorkspaces, WorkspaceError, type RepositoryLocation, type WorkspaceProvider } from './workspaces';
 import { GitIntegrator, type Integrator } from './integration';
 
 export type AgentFactory = (input: AgentInput, callbacks: AgentCallbacks) => AgentHandle;
@@ -25,6 +25,8 @@ export class Engine {
   private readonly integrator: Integrator;
   private readonly autoReconcile: boolean;
   private integrationHandles = new Map<string, { abort: AbortController; settled: Promise<void> }>();
+  /** Repository identity per task folder, so a busy pool does not spawn Git every second. */
+  private locations = new Map<string, { location: RepositoryLocation; at: number }>();
   constructor(readonly store: Store, readonly mock = false, private factory: AgentFactory = startAgent, private bridgeFactory?: TaskBridgeFactory, options: EngineOptions = {}) {
     this.workspaces = options.workspaces ?? (mock || factory !== startAgent ? new DirectWorkspaces() : new GitWorkspaces(join(dirname(resolve(store.db.filename)), 'workspaces')));
     this.maxParallel = options.maxParallel ?? 4;
@@ -42,10 +44,50 @@ export class Engine {
   }
   tick(now = Date.now()) {
     if (this.closing) return;
+    const settling = [...this.handles.values()].map(launch => launch.taskId);
     this.store.db.transaction(() => {
-      for (const run of this.store.claimDue(this.mock, now, [...this.handles.values()].map(launch => launch.taskId))) this.enqueue(run);
+      for (const run of this.store.claimDue(this.mock, now, settling)) this.enqueue(run);
     }).immediate();
+    this.autopilot(now, settling);
     this.drain();
+  }
+  /** Claims pool tasks lazily: only into a free slot and a free repository, so the pool stays editable until a task actually starts. */
+  private autopilot(now: number, settling: readonly string[]) {
+    const state = this.store.getAutopilot();
+    if (!state.enabled) return;
+    if (state.until !== null && now >= state.until) { this.store.stopAutopilot('until', now); return; }
+    let capacity = this.store.autopilotCapacity(this.maxParallel);
+    for (const task of this.store.autopilotCandidates(state.startedAt)) {
+      if (capacity < 1) return;
+      if (settling.includes(task.id)) continue;
+      let location: RepositoryLocation;
+      try { location = this.locate(task.cwd, now); }
+      catch (error) {
+        if (!(error instanceof WorkspaceError)) throw error;
+        // The attempt is recorded so the task leaves the pool and counts toward the failure limit.
+        this.store.db.transaction(() => {
+          const run = this.store.startAutopilot(task.id, this.mock, now);
+          if (!run) return;
+          this.store.log(task.id, run.id, { kind: 'lifecycle', summary: 'Подготовка запуска остановлена', details: [error.message] }, now);
+          this.store.finish(run.id, 'blocked', null, error.message, now, runFence(run));
+        }).immediate();
+        continue;
+      }
+      if (this.store.claimAutopilot(task.id, location, this.mock, this.maxParallel, this.maxPerRepository, now)) capacity--;
+    }
+  }
+  private locate(cwd: string, now: number): RepositoryLocation {
+    const cached = this.locations.get(cwd);
+    if (cached && now - cached.at < 60_000) return cached.location;
+    const location = this.workspaces.locate({ cwd });
+    this.locations.set(cwd, { location, at: now });
+    return location;
+  }
+  setAutopilot(input: AutopilotInput, now = Date.now()): AutopilotOverview {
+    const state = this.store.setAutopilot(input, now);
+    // Claim right away instead of waiting for the next second's tick.
+    if (state.enabled) this.tick(now);
+    return this.store.autopilotOverview();
   }
   private assertTaskSettled(taskId: string) {
     if ([...this.handles.values()].some(launch => launch.taskId === taskId)) throw new AppError('Предыдущий CLI-процесс этой задачи ещё завершается', 409);

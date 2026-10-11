@@ -158,3 +158,35 @@ test('default integration commands are chosen from committed project scripts rat
   expect(store.getRun(run.id).workspace!.checkCommands).toEqual([['npm', 'install'], ['npm', 'run', 'verify']]);
   expect(readFileSync(join(root, 'package.json'), 'utf8')).toContain('dirty script');
 });
+
+test('autopilot takes one task per free repository, records an unusable folder as a blocked attempt and continues once the merge settles', async () => {
+  const tickUntil = async (ready: () => boolean) => {
+    const deadline = Date.now() + 10_000;
+    while (!ready()) { if (Date.now() >= deadline) throw new Error('Condition did not settle'); engine.tick(); await Bun.sleep(20); }
+  };
+  const callFor = (suffix: string) => agent.calls.find(call => call.input.workspace?.projectCwd.endsWith(suffix));
+  const first = store.createTask(taskInput(root, { schedule: 'auto' }));
+  const other = store.createTask(taskInput(repository(folder, 'other'), { schedule: 'auto' }));
+  const second = store.createTask(taskInput(join(root, 'src'), { schedule: 'auto' }));
+  const broken = store.createTask(taskInput(mkdtempSync(join(folder, 'plain-')), { schedule: 'auto' }));
+  engine.setAutopilot({ enabled: true, until: null });
+  await until(() => agent.calls.length === 2);
+  expect(store.getRun(store.detail(first.id).runs[0]!.id).workspace?.mode).toBe('worktree');
+  expect(store.detail(other.id).runs).toHaveLength(1);
+  expect(store.detail(second.id).runs).toHaveLength(0);
+  expect(store.detail(broken.id).runs).toHaveLength(0);
+  // Both slots are taken: the same repository waits and the unusable folder is not even examined yet.
+  engine.tick();
+  expect(agent.calls).toHaveLength(2);
+  callFor('/other')!.resolve(outcome('other-session'));
+  await tickUntil(() => store.detail(broken.id).runs.length === 1);
+  expect(store.detail(broken.id).runs[0]).toMatchObject({ trigger: 'autopilot', status: 'blocked' });
+  expect(store.getAutopilot()).toMatchObject({ enabled: true, failures: 1 });
+  expect(store.detail(second.id).runs).toHaveLength(0);
+  callFor('/project')!.resolve(outcome('first-session'));
+  await tickUntil(() => agent.calls.length === 3);
+  expect(agent.calls[2]!.input.cwd.endsWith('/src')).toBe(true);
+  expect(store.detail(second.id).runs[0]).toMatchObject({ trigger: 'autopilot' });
+  // The completed result reset the failure counter.
+  expect(store.getAutopilot()).toMatchObject({ enabled: true, failures: 0 });
+});

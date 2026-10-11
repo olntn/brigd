@@ -1,6 +1,7 @@
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
-import type { Effort, IntegratorProfileInput, TaskInput, WorkerInput } from '../src/lib/types';
+import type { AutopilotInput, Effort, IntegratorProfileInput, TaskInput, WorkerInput } from '../src/lib/types';
+import { AUTOPILOT_MAX_WINDOW_MS } from '../src/lib/autopilot';
 import { AppError } from './store';
 import { validateWorkflowSteps } from './workflows';
 import { attachmentIds } from './attachments';
@@ -26,7 +27,7 @@ export async function validateTask(value: unknown): Promise<TaskInput> {
     cwd = await realpath(cwdInput);
     if (!(await stat(cwd)).isDirectory()) throw new Error('Not a directory');
   } catch { throw new AppError('Рабочая папка не существует или недоступна сервису'); }
-  if (v.schedule !== 'manual' && v.schedule !== 'interval') throw new AppError('Неизвестное расписание');
+  if (v.schedule !== 'manual' && v.schedule !== 'interval' && v.schedule !== 'auto') throw new AppError('Неизвестное расписание');
   if (typeof v.paused !== 'boolean') throw new AppError('paused должен быть boolean');
   let intervalMinutes: number | null = null;
   let firstRunAt: number | null = null;
@@ -39,6 +40,18 @@ export async function validateTask(value: unknown): Promise<TaskInput> {
     }
   }
   return { ...(v.tagIds !== undefined ? { tagIds: validateTagIds(v.tagIds) } : {}), ...(v.attachmentIds !== undefined ? { attachmentIds: attachmentIds(v.attachmentIds) } : {}), steps: validateWorkflowSteps(v.steps), workerId, title, instruction, provider: v.provider, cwd, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
+}
+
+/** The autopilot switch. A stop time is optional; when enabling it must lie ahead and within a month. */
+export function validateAutopilot(value: unknown, now = Date.now()): AutopilotInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError('Ожидается JSON-объект');
+  const v = value as Record<string, unknown>;
+  if (typeof v.enabled !== 'boolean') throw new AppError('enabled должен быть boolean');
+  const until = v.until ?? null;
+  if (until !== null && (typeof until !== 'number' || !Number.isSafeInteger(until) || until < 0)) throw new AppError('Некорректное время остановки');
+  if (v.enabled && until !== null && until <= now) throw new AppError('Время остановки уже прошло');
+  if (v.enabled && until !== null && until > now + AUTOPILOT_MAX_WINDOW_MS) throw new AppError('Время остановки: не больше 31 дня вперёд');
+  return { enabled: v.enabled, until: until as number | null };
 }
 
 /** CLI settings, private instructions and avatar shared by worker profiles and the integrator profile. */

@@ -2,9 +2,10 @@ import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
+import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
+import { AUTOPILOT_FAILURE_LIMIT } from '../src/lib/autopilot';
 import { DEFAULT_TAG_COLOR, TAG_COUNT_LIMIT } from '../src/lib/tags';
 import { tagNameKey, validateTag, validateTagIds, validateTagPatch } from './tags';
 import { validateInstruction, validateInstructionPatch, validateInstructionSnapshots } from './instructions';
@@ -288,6 +289,15 @@ export class Store {
       )`);
       this.db.query(`INSERT OR IGNORE INTO integrator_profile (singleton,mode,provider,model,effort,communication_style,avatar_url,updated_at)
         VALUES (1,'inherit','codex',NULL,'default','',NULL,?)`).run(Date.now());
+    }).immediate();
+    // The autopilot switch. It is off after every open: unattended work never resumes on its own after a restart.
+    this.db.transaction(() => {
+      this.db.exec(`CREATE TABLE IF NOT EXISTS autopilot (
+        singleton INTEGER PRIMARY KEY CHECK(singleton=1), enabled INTEGER NOT NULL DEFAULT 0, until INTEGER,
+        started_at INTEGER, stopped_at INTEGER, stop_reason TEXT CHECK(stop_reason IN ('manual','until','failures','restart')),
+        failures INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL
+      )`);
+      this.db.query('INSERT OR IGNORE INTO autopilot (singleton,enabled,updated_at) VALUES (1,0,?)').run(Date.now());
     }).immediate();
     // The explicit marker makes even an intentionally empty catalog persistent.
     // Creation, seeding and the marker commit together, including concurrent opens.
@@ -581,6 +591,75 @@ export class Store {
     this.db.query('UPDATE integrator_profile SET mode=?,provider=?,model=?,effort=?,communication_style=?,avatar_url=?,updated_at=? WHERE singleton=1')
       .run(input.mode, input.provider, model, input.effort, input.communicationStyle, input.avatarUrl, now);
     return this.getIntegratorProfile();
+  }
+  private mapAutopilot(row: Row): AutopilotState {
+    return { enabled: !!row.enabled, until: row.until ?? null, startedAt: row.started_at ?? null, stoppedAt: row.stopped_at ?? null,
+      stopReason: row.stop_reason ?? null, failures: row.failures, updatedAt: row.updated_at };
+  }
+  getAutopilot(): AutopilotState {
+    return this.mapAutopilot(this.db.query('SELECT * FROM autopilot WHERE singleton=1').get() as Row);
+  }
+  /** Enabling starts a session: the pool, the failure counter and the report count from this moment. Enabling again only changes the stop time. */
+  setAutopilot(input: AutopilotInput, now = Date.now()): AutopilotState {
+    return this.db.transaction(() => {
+      const state = this.getAutopilot();
+      if (input.enabled && !state.enabled) {
+        this.db.query('UPDATE autopilot SET enabled=1,until=?,started_at=?,stopped_at=NULL,stop_reason=NULL,failures=0,updated_at=? WHERE singleton=1').run(input.until, now, now);
+      } else if (!input.enabled && state.enabled) {
+        this.db.query("UPDATE autopilot SET enabled=0,until=?,stopped_at=?,stop_reason='manual',updated_at=? WHERE singleton=1").run(input.until, now, now);
+      } else {
+        this.db.query('UPDATE autopilot SET until=?,updated_at=? WHERE singleton=1').run(input.until, now);
+      }
+      return this.getAutopilot();
+    }).immediate();
+  }
+  /** The autopilot switches itself off at the stop time, after too many failures or when the service restarts. Running work is never cancelled. */
+  stopAutopilot(reason: Exclude<AutopilotStopReason, 'manual'>, now = Date.now()): AutopilotState {
+    this.db.query('UPDATE autopilot SET enabled=0,stopped_at=?,stop_reason=?,updated_at=? WHERE singleton=1 AND enabled=1').run(now, reason, now);
+    return this.getAutopilot();
+  }
+  /** Pool tasks in claim order: oldest first. With a session start, tasks the autopilot already attempted in that session are left out. */
+  private autopilotRows(sessionStart: number | null, taskId?: string): Row[] {
+    return (this.db.query(`SELECT * FROM tasks t WHERE schedule='auto' AND paused=0 AND archived_at IS NULL AND (? IS NULL OR id=?)
+      AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.task_id=t.id AND r.status='completed')
+      AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.task_id=t.id AND r.trigger='autopilot' AND r.started_at>=?)
+      ORDER BY created_at ASC, rowid ASC`).all(taskId ?? null, taskId ?? null, sessionStart ?? Number.MAX_SAFE_INTEGER) as Row[])
+      .filter(row => !this.activeRun(row.id));
+  }
+  autopilotPool(sessionStart: number | null): Task[] { return this.autopilotRows(sessionStart).map(row => this.mapTask(row)); }
+  /** The scheduler tick needs only identity and folder. */
+  autopilotCandidates(sessionStart: number | null): { id: string; cwd: string }[] { return this.autopilotRows(sessionStart).map(row => ({ id: row.id, cwd: row.cwd })); }
+  autopilotAttempts(sessionStart: number | null): Run[] {
+    if (sessionStart === null) return [];
+    return (this.db.query("SELECT * FROM runs WHERE trigger='autopilot' AND started_at>=? ORDER BY started_at ASC, rowid ASC").all(sessionStart) as Row[]).map(row => this.mapRun(row));
+  }
+  autopilotOverview(): AutopilotOverview {
+    const state = this.getAutopilot();
+    return { ...state, pool: this.autopilotPool(state.enabled ? state.startedAt : null), attempts: this.autopilotAttempts(state.startedAt) };
+  }
+  /** Starts a pool task on the autopilot's behalf; null when the task left the pool or the autopilot was switched off meanwhile. */
+  startAutopilot(taskId: string, mock: boolean, now = Date.now()): Run | null {
+    return this.db.transaction(() => {
+      const state = this.getAutopilot();
+      if (!state.enabled || (state.until !== null && now >= state.until) || !this.autopilotRows(state.startedAt, taskId).length) return null;
+      const run = this.insertRun(this.getTask(taskId), 'autopilot', null, mock, now);
+      this.log(taskId, run.id, { kind: 'lifecycle', summary: 'Запуск автопилотом', details: ['Подошла очередь задачи, и освободилось место для запуска.'] }, now);
+      return run;
+    }).immediate();
+  }
+  /** Reserves a free process slot and a free repository before the run exists, so the pool never piles up as queued runs. */
+  claimAutopilot(taskId: string, location: RepositoryLocation, mock: boolean, maximum: number, perRepository: number, now = Date.now()): Run | null {
+    return this.db.transaction(() => {
+      if (this.autopilotCapacity(maximum) < 1 || this.repositoryBusy(location.repositoryId, perRepository, false) ||
+          this.db.query("SELECT seq FROM execution_requests WHERE repository_id=? AND state='queued'").get(location.repositoryId)) return null;
+      const run = this.startAutopilot(taskId, mock, now);
+      return run && this.enqueueExecution(run, location);
+    }).immediate();
+  }
+  /** Process slots left for lazily claimed work: requests already queued count as reserved. */
+  autopilotCapacity(maximum: number): number {
+    const queued = (this.db.query(`SELECT COUNT(*) AS n FROM execution_requests e JOIN runs r ON r.id=e.run_id AND r.turn=e.turn WHERE e.state='queued' AND r.status='queued'`).get() as { n: number }).n;
+    return Math.max(0, maximum - this.occupiedSlots() - queued);
   }
   saveAvatar(data: Uint8Array, mime: string, now = Date.now()): string {
     const id = createHash('sha256').update(data).digest('hex');
@@ -1144,19 +1223,23 @@ export class Store {
     return this.db.transaction(() => {
       const run = this.getRun(request.runId);
       if (run.status !== 'queued' || run.turn !== request.turn) return null;
-      const uncertain = this.db.query("SELECT seq FROM execution_requests WHERE repository_id=? AND state IN ('interrupted','held')").get(request.location.repositoryId);
-      const occupied = (this.db.query("SELECT COUNT(*) AS n FROM execution_requests WHERE repository_id=? AND state IN ('preparing','running')").get(request.location.repositoryId) as { n: number }).n;
       const direct = run.workspace?.mode === 'direct' || !run.workspace && !!run.sessionId;
-      const shared = this.db.query(`SELECT r.id FROM execution_requests e JOIN runs r ON r.id=e.run_id
-        LEFT JOIN workspaces w ON w.id=r.workspace_id WHERE e.repository_id=? AND e.state IN ('preparing','running')
-        AND (json_extract(w.snapshot,'$.mode')='direct' OR (r.workspace_id IS NULL AND r.session_id IS NOT NULL))`).get(request.location.repositoryId);
-      const integration = this.db.query("SELECT seq FROM integrations WHERE repository_id=? AND state IN ('queued','checking','merging','cancelling','interrupted')").get(request.location.repositoryId);
-      if (uncertain || integration || shared || direct && occupied > 0 || occupied >= perRepository || this.occupiedSlots() >= maximum) return null;
+      if (this.repositoryBusy(request.location.repositoryId, perRepository, direct) || this.occupiedSlots() >= maximum) return null;
       const result = this.db.query("UPDATE execution_requests SET state='preparing' WHERE run_id=? AND turn=? AND state='queued'").run(run.id, run.turn);
       if (!result.changes) return null;
       this.executionStatus(run, 'preparing');
       return this.getRun(run.id);
     }).immediate();
+  }
+  /** Shared by the queue and the autopilot: an uncertain, integrating, exclusively held or full repository takes no new work. */
+  private repositoryBusy(repositoryId: string, perRepository: number, exclusive: boolean): boolean {
+    const uncertain = this.db.query("SELECT seq FROM execution_requests WHERE repository_id=? AND state IN ('interrupted','held')").get(repositoryId);
+    const occupied = (this.db.query("SELECT COUNT(*) AS n FROM execution_requests WHERE repository_id=? AND state IN ('preparing','running')").get(repositoryId) as { n: number }).n;
+    const shared = this.db.query(`SELECT r.id FROM execution_requests e JOIN runs r ON r.id=e.run_id
+      LEFT JOIN workspaces w ON w.id=r.workspace_id WHERE e.repository_id=? AND e.state IN ('preparing','running')
+      AND (json_extract(w.snapshot,'$.mode')='direct' OR (r.workspace_id IS NULL AND r.session_id IS NOT NULL))`).get(repositoryId);
+    const integration = this.db.query("SELECT seq FROM integrations WHERE repository_id=? AND state IN ('queued','checking','merging','cancelling','interrupted')").get(repositoryId);
+    return !!uncertain || !!integration || !!shared || exclusive && occupied > 0 || occupied >= perRepository;
   }
   private executionStatus(run: Run, status: RunStatus, now = Date.now()) {
     this.db.query('UPDATE runs SET status=?,updated_at=? WHERE id=?').run(status, now, run.id);
@@ -1339,11 +1422,26 @@ export class Store {
         }
         this.persistSteps(run);
       }
-      const cancelledChain = run.steps.length && status === 'completed' && cancelRequested;
+      const final: RunStatus = run.steps.length && status === 'completed' && cancelRequested ? 'cancelled' : status;
       this.db.query(`UPDATE runs SET status=?,summary=?,error=?,updated_at=?,finished_at=? WHERE id=?`)
-        .run(cancelledChain ? 'cancelled' : status, summary, error, now, status === 'waiting_input' ? null : now, id);
+        .run(final, summary, error, now, status === 'waiting_input' ? null : now, id);
+      if (run.trigger === 'autopilot') this.noteAutopilotOutcome(run, final, now);
       return this.getRun(id);
     }).immediate();
+  }
+  /** The circuit breaker: consecutive failed or blocked autopilot runs switch the autopilot off; a result or a question resets the count. */
+  private noteAutopilotOutcome(run: Run, status: RunStatus, now: number) {
+    const state = this.getAutopilot();
+    if (!state.enabled || state.startedAt === null || run.startedAt < state.startedAt) return;
+    if (status === 'completed' || status === 'waiting_input') {
+      if (state.failures) this.db.query('UPDATE autopilot SET failures=0,updated_at=? WHERE singleton=1').run(now);
+      return;
+    }
+    if (status !== 'failed' && status !== 'blocked') return;
+    const failures = state.failures + 1;
+    if (failures < AUTOPILOT_FAILURE_LIMIT) { this.db.query('UPDATE autopilot SET failures=?,updated_at=? WHERE singleton=1').run(failures, now); return; }
+    this.db.query("UPDATE autopilot SET enabled=0,failures=?,stopped_at=?,stop_reason='failures',updated_at=? WHERE singleton=1").run(failures, now, now);
+    this.comment(run.taskId, run.id, 'system', `Автопилот выключен: ${AUTOPILOT_FAILURE_LIMIT} запуска подряд завершились ошибкой или блокировкой. Проверьте причину и включите его снова.`, now, run.currentStepIndex);
   }
   resume(id: string, answer: string, acknowledgeInterruption = false, now = Date.now(), ids?: string[]): Run {
     return this.db.transaction(() => {
@@ -1410,6 +1508,8 @@ export class Store {
   }
   reconcile(now = Date.now()): number {
     return this.db.transaction(() => {
+      // Unattended work never resumes on its own: interrupted runs need a human check first.
+      this.db.query("UPDATE autopilot SET enabled=0,stopped_at=?,stop_reason='restart',updated_at=? WHERE singleton=1 AND enabled=1").run(now, now);
       const rows = this.db.query("SELECT * FROM runs WHERE status IN ('preparing','running','cancelling')").all() as Row[];
       this.db.query("UPDATE execution_requests SET state='interrupted' WHERE state IN ('preparing','running')").run();
       for (const row of this.db.query("SELECT snapshot FROM integrations WHERE state IN ('checking','merging','cancelling')").all() as Row[]) {

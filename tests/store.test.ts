@@ -484,3 +484,90 @@ describe('task archive', () => {
     expect(store.createTask(input(), BASE).archivedAt).toBeNull();
   });
 });
+
+describe('autopilot', () => {
+  const auto = (patch: Partial<TaskInput> = {}) => input({ schedule: 'auto', ...patch });
+
+  test('is off by default; enabling starts a session, enabling again only moves the stop time, disabling records the reason', () => {
+    expect(store.getAutopilot()).toMatchObject({ enabled: false, until: null, startedAt: null, stoppedAt: null, stopReason: null, failures: 0 });
+    expect(store.setAutopilot({ enabled: true, until: BASE + 8 * 60 * MINUTE }, BASE)).toMatchObject({ enabled: true, until: BASE + 8 * 60 * MINUTE, startedAt: BASE, failures: 0 });
+    expect(store.setAutopilot({ enabled: true, until: null }, BASE + MINUTE)).toMatchObject({ enabled: true, until: null, startedAt: BASE });
+    expect(store.setAutopilot({ enabled: false, until: null }, BASE + 2 * MINUTE)).toMatchObject({ enabled: false, startedAt: BASE, stoppedAt: BASE + 2 * MINUTE, stopReason: 'manual' });
+    // Self-stops apply only while enabled.
+    expect(store.stopAutopilot('until', BASE + 3 * MINUTE)).toMatchObject({ stoppedAt: BASE + 2 * MINUTE, stopReason: 'manual' });
+    store.setAutopilot({ enabled: true, until: null }, BASE + 4 * MINUTE);
+    expect(store.stopAutopilot('until', BASE + 5 * MINUTE)).toMatchObject({ enabled: false, startedAt: BASE + 4 * MINUTE, stoppedAt: BASE + 5 * MINUTE, stopReason: 'until' });
+  });
+
+  test('pool lists eligible auto tasks oldest first and leaves out paused, archived, manual, completed, occupied and attempted tasks', () => {
+    const later = store.createTask(auto({ title: 'later' }), BASE + 1);
+    const earlier = store.createTask(auto({ title: 'earlier' }), BASE);
+    store.createTask(auto({ title: 'paused', paused: true }), BASE);
+    store.createTask(input({ title: 'manual' }), BASE);
+    store.archiveTask(store.createTask(auto({ title: 'archived' }), BASE).id, BASE);
+    const done = store.createTask(auto({ title: 'done' }), BASE);
+    store.finish(store.startManual(done.id, true, BASE).id, 'completed', 'Outcome', null, BASE + 1);
+    const busy = store.createTask(auto({ title: 'busy' }), BASE);
+    store.startManual(busy.id, true, BASE);
+    expect(store.autopilotPool(null).map(task => task.title)).toEqual(['earlier', 'later']);
+    store.setAutopilot({ enabled: true, until: null }, BASE + 2);
+    const run = store.startAutopilot(earlier.id, true, BASE + 3)!;
+    store.finish(run.id, 'failed', null, 'Broken', BASE + 4);
+    // A failed attempt waits for a person: this session never retries it, the next one may.
+    expect(store.autopilotPool(BASE + 2).map(task => task.title)).toEqual(['later']);
+    expect(store.autopilotPool(null).map(task => task.title)).toEqual(['earlier', 'later']);
+    expect(store.autopilotOverview()).toMatchObject({ enabled: true, pool: [{ id: later.id }], attempts: [{ id: run.id, trigger: 'autopilot', status: 'failed' }] });
+    expect(store.autopilotCandidates(BASE + 2)).toEqual([{ id: later.id, cwd: later.cwd }]);
+  });
+
+  test('startAutopilot refuses while off, at the stop time and for tasks outside the pool; it records the trigger and a log', () => {
+    const task = store.createTask(auto(), BASE);
+    expect(store.startAutopilot(task.id, true, BASE)).toBeNull();
+    store.setAutopilot({ enabled: true, until: BASE + 60 * MINUTE }, BASE);
+    expect(store.startAutopilot(task.id, true, BASE + 60 * MINUTE)).toBeNull();
+    expect(store.startAutopilot(store.createTask(input(), BASE).id, true, BASE + MINUTE)).toBeNull();
+    const run = store.startAutopilot(task.id, true, BASE + MINUTE);
+    expect(run).toMatchObject({ taskId: task.id, trigger: 'autopilot', status: 'running', scheduledFor: null, mock: true });
+    expect(store.startAutopilot(task.id, true, BASE + 2 * MINUTE)).toBeNull();
+    expect(store.detail(task.id).logs?.map(log => log.summary)).toContain('Запуск автопилотом');
+    expect(store.getTask(task.id).status).toBe('running');
+  });
+
+  test('three failed or blocked autopilot runs in a row switch the autopilot off; results and questions reset the count, other triggers never count', () => {
+    store.setAutopilot({ enabled: true, until: null }, BASE);
+    const attempt = (status: Exclude<RunStatus, 'running'>, at: number) => {
+      const run = store.startAutopilot(store.createTask(auto(), at).id, true, at)!;
+      return store.finish(run.id, status, status === 'completed' ? 'Outcome' : null, status === 'failed' ? 'Broken' : null, at + 1);
+    };
+    attempt('failed', BASE + 10); attempt('blocked', BASE + 20);
+    expect(store.getAutopilot()).toMatchObject({ enabled: true, failures: 2 });
+    attempt('waiting_input', BASE + 30);
+    expect(store.getAutopilot().failures).toBe(0);
+    attempt('failed', BASE + 40); attempt('failed', BASE + 50);
+    store.finish(store.startManual(store.createTask(auto(), BASE + 60).id, true, BASE + 60).id, 'failed', null, 'Manual', BASE + 61);
+    expect(store.getAutopilot()).toMatchObject({ enabled: true, failures: 2 });
+    const last = attempt('failed', BASE + 70);
+    expect(store.getAutopilot()).toMatchObject({ enabled: false, failures: 3, stopReason: 'failures', stoppedAt: BASE + 71, startedAt: BASE });
+    expect(store.detail(last.taskId).comments.some(comment => comment.kind === 'system' && comment.body.startsWith('Автопилот выключен'))).toBe(true);
+    // A new session starts clean, and cancellations are nobody's failure.
+    expect(store.setAutopilot({ enabled: true, until: null }, BASE + 80)).toMatchObject({ failures: 0, startedAt: BASE + 80, stopReason: null, stoppedAt: null });
+    attempt('cancelled', BASE + 90);
+    expect(store.getAutopilot().failures).toBe(0);
+  });
+
+  test('a service restart switches the autopilot off until a person enables it again', () => {
+    store.setAutopilot({ enabled: true, until: null }, BASE);
+    expect(store.reconcile(BASE + MINUTE)).toBe(0);
+    expect(store.getAutopilot()).toMatchObject({ enabled: false, startedAt: BASE, stoppedAt: BASE + MINUTE, stopReason: 'restart' });
+    store.reconcile(BASE + 2 * MINUTE);
+    expect(store.getAutopilot().stoppedAt).toBe(BASE + MINUTE);
+  });
+
+  test('the auto schedule keeps no interval and is never claimed by time', () => {
+    const task = store.createTask(auto(), BASE);
+    expect(task).toMatchObject({ schedule: 'auto', intervalMinutes: null, firstRunAt: null, nextRunAt: null, paused: false });
+    expect(store.claimDue(true, BASE + 60 * MINUTE)).toEqual([]);
+    expect(store.updateTask(task.id, input({ ...task, schedule: 'interval', intervalMinutes: 5, firstRunAt: BASE + MINUTE }), BASE).nextRunAt).toBe(BASE + MINUTE);
+    expect(store.updateTask(task.id, auto(), BASE).nextRunAt).toBeNull();
+  });
+});

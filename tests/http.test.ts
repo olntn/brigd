@@ -446,3 +446,34 @@ describe('task archive API', () => {
     expect((await request('/api/tasks/missing-task/restore', 'POST')).status).toBe(404);
   });
 });
+
+describe('autopilot endpoint', () => {
+  test('reports the pool, validates the switch and starts pool work as soon as it is enabled', async () => {
+    const task = await createTask({ schedule: 'auto' });
+    expect(task).toMatchObject({ schedule: 'auto', intervalMinutes: null, firstRunAt: null, nextRunAt: null });
+    expect((await request('/api/tasks', 'POST', valid({ schedule: 'nightly' as never }))).status).toBe(400);
+    let response = await request('/api/autopilot');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ enabled: false, until: null, startedAt: null, pool: [{ id: task.id }], attempts: [] });
+    expect((await request('/api/autopilot', 'PATCH', { enabled: 'yes' })).status).toBe(400);
+    expect((await request('/api/autopilot', 'PATCH', { enabled: true, until: 'tomorrow' })).status).toBe(400);
+    expect((await request('/api/autopilot', 'PATCH', { enabled: true, until: Date.now() - 1 })).status).toBe(400);
+    expect((await request('/api/autopilot', 'PATCH', { enabled: true, until: Date.now() + 40 * 24 * 3_600_000 })).status).toBe(400);
+    expect((await request('/api/autopilot', 'PATCH', { enabled: true, until: null }, { origin: 'http://evil.test' })).status).toBe(403);
+    expect(calls).toHaveLength(0);
+    expect(store.getAutopilot().enabled).toBe(false);
+    response = await request('/api/autopilot', 'PATCH', { enabled: true, until: null });
+    expect(response.status).toBe(200);
+    const enabled = await response.json();
+    expect(enabled).toMatchObject({ enabled: true, until: null, stopReason: null, pool: [] });
+    expect(enabled.attempts).toHaveLength(1);
+    expect(enabled.attempts[0]).toMatchObject({ taskId: task.id, trigger: 'autopilot' });
+    await flush();
+    expect(calls).toHaveLength(1);
+    expect((await detail(task.id)).runs[0]).toMatchObject({ trigger: 'autopilot', status: 'running' });
+    response = await request('/api/autopilot', 'PATCH', { enabled: false });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ enabled: false, stopReason: 'manual' });
+    expect(store.getAutopilot().stoppedAt).not.toBeNull();
+  });
+});

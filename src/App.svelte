@@ -4,6 +4,8 @@
   import Workers from './lib/Workers.svelte';
   import ModelSettings from './lib/ModelSettings.svelte';
   import Instructions from './lib/Instructions.svelte';
+  import Autopilot from './lib/Autopilot.svelte';
+  import { TASK_STATUS_LABELS } from './lib/status';
   import Tags from './lib/Tags.svelte';
   import TagPicker from './lib/TagPicker.svelte';
   import AttachmentComposer from './lib/AttachmentComposer.svelte';
@@ -22,11 +24,11 @@
   import { applyTheme, readTheme, saveTheme, themes, themeStorageKey, type Theme } from './lib/theme';
   import type { AppInfo, Attachment, Comment, FollowupInput, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
 
-  type Scope = 'all' | 'scheduled' | 'attention' | 'completed';
+  type Scope = 'all' | 'scheduled' | 'autopilot' | 'attention' | 'completed';
   type View = 'board' | 'list';
   let info = $state<AppInfo | null>(null);
   let tasks = $state<Task[]>([]);
-  let page = $state<'tasks' | 'workers' | 'instructions' | 'tags' | 'archive'>('tasks');
+  let page = $state<'tasks' | 'autopilot' | 'workers' | 'instructions' | 'tags' | 'archive'>('tasks');
   let tags = $state<Tag[]>([]);
   let tagsLoading = $state(true);
   let tagsError = $state('');
@@ -113,7 +115,7 @@
   let answerComposer = $state<AttachmentComposer>();
   let formOriginalWorker = $state<Worker | null>(null);
   let formCwd = $state('');
-  let formSchedule = $state<'manual' | 'interval'>('manual');
+  let formSchedule = $state<'manual' | 'interval' | 'auto'>('manual');
   let formInterval = $state(60);
   let formFirstRun = $state('');
   let formPaused = $state(false);
@@ -123,12 +125,7 @@
   let taskSequence = 0;
   let toastTimer: ReturnType<typeof setTimeout>;
 
-  const labels: Record<TaskStatus, string> = {
-    queued: 'В очереди', preparing: 'Подготовка', awaiting_merge: 'Ожидает слияния', integrating: 'Проверка и слияние',
-    merge_conflict: 'Конфликт слияния', merge_failed: 'Проверка не прошла', merge_blocked: 'Перенос заблокирован', merge_interrupted: 'Слияние прервано',
-    ready: 'К запуску', running: 'В работе', cancelling: 'Останавливается', waiting_input: 'Нужен ответ', completed: 'Завершено',
-    blocked: 'Заблокировано', failed: 'Ошибка', interrupted: 'Прервано', cancelled: 'Отменено',
-  };
+  const labels = TASK_STATUS_LABELS;
   const columnData: { status: TaskStatus; title: string; icon: string; empty: string }[] = [
     { status: 'ready', title: 'К запуску', icon: 'circle', empty: 'Следующая идея начинается здесь' },
     { status: 'running', title: 'В работе', icon: 'bolt', empty: 'Агенты готовы к работе' },
@@ -148,7 +145,7 @@
     const query = search.trim().toLocaleLowerCase();
     return (provider === 'all' || taskProviders(task).includes(provider))
       && matchesTag(task, tagFilter)
-      && (scope === 'all' || (scope === 'scheduled' && task.schedule === 'interval') || (scope === 'attention' && attentionStatuses.includes(task.status)) || (scope === 'completed' && task.status === 'completed'))
+      && (scope === 'all' || (scope === 'scheduled' && task.schedule === 'interval') || (scope === 'attention' && attentionStatuses.includes(task.status)) || (scope === 'completed' && task.status === 'completed') || (scope === 'autopilot' && task.schedule === 'auto'))
       && (!query || `${task.title} ${task.instruction} ${task.cwd} ${task.worker?.name ?? ''} ${task.latestRun?.worker?.name ?? ''} ${(task.steps ?? []).map(step => `${step.title} ${workers.find(worker => worker.id === step.workerId)?.name ?? ''}`).join(' ')} ${(task.latestRun?.steps ?? []).map(step => `${step.title} ${step.worker.name}`).join(' ')}`.toLocaleLowerCase().includes(query));
   }));
   let otherStatusTasks = $derived(filtered.filter(task => otherStatuses.includes(task.status)));
@@ -265,6 +262,13 @@
     const update = (task: Task) => ({ ...task, tags: (task.tags ?? []).map(item => item.id === tag.id ? tag : item) });
     tasks = tasks.map(update);
     if (detail) detail = { ...detail, task: update(detail.task) };
+  }
+
+  function taskChanged(saved: Task) {
+    taskSequence++;
+    drawerSequence++;
+    tasks = tasks.map(item => item.id === saved.id ? saved : item);
+    if (detail?.task.id === saved.id) detail = { ...detail, task: saved };
   }
 
   function tagDeleted(id: string) {
@@ -576,7 +580,7 @@
         notifyForTask(task.id, context, info?.mode === 'mock' ? 'Демо-запуск начат' : 'Задача запущена');
       } else if (action === 'pause') {
         await api<Task>(`/api/tasks/${encodeURIComponent(task.id)}`, { method: 'PATCH', body: JSON.stringify({ paused: !task.paused }) });
-        notifyForTask(task.id, context, task.paused ? 'Расписание возобновлено' : 'Расписание приостановлено');
+        notifyForTask(task.id, context, task.schedule === 'auto' ? (task.paused ? 'Задача возвращена в очередь автопилота' : 'Задача отложена: автопилот её не возьмёт') : task.paused ? 'Расписание возобновлено' : 'Расписание приостановлено');
       } else if (action === 'archive' || action === 'restore') {
         await api<Task>(`/api/tasks/${encodeURIComponent(task.id)}/${action}`, { method: 'POST', body: '{}' });
         notifyForTask(task.id, context, action === 'archive' ? 'Задача перенесена в архив' : 'Задача восстановлена и снова на доске');
@@ -686,6 +690,12 @@
     return `Каждые ${minutes} мин.`;
   }
 
+  function scheduleLabel(task: Task, short = false): string {
+    if (task.schedule === 'auto') return task.paused ? 'Автопилот: отложено' : 'Автопилот';
+    if (task.paused) return short ? 'На паузе' : 'Расписание на паузе';
+    return task.schedule === 'interval' ? intervalLabel(task.intervalMinutes) : 'Вручную';
+  }
+  function scheduleIcon(task: Task): string { return task.paused ? 'pause' : task.schedule === 'interval' ? 'clock' : task.schedule === 'auto' ? 'moon' : 'play'; }
   function taskIsOccupied(task: Task) { return activeStatuses.includes(task.status) || !!task.latestRun?.steps?.length && ['failed', 'blocked'].includes(task.status); }
   function canStartManual(task: Task) { return !taskIsOccupied(task) && !taskHasCompletedRun(task); }
   function workflowSteps(task: Task) { const saved = runWorkflowSteps(task.latestRun); return saved.length ? saved : task.steps ?? []; }
@@ -804,7 +814,7 @@
       {#if task.attachments?.length}<div class="card-attachment-count"><Icon name="folder" size={13} /><span>Файлов: {task.attachments.length}</span></div>{/if}
     </button>
     <div class="card-footer">
-      <span class="card-schedule" class:is-paused={task.paused}><Icon name={task.paused ? 'pause' : task.schedule === 'interval' ? 'clock' : 'play'} size={12} />{task.paused ? 'Расписание на паузе' : task.schedule === 'interval' ? intervalLabel(task.intervalMinutes) : 'Вручную'}</span>
+      <span class="card-schedule" class:is-paused={task.paused}><Icon name={scheduleIcon(task)} size={12} />{scheduleLabel(task)}</span>
       {#if canStartManual(task)}
         <button class="card-run icon-button" disabled={pending.includes(task.id)} onclick={() => act(task, 'run')} aria-label={(workflowSteps(task).length && task.runCount ? 'Начать заново: ' : 'Запустить: ') + task.title} title={workflowSteps(task).length && task.runCount ? 'Начать всю последовательность заново' : 'Запустить задачу'}><Icon name={pending.includes(task.id) ? 'refresh' : 'play'} size={14} class={pending.includes(task.id) ? 'spin' : ''} /></button>
       {:else}<span class="card-run-count" title="Количество запусков"><Icon name="history" size={12} />{task.runCount}</span>{/if}
@@ -817,6 +827,7 @@
     <a class="brand" href="/" aria-label="brigd — главная"><span class="brand-symbol"><BrigLogo size={28} /></span><span>brigd<span class="brand-dot">.</span></span></a>
     <nav class="main-nav" aria-label="Задачи">
       <button class:active={page === 'tasks'} aria-label="Задачи" onclick={() => { page = 'tasks'; resetFilters(); }}><Icon name="board" /><span>Задачи</span></button>
+      <button class:active={page === 'autopilot'} aria-label="Автопилот" onclick={() => { page = 'autopilot'; }}><Icon name="moon" /><span>Автопилот</span></button>
       <button class:active={page === 'workers'} aria-label="Работники" onclick={() => { page = 'workers'; void loadWorkers(); }}><Icon name="spark" /><span>Работники</span></button>
       <button class:active={page === 'instructions'} aria-label="Инструкции" onclick={() => { page = 'instructions'; }}><Icon name="list" /><span>Инструкции</span></button>
       <button class:active={page === 'tags'} aria-label="Теги" onclick={() => { page = 'tags'; void loadTags(); }}><Icon name="tag" /><span>Теги</span></button>
@@ -831,6 +842,8 @@
     <div class="workspace-content">
       {#if page === 'instructions'}
         <Instructions {notify} />
+      {:else if page === 'autopilot'}
+        <Autopilot {tasks} {notify} onopen={openTask} onchanged={taskChanged} />
       {:else if page === 'tags'}
         <Tags {tags} loading={tagsLoading} error={tagsError} onreload={loadTags} onchanged={tagChanged} ondeleted={tagDeleted} onmutation={tagMutation} {notify} />
       {:else if page === 'archive'}
@@ -858,7 +871,7 @@
         <div class="view-toggle" aria-label="Вид задач"><button class:selected={view === 'board'} aria-pressed={view === 'board'} onclick={() => view = 'board'}><Icon name="board" size={15} />Доска</button><button class:selected={view === 'list'} aria-pressed={view === 'list'} onclick={() => view = 'list'}><Icon name="list" size={16} />Список</button></div>
         <div class="toolbar-filters">
           <label class="search-box"><Icon name="search" size={16} /><input bind:value={search} type="search" placeholder="Найти задачу…" aria-label="Поиск задач" /></label>
-          <label class="provider-filter"><Icon name="inbox" size={15} /><select value={scope} onchange={(event) => setScope(event.currentTarget.value as Scope)} aria-label="Фильтр задач"><option value="all">Все задачи</option><option value="attention">Требуют внимания</option><option value="scheduled">По расписанию</option><option value="completed">Завершённые</option></select><Icon name="down" size={13} /></label>
+          <label class="provider-filter"><Icon name="inbox" size={15} /><select value={scope} onchange={(event) => setScope(event.currentTarget.value as Scope)} aria-label="Фильтр задач"><option value="all">Все задачи</option><option value="attention">Требуют внимания</option><option value="scheduled">По расписанию</option><option value="autopilot">Автопилот</option><option value="completed">Завершённые</option></select><Icon name="down" size={13} /></label>
           <label class="provider-filter"><Icon name="sliders" size={15} /><select bind:value={provider} aria-label="Фильтр по агенту"><option value="all">Все агенты</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select><Icon name="down" size={13} /></label>
           <label class="provider-filter tag-filter"><Icon name="tag" size={15} /><select bind:value={tagFilter} aria-label="Фильтр по тегу" disabled={tagsLoading}><option value="all">Все теги</option><option value="untagged">Без тегов</option>{#each tags as tag (tag.id)}<option value={tag.id}>{tag.name}</option>{/each}</select><Icon name="down" size={13} /></label>
         </div>
@@ -888,7 +901,7 @@
             <section class="archive-section"><button class="archive-toggle" aria-expanded={showOtherStatuses} onclick={() => showOtherStatuses = !showOtherStatuses}><Icon name={showOtherStatuses ? 'down' : 'chevron'} size={15} /><Icon name="alert" size={15} /><strong>Другие статусы</strong><small>Прерванные, отменённые и задачи с ошибками</small></button>{#if showOtherStatuses}<div class="archive-grid">{#each otherStatusTasks as task (task.id)}<div class="archive-card-wrapper">{@render statusBadge(task.status)}{@render taskCard(task)}</div>{/each}</div>{/if}</section>
           {/if}
         {:else}
-          <div class="task-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>ЗАПУСК</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{shortPath(task.cwd)}</small>{@render taskTags(task)}{#if task.latestRun?.followup}<small class="list-followup-label">Дополнительный запрос{#if followupStage(task.latestRun)} · Этап {followupStage(task.latestRun)!.index + 1}{/if}</small>{/if}{#if workflowSteps(task).length}<small class="list-workflow-progress">{workflowProgress(task)}</small>{/if}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{task.paused ? 'На паузе' : task.schedule === 'interval' ? intervalLabel(task.intervalMinutes) : 'Вручную'}</span><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>Новые задачи появятся здесь</span></div>{/each}</div>
+          <div class="task-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>ЗАПУСК</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : task.schedule === 'auto' ? 'moon' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{shortPath(task.cwd)}</small>{@render taskTags(task)}{#if task.latestRun?.followup}<small class="list-followup-label">Дополнительный запрос{#if followupStage(task.latestRun)} · Этап {followupStage(task.latestRun)!.index + 1}{/if}</small>{/if}{#if workflowSteps(task).length}<small class="list-workflow-progress">{workflowProgress(task)}</small>{/if}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{scheduleLabel(task, true)}</span><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>Новые задачи появятся здесь</span></div>{/each}</div>
         {/if}
       {/if}
       {/if}
@@ -919,7 +932,7 @@
           {:else if currentRun && currentRun.status !== 'completed' && taskIsOccupied(selectedTask)}<button class="button secondary danger-hover" disabled={taskBusy || (currentRun.status === 'interrupted' && !acknowledgeInterruption)} title={currentRun.status === 'interrupted' ? 'Сначала подтвердите ниже, что предыдущий процесс CLI остановлен' : undefined} onclick={() => selectedTask && act(selectedTask, 'cancel')}><Icon name="stop" size={14} />Отменить запуск</button>{/if}
           <button class="button secondary" disabled={taskBusy} onclick={() => selectedTask && openEditor(selectedTask)}><Icon name="edit" size={15} />Изменить</button>
           {#if !taskIsOccupied(selectedTask)}<button class="button secondary" disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'archive')}><Icon name="archive" size={15} />В архив</button>{/if}
-          {#if selectedTask.schedule === 'interval'}<button class="icon-button schedule-pause" title={selectedTask.paused ? 'Возобновить расписание' : 'Приостановить расписание'} aria-label={selectedTask.paused ? 'Возобновить расписание' : 'Приостановить расписание'} disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'pause')}><Icon name={selectedTask.paused ? 'play' : 'pause'} size={17} /></button>{/if}
+          {#if selectedTask.schedule !== 'manual'}{@const pauseLabel = selectedTask.schedule === 'auto' ? (selectedTask.paused ? 'Вернуть в очередь автопилота' : 'Отложить в автопилоте') : selectedTask.paused ? 'Возобновить расписание' : 'Приостановить расписание'}<button class="icon-button schedule-pause" title={pauseLabel} aria-label={pauseLabel} disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'pause')}><Icon name={selectedTask.paused ? 'play' : 'pause'} size={17} /></button>{/if}
           {/if}
         </div>
         {#if selectedTask.archivedAt !== null}<p class="archived-task-note"><Icon name="archive" size={16} /><span>В архиве с {dateTime(selectedTask.archivedAt)}. Задача не показывается на доске и не запускается по расписанию. Восстановите её, чтобы продолжить работу.</span></p>
@@ -992,7 +1005,7 @@
       {:else if detailTab === 'logs'}
         <div id="logs-panel" tabindex="0" role="tabpanel" aria-labelledby="logs-tab" class="logs-panel"><TaskLogs logs={activity.logs} runs={detail.runs} taskId={selectedTask.id} author={attachmentAuthor} /></div>
       {:else}
-        <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name={run.followup ? "message" : run.reconcile ? "refresh" : "play"} size={14} />{run.followup ? "Дополнительный запрос" : run.reconcile ? "Разрешение конфликта" : "Запуск"} {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{#if run.worker}{@render workerBadge(run.worker, true)}{:else}{@render providerBadge(run.provider, true)}{/if}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'followup' ? 'Из обсуждения' : run.trigger === 'reconcile' ? 'Конфликт слияния' : run.trigger === 'schedule' ? 'По расписанию' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.followup}<div class="run-followup-request"><strong>Запрос{#if followupStage(run)} · Этап {followupStage(run)!.index + 1}: {followupStage(run)!.title}{/if}</strong><p>{run.followup.request || 'Запрос с вложениями'}</p></div>{:else if run.reconcile}<div class="run-followup-request"><strong>Целевая ветка: {run.reconcile.targetBranch}</strong>{#if run.reconcile.conflicts.length}<ul class="integration-conflicts">{#each run.reconcile.conflicts as path}<li><code>{path}</code></li>{/each}</ul>{/if}</div>{/if}{#if run.reconcile}<div class="run-followup-request"><strong>Целевая ветка {run.reconcile.targetBranch}{#if run.reconcile.depth > 1} · попытка {run.reconcile.depth}{/if}</strong>{#if run.reconcile.conflicts.length}<p>{run.reconcile.conflicts.join('\n')}</p>{/if}</div>{/if}{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}{#if run.steps?.length}<WorkflowChecklist {run} />{:else if run.followup?.workflow?.steps.length}<WorkflowChecklist {run} historical />{/if}{@render instructionSnapshot(run)}{#if run.integration}<IntegrationPanel integration={run.integration} historical />{/if}<div class="run-details">Ход {run.turn}{#if run.worker}<span> · Усилия: {effortLabel(run.worker.effort)}</span>{/if}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
+        <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name={run.followup ? "message" : run.reconcile ? "refresh" : "play"} size={14} />{run.followup ? "Дополнительный запрос" : run.reconcile ? "Разрешение конфликта" : "Запуск"} {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{#if run.worker}{@render workerBadge(run.worker, true)}{:else}{@render providerBadge(run.provider, true)}{/if}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'followup' ? 'Из обсуждения' : run.trigger === 'reconcile' ? 'Конфликт слияния' : run.trigger === 'schedule' ? 'По расписанию' : run.trigger === 'autopilot' ? 'Автопилот' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.followup}<div class="run-followup-request"><strong>Запрос{#if followupStage(run)} · Этап {followupStage(run)!.index + 1}: {followupStage(run)!.title}{/if}</strong><p>{run.followup.request || 'Запрос с вложениями'}</p></div>{:else if run.reconcile}<div class="run-followup-request"><strong>Целевая ветка: {run.reconcile.targetBranch}</strong>{#if run.reconcile.conflicts.length}<ul class="integration-conflicts">{#each run.reconcile.conflicts as path}<li><code>{path}</code></li>{/each}</ul>{/if}</div>{/if}{#if run.reconcile}<div class="run-followup-request"><strong>Целевая ветка {run.reconcile.targetBranch}{#if run.reconcile.depth > 1} · попытка {run.reconcile.depth}{/if}</strong>{#if run.reconcile.conflicts.length}<p>{run.reconcile.conflicts.join('\n')}</p>{/if}</div>{/if}{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}{#if run.steps?.length}<WorkflowChecklist {run} />{:else if run.followup?.workflow?.steps.length}<WorkflowChecklist {run} historical />{/if}{@render instructionSnapshot(run)}{#if run.integration}<IntegrationPanel integration={run.integration} historical />{/if}<div class="run-details">Ход {run.turn}{#if run.worker}<span> · Усилия: {effortLabel(run.worker.effort)}</span>{/if}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
       {/if}
       {#if runCanResume && !interruptedWithoutSession}
         <form class="resume-panel" hidden={detailTab !== 'conversation'} onpaste={(event) => answerComposer?.handlePaste(event)} onsubmit={(event) => { event.preventDefault(); if (selectedTask && (answer.trim() || answerAttachmentCount || currentRun?.status === 'interrupted')) void act(selectedTask, 'resume', answer); }}>
@@ -1105,7 +1118,7 @@
         {:else}<WorkflowEditor bind:steps={formSteps} {workers} originalWorkerIds={formOriginalStepWorkers} disabled={submitting} loading={workersLoading} unavailableProviders={info?.mode === 'cli' ? info.providers.filter(provider => !provider.available).map(provider => provider.id) : []} />{/if}
         {#if workersError}<div class="field-warning"><span>Не удалось обновить список работников.{!formComplex ? ' Можно выбрать модель вручную.' : ' Проверьте подключения и повторите загрузку.'}</span><button type="button" onclick={() => { void loadWorkers(); }}>Повторить</button></div>{/if}
         <label class="form-field"><span>Рабочая папка <span class="required">*</span></span><div class="input-with-icon"><Icon name="folder" size={16} /><input bind:value={formCwd} name="cwd" maxlength="4096" placeholder="/workspace/projects/my-project" required disabled={submitting} spellcheck="false" /></div><small>{formComplex ? 'Одна общая папка для всех этапов. Следующий работник увидит файлы предыдущего.' : 'Абсолютный путь к папке, в которой будет работать агент.'}</small></label>
-        <div class="schedule-section"><div class="schedule-title"><span class="schedule-title-icon"><Icon name="clock" size={18} /></span><div><strong>Когда запускать</strong><span>Один раз вручную или регулярно</span></div></div><div class="schedule-switch"><button type="button" class:selected={formSchedule === 'manual'} aria-pressed={formSchedule === 'manual'} disabled={submitting} onclick={() => formSchedule = 'manual'}><Icon name="play" size={14} />Вручную</button><button type="button" class:selected={formSchedule === 'interval'} aria-pressed={formSchedule === 'interval'} disabled={submitting} onclick={() => formSchedule = 'interval'}><Icon name="clock" size={14} />По расписанию</button></div>{#if formSchedule === 'interval'}<div class="schedule-fields"><label class="form-field"><span>Повторять каждые</span><div class="input-suffix"><input type="number" bind:value={formInterval} name="intervalMinutes" min="1" max="525600" step="1" required disabled={submitting} /><span>минут</span></div></label><label class="form-field"><span>Первый запуск</span><input type="datetime-local" bind:value={formFirstRun} name="firstRunAt" disabled={submitting} /><small>Пусто: сразу после сохранения. Местное время.</small></label></div><label class="pause-option"><input type="checkbox" bind:checked={formPaused} disabled={submitting} /><span>Сохранить расписание на паузе</span></label><p class="schedule-note">Планировщик работает, пока запущен сервер brigd. Активные запуски одной задачи не накладываются.</p>{/if}</div>
+        <div class="schedule-section"><div class="schedule-title"><span class="schedule-title-icon"><Icon name="clock" size={18} /></span><div><strong>Когда запускать</strong><span>Вручную, регулярно или из очереди автопилота</span></div></div><div class="schedule-switch"><button type="button" class:selected={formSchedule === 'manual'} aria-pressed={formSchedule === 'manual'} disabled={submitting} onclick={() => formSchedule = 'manual'}><Icon name="play" size={14} />Вручную</button><button type="button" class:selected={formSchedule === 'interval'} aria-pressed={formSchedule === 'interval'} disabled={submitting} onclick={() => formSchedule = 'interval'}><Icon name="clock" size={14} />По расписанию</button><button type="button" class:selected={formSchedule === 'auto'} aria-pressed={formSchedule === 'auto'} disabled={submitting} onclick={() => formSchedule = 'auto'}><Icon name="moon" size={14} />Автопилот</button></div>{#if formSchedule === 'interval'}<div class="schedule-fields"><label class="form-field"><span>Повторять каждые</span><div class="input-suffix"><input type="number" bind:value={formInterval} name="intervalMinutes" min="1" max="525600" step="1" required disabled={submitting} /><span>минут</span></div></label><label class="form-field"><span>Первый запуск</span><input type="datetime-local" bind:value={formFirstRun} name="firstRunAt" disabled={submitting} /><small>Пусто: сразу после сохранения. Местное время.</small></label></div><label class="pause-option"><input type="checkbox" bind:checked={formPaused} disabled={submitting} /><span>Сохранить расписание на паузе</span></label><p class="schedule-note">Планировщик работает, пока запущен сервер brigd. Активные запуски одной задачи не накладываются.</p>{/if}{#if formSchedule === 'auto'}<label class="pause-option"><input type="checkbox" bind:checked={formPaused} disabled={submitting} /><span>Пока отложить: не брать из очереди</span></label><p class="schedule-note">Задача встанет в очередь автопилота и запустится, когда дойдёт её очередь и освободится место. Включить автопилот на ночь можно в разделе «Автопилот».</p>{/if}</div>
         {#if info?.mode === 'mock'}<div class="editor-mode-note"><Icon name="spark" size={14} /><span>Демо-режим: реальные CLI не вызываются.</span></div>{:else}<div class="editor-mode-note"><Icon name="terminal" size={14} /><span>Агент может изменять файлы в рабочей папке согласно инструкции.</span></div>{/if}
       </div>
       <footer class="editor-footer"><button type="button" class="button secondary" onclick={closeEditor} disabled={submitting}>Отмена</button><button type="submit" class="button primary" disabled={submitting || formUploading || formAttachmentInvalid}>{#if submitting}<Icon name="refresh" class="spin" size={16} />{:else}<Icon name={editingId ? 'check' : 'plus'} size={16} />{/if}{submitting ? 'Сохраняем…' : editingId ? 'Сохранить изменения' : 'Создать задачу'}</button></footer>

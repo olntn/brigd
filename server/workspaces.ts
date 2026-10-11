@@ -10,7 +10,7 @@ export interface RepositoryLocation {
   projectCwd: string;
 }
 export interface WorkspaceProvider {
-  locate(run: Run): RepositoryLocation;
+  locate(run: Pick<Run, 'cwd' | 'workspace'>): RepositoryLocation;
   plan(run: Run, location: RepositoryLocation): WorkspaceSnapshot;
   prepare(workspace: WorkspaceSnapshot): void | Promise<void>;
 }
@@ -35,7 +35,7 @@ function direct(run: Run, location: RepositoryLocation): WorkspaceSnapshot {
 }
 /** Demos and injected factories perform no Git or worktree mutations. */
 export class DirectWorkspaces implements WorkspaceProvider {
-  locate(run: Run): RepositoryLocation {
+  locate(run: Pick<Run, 'cwd' | 'workspace'>): RepositoryLocation {
     let path = resolve(run.cwd);
     try { path = realpathSync(path); } catch { /* Synthetic test folders need not exist. */ }
     return { projectCwd: path, repositoryRoot: path, repositoryId: path };
@@ -45,7 +45,7 @@ export class DirectWorkspaces implements WorkspaceProvider {
 }
 export class GitWorkspaces implements WorkspaceProvider {
   constructor(readonly root: string, private readonly checks?: string[][]) {}
-  locate(run: Run): RepositoryLocation {
+  locate(run: Pick<Run, 'cwd' | 'workspace'>): RepositoryLocation {
     if (run.workspace) return { repositoryId: run.workspace.repositoryId, repositoryRoot: run.workspace.repositoryRoot, projectCwd: run.workspace.projectCwd };
     return repository(run.cwd);
   }

@@ -474,3 +474,61 @@ describe('scheduler and restart safety', () => {
     expect(agent.calls).toHaveLength(1);
   });
 });
+
+describe('autopilot', () => {
+  test('claims pool tasks oldest first and one per repository, keeps the rest editable, and continues as slots free up', async () => {
+    const now = Date.now();
+    const other = join(folder, 'other');
+    const first = store.createTask(input(folder, { schedule: 'auto' }), now - 3);
+    const second = store.createTask(input(folder, { schedule: 'auto' }), now - 2);
+    const third = store.createTask(input(other, { schedule: 'auto' }), now - 1);
+    engine.tick(now);
+    expect(agent.calls).toHaveLength(0);
+    const overview = engine.setAutopilot({ enabled: true, until: null }, now);
+    await flush();
+    expect(overview).toMatchObject({ enabled: true, startedAt: now, pool: [{ id: second.id }] });
+    expect(overview.attempts.map(run => run.taskId)).toEqual([first.id, third.id]);
+    expect(agent.calls.map(call => call.input.cwd)).toEqual([folder, other]);
+    expect(store.detail(second.id).runs).toHaveLength(0);
+    engine.tick(now + 1_000);
+    expect(agent.calls).toHaveLength(2);
+    agent.calls[0]!.resolve(outcome());
+    await flush();
+    expect(store.detail(first.id).runs[0]?.status).toBe('completed');
+    engine.tick(now + 2_000);
+    expect(agent.calls).toHaveLength(3);
+    expect(store.detail(second.id).runs[0]).toMatchObject({ trigger: 'autopilot', status: 'running' });
+    // One attempt per task and session: a failure waits for a person instead of being retried.
+    agent.calls[2]!.reject(new Error('CLI crashed'));
+    await flush();
+    expect(store.detail(second.id).runs[0]?.status).toBe('failed');
+    engine.tick(now + 3_000);
+    expect(agent.calls).toHaveLength(3);
+    expect(store.autopilotOverview()).toMatchObject({ enabled: true, failures: 1, pool: [] });
+  });
+
+  test('stops claiming at the stop time while started work finishes; a restart switches it off', async () => {
+    const now = Date.now();
+    const first = store.createTask(input(folder, { schedule: 'auto' }), now - 2);
+    const second = store.createTask(input(folder, { schedule: 'auto' }), now - 1);
+    engine.setAutopilot({ enabled: true, until: now + 60_000 }, now);
+    await flush();
+    expect(agent.calls).toHaveLength(1);
+    engine.tick(now + 60_000);
+    expect(store.getAutopilot()).toMatchObject({ enabled: false, stopReason: 'until', stoppedAt: now + 60_000 });
+    expect(store.detail(first.id).runs[0]?.status).toBe('running');
+    agent.calls[0]!.resolve(outcome());
+    await flush();
+    engine.tick(now + 61_000);
+    expect(agent.calls).toHaveLength(1);
+    expect(store.detail(second.id).runs).toHaveLength(0);
+    expect(store.detail(first.id).runs[0]?.status).toBe('completed');
+    engine.setAutopilot({ enabled: true, until: null }, now + 62_000);
+    await flush();
+    expect(agent.calls).toHaveLength(2);
+    // The restart path interrupts running work and never resumes unattended claiming on its own.
+    store.reconcile(now + 63_000);
+    expect(store.getAutopilot()).toMatchObject({ enabled: false, stopReason: 'restart' });
+    expect(store.detail(second.id).runs[0]?.status).toBe('interrupted');
+  });
+});

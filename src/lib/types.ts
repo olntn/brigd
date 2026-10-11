@@ -123,7 +123,8 @@ export interface TaskInput {
   instruction: string;
   provider: Provider;
   cwd: string;
-  schedule: 'manual' | 'interval';
+  /** auto: the autopilot starts the task when its turn comes and a slot is free. */
+  schedule: 'manual' | 'interval' | 'auto';
   intervalMinutes: number | null;
   firstRunAt: number | null;
   paused: boolean;
@@ -189,7 +190,7 @@ export interface Run {
   provider: Provider;
   cwd: string;
   instruction: string;
-  trigger: 'manual' | 'schedule' | 'followup' | 'reconcile';
+  trigger: 'manual' | 'schedule' | 'followup' | 'reconcile' | 'autopilot';
   scheduledFor: number | null;
   status: RunStatus;
   sessionId: string | null;
@@ -268,4 +269,25 @@ export interface Envelope {
   status: 'needs_input' | 'completed' | 'blocked';
   summary: string;
   questions: string[];
+}
+export type AutopilotStopReason = 'manual' | 'until' | 'failures' | 'restart';
+export interface AutopilotInput {
+  enabled: boolean;
+  /** Stop claiming new tasks at this time; running work finishes on its own. null: until switched off. */
+  until: number | null;
+}
+/** The single autopilot switch. A session starts when it is enabled; attempts, the failure counter and the report count from there. */
+export interface AutopilotState extends AutopilotInput {
+  startedAt: number | null;
+  stoppedAt: number | null;
+  stopReason: AutopilotStopReason | null;
+  /** Consecutive failed or blocked autopilot runs in the current session. */
+  failures: number;
+  updatedAt: number;
+}
+export interface AutopilotOverview extends AutopilotState {
+  /** Tasks the autopilot will start next, in claim order. */
+  pool: Task[];
+  /** Runs the autopilot started in the current or last session. */
+  attempts: Run[];
 }

@@ -3,7 +3,7 @@ import type { AppInfo } from '../src/lib/types';
 import { Engine } from './engine';
 import { AppError } from './store';
 import { MAX_AVATAR_BYTES, validateAvatar } from './avatars';
-import { textField, validateIntegratorProfile, validateTask, validateWorker } from './validation';
+import { textField, validateAutopilot, validateIntegratorProfile, validateTask, validateWorker } from './validation';
 import { TASK_JSON_LIMIT } from './workflows';
 import { ATTACHMENT_MAX_BYTES } from '../src/lib/attachments';
 import { attachmentIds, attachmentDisposition, prepareAttachment } from './attachments';
@@ -129,6 +129,8 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         }
         if (method === 'DELETE') return json(engine.store.archiveWorker(id));
       }
+      if (path === '/api/autopilot' && method === 'GET') return json(engine.store.autopilotOverview());
+      if (path === '/api/autopilot' && method === 'PATCH') return json(engine.setAutopilot(validateAutopilot(await body(req))));
       if (path === '/api/integrator' && method === 'GET') return json(engine.store.getIntegratorProfile());
       if (path === '/api/integrator' && method === 'PATCH') {
         const current = engine.store.getIntegratorProfile(), patch = await body(req);
