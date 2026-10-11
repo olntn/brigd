@@ -79,7 +79,7 @@ test('editor validation, nested dismiss, interval and pause survive reload', asy
   await form.getByLabel('Сохранить расписание на паузе').check();
   await form.getByRole('button', { name: 'Создать задачу', exact: true }).click();
   const drawer = page.getByRole('dialog', { name: title, exact: true });
-  await expect(drawer.getByText('На паузе', { exact: true })).toBeVisible();
+  await expect(drawer.getByRole('button', { name: 'Возобновить расписание', exact: true })).toBeVisible();
   await drawer.getByRole('button', { name: 'Изменить', exact: true }).click();
   const editor = page.getByRole('dialog', { name: 'Редактировать задачу', exact: true });
   await editor.locator('[name="title"]').fill('Не сохранять');
@@ -94,7 +94,7 @@ test('editor validation, nested dismiss, interval and pause survive reload', asy
   await page.reload();
   await page.getByLabel('Поиск задач', { exact: true }).fill(title);
   await page.getByRole('button', { name: `Открыть задачу: ${title}`, exact: true }).click();
-  await expect(page.getByRole('dialog', { name: title }).getByText('На паузе', { exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: title }).getByRole('button', { name: 'Возобновить расписание', exact: true })).toBeVisible();
 });
 
 test('cancel a running turn, inspect other status and keep cancellation durable', async ({ page, request }) => {

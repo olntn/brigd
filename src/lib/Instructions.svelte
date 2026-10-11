@@ -213,7 +213,7 @@
 </script>
 
 <section class="page-heading">
-  <div><div class="eyebrow">ОБЩИЕ ПРАВИЛА ДЛЯ АГЕНТОВ</div><h1 bind:this={heading} tabindex="-1">Инструкции<span>{instructions.length}</span></h1><p>Сохраните правила, которые важны в каждой задаче.</p></div>
+  <div><h1 bind:this={heading} tabindex="-1">Инструкции</h1><p>Сохраните правила, которые важны в каждой задаче.</p></div>
   <button bind:this={createButton} class="button primary create-button" disabled={!!pending || instructions.length >= INSTRUCTION_COUNT_LIMIT} onclick={() => openEditor()}><Icon name="plus" size={17} />Новая инструкция</button>
 </section>
 <div class="workers-note instructions-note"><Icon name="list" size={18} /><p>Включённые инструкции применяются ко всем новым запускам любых задач: вручную и по расписанию, в Codex и Claude Code. Каждый запуск сохраняет свою копию. Изменение, выключение или удаление правила не меняет уже начатые запуски и их продолжения.</p></div>
@@ -241,7 +241,7 @@
 <dialog bind:this={editor} class="editor-dialog instruction-editor" aria-labelledby="instruction-editor-title" oncancel={(event) => { event.preventDefault(); closeEditor(); }} onclick={(event) => backdropClick(event, editor, closeEditor)}>
   {#if editing}
     <form class="editor-form" onsubmit={save} aria-busy={saving}>
-      <header class="editor-header"><div><span class="editor-kicker">ОБЩЕЕ ПРАВИЛО</span><h2 id="instruction-editor-title">{editingId ? 'Редактировать инструкцию' : 'Новая инструкция'}</h2></div><button type="button" class="icon-button" aria-label="Закрыть инструкцию" disabled={saving} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
+      <header class="editor-header"><div><h2 id="instruction-editor-title">{editingId ? 'Редактировать инструкцию' : 'Новая инструкция'}</h2></div><button type="button" class="icon-button" aria-label="Закрыть инструкцию" disabled={saving} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
       <div class="editor-fields">
         {#if formError}<div class="form-error" role="alert"><Icon name="alert" size={17} /><span>{formError}</span></div>{/if}
         <label class="form-field"><span>Название <span class="required">*</span></span><input name="instructionTitle" aria-label="Название инструкции" aria-describedby="instruction-title-count" bind:value={title} maxlength={INSTRUCTION_TITLE_LIMIT} placeholder="Например, проверка изменений" required disabled={saving} /><small id="instruction-title-count">{count(title.length)} / {count(INSTRUCTION_TITLE_LIMIT)} символов</small></label>

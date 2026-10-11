@@ -6,6 +6,7 @@
   let { run, historical = false }: { run: Run; historical?: boolean } = $props();
   let steps = $derived(historical ? run.followup?.workflow?.steps ?? [] : run.steps);
   const labels: Record<RunStepStatus, string> = {
+    queued: 'В очереди', preparing: 'Подготовка',
     pending: 'Ожидает очереди', running: 'В работе', cancelling: 'Останавливается', waiting_input: 'Нужен ответ',
     completed: 'Завершено', blocked: 'Заблокировано', failed: 'Ошибка', interrupted: 'Прервано', cancelled: 'Отменено',
   };

@@ -135,7 +135,7 @@ describe('authoritative current-task MCP broker', () => {
 });
 
 describe('real official SDK stdio transport', () => {
-  test('initializes and exposes exactly the five task tools without database access', async () => {
+  test('initializes and exposes exactly the six task tools without database access', async () => {
     const client = new Client({ name: 'brigd-test', version: '1.0.0' });
     const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('server/task-mcp-stdio.ts')], stderr: 'pipe',
       env: { BRIGD_TASK_SOCKET: join(directory, 'absent.sock'), BRIGD_TASK_CAPABILITY: '1'.repeat(64) } });

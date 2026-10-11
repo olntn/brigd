@@ -2,7 +2,8 @@ import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot } from '../src/lib/types';
+import type { Attachment, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
+import type { RepositoryLocation } from './workspaces';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { DEFAULT_TAG_COLOR, TAG_COUNT_LIMIT } from '../src/lib/tags';
 import { tagNameKey, validateTag, validateTagIds, validateTagPatch } from './tags';
@@ -18,9 +19,10 @@ import { ATTACHMENT_MAX_COUNT, ATTACHMENT_TASK_MAX_COUNT, ATTACHMENT_TASK_MAX_BY
 export { AppError } from './errors';
 type Row = Record<string, any>;
 const ATTACHMENT_COLUMNS = 'a.id,a.task_id,a.comment_id,a.run_id,a.step_index,a.attempt_id,a.source,a.name,a.mime,a.size,a.sha256,a.previewable,a.created_at';
-const OPEN = "'running','cancelling','waiting_input','interrupted'";
+const OPEN = "'queued','preparing','running','cancelling','waiting_input','interrupted'";
 const OCCUPIED = `(status IN (${OPEN}) OR (steps_snapshot != '[]' AND status IN ('failed','blocked')))`;
 export interface RunFence { turn: number; currentStepIndex: number | null; attemptId: string | null; }
+export interface ExecutionRequest { runId: string; turn: number; answer: string | undefined; location: RepositoryLocation; }
 export function runFence(run: Run): RunFence {
   return { turn: run.turn, currentStepIndex: run.currentStepIndex,
     attemptId: run.currentStepIndex === null ? null : run.steps[run.currentStepIndex]?.attempts.at(-1)?.id ?? null };
@@ -223,6 +225,7 @@ export class Store {
         ['runs', 'workflow_version', 'INTEGER NOT NULL DEFAULT 0'],
         ['runs', 'cancel_requested', 'INTEGER NOT NULL DEFAULT 0'],
         ['runs', 'followup_snapshot', 'TEXT'],
+        ['runs', 'workspace_id', 'TEXT'],
         ['comments', 'step_index', 'INTEGER'],
         ['tasks', 'archived_at', 'INTEGER'],
       ]) {
@@ -230,6 +233,23 @@ export class Store {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
         }
       }
+      // Replace the legacy predicate atomically: queued work also occupies a task.
+      this.db.exec(`DROP INDEX IF EXISTS one_open_run;
+        CREATE UNIQUE INDEX one_open_run ON runs(task_id) WHERE status IN (${OPEN});
+        CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, snapshot TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS execution_requests (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id), turn INTEGER NOT NULL,
+          repository_id TEXT NOT NULL, location TEXT NOT NULL, answer TEXT, state TEXT NOT NULL,
+          UNIQUE(run_id,turn)
+        );
+        DROP INDEX IF EXISTS one_repository_execution;
+        CREATE INDEX IF NOT EXISTS repository_executions ON execution_requests(repository_id,state);
+        CREATE TABLE IF NOT EXISTS integrations (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, run_id TEXT UNIQUE NOT NULL REFERENCES runs(id),
+          repository_id TEXT NOT NULL, state TEXT NOT NULL, attempt INTEGER NOT NULL, snapshot TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS one_repository_integration ON integrations(repository_id)
+          WHERE state IN ('checking','merging','cancelling','interrupted');`);
     }).immediate();
     this.db.exec(`CREATE TABLE IF NOT EXISTS followup_requests (
       task_id TEXT NOT NULL REFERENCES tasks(id), request_id TEXT NOT NULL,
@@ -720,7 +740,7 @@ export class Store {
       if (steps.length < 2 || steps.length > 20 || !Number.isInteger(row.current_step_index) || row.current_step_index < 0 || row.current_step_index >= steps.length) invalid();
       validateWorkflowSteps(steps.map(({ workerId, title, instruction }) => ({ workerId, title, instruction })));
       if (![0, 1].includes(row.cancel_requested) || (row.status === 'completed' && row.current_step_index !== steps.length - 1) || (row.status === 'cancelled' && !row.cancel_requested)) invalid();
-      const statuses = ['running', 'cancelling', 'waiting_input', 'interrupted', 'failed', 'blocked', 'completed', 'cancelled'];
+      const statuses = ['queued', 'preparing', 'running', 'cancelling', 'waiting_input', 'interrupted', 'failed', 'blocked', 'completed', 'cancelled'];
       const nullableText = (value: unknown) => value === null || typeof value === 'string';
       for (const [index, step] of steps.entries()) {
         if (!validWorkerSnapshot(step.worker) || step.worker.id !== step.workerId || !Array.isArray(step.attempts) || !['pending', ...statuses].includes(step.status)) invalid();
@@ -745,7 +765,8 @@ export class Store {
       }
     } else invalid();
     const followup = followupSnapshot(row, worker as WorkerSnapshot | null);
-    return { followup, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
+    const workspace = row.workspace_id ? this.getWorkspace(row.workspace_id) : null;
+    return { integration: this.integrationForRun(row.id), workspace, followup, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
       trigger: row.trigger, scheduledFor: row.scheduled_for, status: row.status, sessionId: row.session_id,
       startedAt: row.started_at, updatedAt: row.updated_at, finishedAt: row.finished_at, summary: row.summary,
       error: row.error, turn: row.turn, mock: !!row.mock };
@@ -755,10 +776,15 @@ export class Store {
     const worker = row.worker_id ? this.getWorker(row.worker_id) : null;
     const hasCompletedRun = !!this.db.query("SELECT 1 FROM runs WHERE task_id=? AND status='completed' LIMIT 1").get(row.id);
     const tags = this.taskTags(row.id);
+    const latestRun = latest ? this.mapRun(latest) : null;
+    const integrationStatuses: Partial<Record<Integration['status'], Task['status']>> = {
+      queued: 'awaiting_merge', checking: 'integrating', merging: 'integrating', cancelling: 'integrating',
+      conflict: 'merge_conflict', failed: 'merge_failed', blocked: 'merge_blocked', interrupted: 'merge_interrupted', cancelled: 'merge_blocked',
+    };
     return { tagIds: tags.map(tag => tag.id), tags, hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd,
       schedule: row.schedule, intervalMinutes: row.interval_minutes, firstRunAt: row.first_run_at,
       nextRunAt: row.next_run_at, paused: !!row.paused, createdAt: row.created_at, updatedAt: row.updated_at, archivedAt: row.archived_at ?? null,
-      status: latest?.status ?? 'ready', latestRun: latest ? this.mapRun(latest) : null,
+      status: latestRun?.integration ? integrationStatuses[latestRun.integration.status] ?? latestRun.status : latest?.status ?? 'ready', latestRun,
       runCount: (this.db.query('SELECT count(*) AS n FROM runs WHERE task_id = ?').get(row.id) as Row).n };
   }
   listTasks(tagId?: string): Task[] {
@@ -801,7 +827,8 @@ export class Store {
     return this.mapRun(row);
   }
   activeRun(taskId: string): Run | null {
-    const row = this.db.query(`SELECT * FROM runs WHERE task_id = ? AND ${OCCUPIED}`).get(taskId) as Row | null;
+    const row = this.db.query(`SELECT * FROM runs WHERE task_id = ? AND (${OCCUPIED} OR EXISTS
+      (SELECT 1 FROM integrations i WHERE i.run_id=runs.id AND i.state IN ('queued','checking','merging','cancelling','interrupted')))`).get(taskId) as Row | null;
     return row ? this.mapRun(row) : null;
   }
   detail(id: string): TaskDetail {
@@ -939,7 +966,9 @@ export class Store {
       this.assertNotArchived(this.getTask(taskId));
       const source = this.getRun(input.sourceRunId);
       if (source.taskId !== taskId) throw new AppError('Исходный запуск относится к другой задаче', 409);
-      if (source.status !== 'completed') throw new AppError('Продолжить можно только завершённый запуск', 409);
+      // A scalar agent that stopped as blocked awaits guidance in its saved
+      // session; blocked workflow stages keep the explicit retry/cancel path.
+      if (source.status !== 'completed' && !(source.status === 'blocked' && !source.steps.length)) throw new AppError('Продолжить можно только завершённый или заблокированный агентом запуск', 409);
       if (source.workerId !== (source.worker?.id ?? null) || (source.worker && source.worker.provider !== source.provider)) invalidSnapshot();
       if (this.activeRun(taskId)) throw new AppError('У задачи уже есть активный запуск. Сначала завершите или отмените его.', 409);
       let selected: RunStep | null = null;
@@ -961,6 +990,7 @@ export class Store {
         VALUES (?,?,?,?,?,'followup','running',?,?,?,?,?,?,?,?)`)
         .run(id, taskId, worker?.provider ?? source.provider, source.cwd, source.instruction, sessionId, now, now, +source.mock,
           worker?.id ?? null, worker ? JSON.stringify(worker) : null, JSON.stringify(source.instructions), JSON.stringify(followup));
+      this.db.query('UPDATE runs SET workspace_id=(SELECT workspace_id FROM runs WHERE id=?) WHERE id=?').run(source.id, id);
       // Freeze only the selected saved turn's inputs. No current task edits or
       // later workflow stages may leak into an earlier stage's continuation.
       const sourceTurn = selected ? selected.attempts.at(-1)!.turn : source.turn;
@@ -984,11 +1014,186 @@ export class Store {
         const occurrence = nextOccurrence(task.nextRunAt!, task.intervalMinutes!, now);
         // Consume this occurrence even while waiting. Never accumulate a missed backlog.
         this.db.query('UPDATE tasks SET next_run_at=? WHERE id=?').run(occurrence.next, task.id);
-        if (this.activeRun(task.id) || settlingTaskIds.includes(task.id)) continue;
+        const active = this.activeRun(task.id);
+        if (active || settlingTaskIds.includes(task.id)) {
+          // Coalesce an unstarted scheduled request to the newest occurrence.
+          if (active?.status === 'queued' && active.trigger === 'schedule') {
+            this.db.query('UPDATE runs SET scheduled_for=? WHERE id=?').run(occurrence.latest, active.id);
+          }
+          continue;
+        }
         if (this.db.query('SELECT id FROM runs WHERE task_id=? AND scheduled_for=?').get(task.id, occurrence.latest)) continue;
         claimed.push(this.insertRun(task, 'schedule', occurrence.latest, mock, now));
       }
       return claimed;
+    }).immediate();
+  }
+  getWorkspace(id: string): WorkspaceSnapshot {
+    const row = this.db.query('SELECT snapshot FROM workspaces WHERE id=?').get(id) as Row | null;
+    if (!row) invalidSnapshot();
+    const value = JSON.parse(row.snapshot) as WorkspaceSnapshot;
+    if (value.id !== id || !['worktree', 'direct'].includes(value.mode) || typeof value.prepared !== 'boolean' ||
+        ![value.repositoryId, value.repositoryRoot, value.projectCwd, value.path, value.cwd].every(path => typeof path === 'string' && isAbsolute(path) && !path.includes('\0')) ||
+        (value.mode === 'worktree' && (typeof value.branch !== 'string' || !/^brigd\/run-[a-zA-Z0-9-]+$/.test(value.branch) || typeof value.baseCommit !== 'string' || !/^[a-f0-9]{40,64}$/.test(value.baseCommit)))) invalidSnapshot();
+    return value;
+  }
+  enqueueExecution(run: Run, location: RepositoryLocation, answer?: string): Run {
+    return this.db.transaction(() => {
+      const current = this.getRun(run.id);
+      if (current.status !== 'running' || !matchesFence(current, runFence(run))) throw new AppError('Этот ход уже завершён или заменён', 409);
+      this.db.query("UPDATE execution_requests SET state='settled' WHERE run_id=? AND state IN ('held','interrupted')").run(run.id);
+      this.db.query("INSERT INTO execution_requests (run_id,turn,repository_id,location,answer,state) VALUES (?,?,?,?,?,'queued')")
+        .run(run.id, run.turn, location.repositoryId, JSON.stringify(location), answer ?? null);
+      this.executionStatus(current, 'queued');
+      return this.getRun(run.id);
+    }).immediate();
+  }
+  pendingExecutions(): ExecutionRequest[] {
+    return (this.db.query(`SELECT e.* FROM execution_requests e JOIN runs r ON r.id=e.run_id AND r.turn=e.turn
+      WHERE e.state='queued' AND r.status='queued' ORDER BY e.seq`).all() as Row[])
+      .map(row => ({ runId: row.run_id, turn: row.turn, answer: row.answer ?? undefined, location: JSON.parse(row.location) }));
+  }
+  claimExecution(request: ExecutionRequest, maximum: number, perRepository = 1): Run | null {
+    return this.db.transaction(() => {
+      const run = this.getRun(request.runId);
+      if (run.status !== 'queued' || run.turn !== request.turn) return null;
+      const uncertain = this.db.query("SELECT seq FROM execution_requests WHERE repository_id=? AND state IN ('interrupted','held')").get(request.location.repositoryId);
+      const occupied = (this.db.query("SELECT COUNT(*) AS n FROM execution_requests WHERE repository_id=? AND state IN ('preparing','running')").get(request.location.repositoryId) as { n: number }).n;
+      const direct = run.workspace?.mode === 'direct' || !run.workspace && !!run.sessionId;
+      const shared = this.db.query(`SELECT r.id FROM execution_requests e JOIN runs r ON r.id=e.run_id
+        LEFT JOIN workspaces w ON w.id=r.workspace_id WHERE e.repository_id=? AND e.state IN ('preparing','running')
+        AND (json_extract(w.snapshot,'$.mode')='direct' OR (r.workspace_id IS NULL AND r.session_id IS NOT NULL))`).get(request.location.repositoryId);
+      const integration = this.db.query("SELECT seq FROM integrations WHERE repository_id=? AND state IN ('queued','checking','merging','cancelling','interrupted')").get(request.location.repositoryId);
+      if (uncertain || integration || shared || direct && occupied > 0 || occupied >= perRepository || this.occupiedSlots() >= maximum) return null;
+      const result = this.db.query("UPDATE execution_requests SET state='preparing' WHERE run_id=? AND turn=? AND state='queued'").run(run.id, run.turn);
+      if (!result.changes) return null;
+      this.executionStatus(run, 'preparing');
+      return this.getRun(run.id);
+    }).immediate();
+  }
+  private executionStatus(run: Run, status: RunStatus, now = Date.now()) {
+    this.db.query('UPDATE runs SET status=?,updated_at=? WHERE id=?').run(status, now, run.id);
+    if (run.currentStepIndex !== null) {
+      updateStep(run.steps[run.currentStepIndex]!, { status, updatedAt: now });
+      this.persistSteps(run);
+    }
+  }
+  attachWorkspace(runId: string, fence: RunFence, workspace: WorkspaceSnapshot) {
+    this.db.transaction(() => {
+      const run = this.getRun(runId);
+      if (run.status !== 'preparing' || !matchesFence(run, fence)) return;
+      this.db.query('INSERT OR IGNORE INTO workspaces (id,snapshot) VALUES (?,?)').run(workspace.id, JSON.stringify(workspace));
+      this.db.query('UPDATE runs SET workspace_id=? WHERE id=?').run(workspace.id, runId);
+    }).immediate();
+  }
+  beginExecution(runId: string, fence: RunFence): Run | null {
+    return this.db.transaction(() => {
+      const run = this.getRun(runId);
+      if (run.status !== 'preparing' || !matchesFence(run, fence)) return null;
+      if (run.workspace) this.db.query('UPDATE workspaces SET snapshot=? WHERE id=?').run(JSON.stringify({ ...run.workspace, prepared: true }), run.workspace.id);
+      this.db.query("UPDATE execution_requests SET state='running' WHERE run_id=? AND turn=? AND state='preparing'").run(runId, fence.turn);
+      this.executionStatus(run, 'running');
+      return this.getRun(runId);
+    }).immediate();
+  }
+  failPreparation(runId: string, fence: RunFence, message: string, blocked: boolean) {
+    this.db.transaction(() => {
+      const run = this.getRun(runId);
+      if (!['queued', 'preparing'].includes(run.status) || !matchesFence(run, fence)) return;
+      this.executionStatus(run, 'running');
+      this.finish(runId, blocked ? 'blocked' : 'failed', null, message, Date.now(), fence);
+      this.log(run.taskId, runId, { kind: 'lifecycle', summary: 'Подготовка запуска остановлена', details: [message] }, Date.now(), run.currentStepIndex);
+    }).immediate();
+  }
+  settleExecution(runId: string, turn: number, hold = false) {
+    this.db.query("UPDATE execution_requests SET state=? WHERE run_id=? AND turn=? AND state IN ('queued','preparing','running')")
+      .run(hold ? 'held' : 'settled', runId, turn);
+  }
+  executionNeedsAcknowledgement(runId: string): boolean {
+    return !!this.db.query("SELECT seq FROM execution_requests WHERE run_id=? AND state='interrupted'").get(runId);
+  }
+  private occupiedSlots(): number {
+    return (this.db.query(`SELECT (SELECT COUNT(*) FROM execution_requests WHERE state IN ('preparing','running','interrupted')) +
+      (SELECT COUNT(*) FROM integrations WHERE state IN ('checking','merging','cancelling','interrupted')) AS n`).get() as { n: number }).n;
+  }
+  integrationForRun(runId: string): Integration | null {
+    const row = this.db.query('SELECT snapshot FROM integrations WHERE run_id=?').get(runId) as Row | null;
+    return row ? JSON.parse(row.snapshot) as Integration : null;
+  }
+  queueIntegration(runId: string, retry = false, acknowledgement = false): Integration | null {
+    return this.db.transaction(() => {
+      const run = this.getRun(runId);
+      if (run.status !== 'completed' || run.workspace?.mode !== 'worktree') return null;
+      this.assertNotArchived(this.getTask(run.taskId));
+      const prior = this.integrationForRun(runId);
+      if (prior) {
+        if (!retry || ['queued', 'checking', 'merging', 'cancelling', 'merged'].includes(prior.status)) return prior;
+        if (prior.status === 'interrupted' && !acknowledgement) throw new AppError('Сначала подтвердите, что прежние процессы проверки и слияния остановлены.', 409);
+        // A follow-up sharing this workspace must finish before an older result
+        // can be captured again; completed historical snapshots stay intact.
+        const active = this.db.query(`SELECT id FROM runs WHERE workspace_id=? AND status IN (${OPEN})`).get(run.workspace.id);
+        if (active) throw new AppError('Сначала завершите активное продолжение этой рабочей папки.', 409);
+        const next = { ...prior, status: 'queued' as const, rechecks: 0, error: null, checks: [], updatedAt: Date.now() };
+        this.writeIntegration(next); return next;
+      }
+      const job: Integration = { id: crypto.randomUUID(), runId, repositoryId: run.workspace.repositoryId, status: 'queued', attempt: 0,
+        sourceCommit: null, targetCommit: null, resultCommit: null, candidatePath: null, checks: [], error: null, updatedAt: Date.now() };
+      this.db.query('INSERT INTO integrations (id,run_id,repository_id,state,attempt,snapshot) VALUES (?,?,?,?,?,?)')
+        .run(job.id, runId, job.repositoryId, job.status, job.attempt, JSON.stringify(job));
+      return job;
+    }).immediate();
+  }
+  private writeIntegration(job: Integration) {
+    this.db.query('UPDATE integrations SET state=?,attempt=?,snapshot=? WHERE id=?').run(job.status, job.attempt, JSON.stringify(job), job.id);
+  }
+  claimIntegrations(maximum: number): Integration[] {
+    return this.db.transaction(() => {
+      const claimed: Integration[] = [];
+      const rows = this.db.query("SELECT snapshot FROM integrations WHERE state='queued' ORDER BY seq").all() as Row[];
+      for (const row of rows) {
+        const job = JSON.parse(row.snapshot) as Integration;
+        if (this.occupiedSlots() >= maximum) break;
+        if (this.db.query("SELECT seq FROM execution_requests WHERE repository_id=? AND state IN ('preparing','running','interrupted','held')").get(job.repositoryId) ||
+            this.db.query("SELECT seq FROM integrations WHERE repository_id=? AND state IN ('checking','merging','cancelling','interrupted')").get(job.repositoryId)) continue;
+        const next = { ...job, status: 'checking' as const, attempt: job.attempt + 1, error: null, sourceCommit: null, targetCommit: null, resultCommit: null, candidatePath: null, checks: [], updatedAt: Date.now() };
+        this.writeIntegration(next); claimed.push(next);
+      }
+      return claimed;
+    }).immediate();
+  }
+  updateIntegration(id: string, attempt: number, patch: Partial<Integration>, finish = false): Integration | null {
+    return this.db.transaction(() => {
+      const row = this.db.query('SELECT snapshot FROM integrations WHERE id=?').get(id) as Row | null;
+      if (!row) return null;
+      const job = JSON.parse(row.snapshot) as Integration;
+      if (job.attempt !== attempt || !['checking', 'merging', 'cancelling'].includes(job.status)) return job;
+      if (job.status === 'cancelling' && !finish) return job;
+      const next: Integration = { ...job, ...patch, id: job.id, runId: job.runId, repositoryId: job.repositoryId, attempt: job.attempt, updatedAt: Date.now(),
+        ...(job.status === 'cancelling' ? { status: 'cancelled', error: 'Слияние отменено. Уже выполненные Git-операции не откатываются.' } : {}) };
+      if (next.status === 'queued') {
+        next.rechecks = (job.rechecks ?? 0) + 1;
+        if (next.rechecks >= 3) Object.assign(next, { status: 'blocked', error: 'Целевая ветка неоднократно изменялась во время проверки. Повторите слияние после завершения изменений.' });
+      }
+      this.writeIntegration(next);
+      if (finish) {
+        const run = this.getRun(job.runId);
+        if (next.status === 'merged' && run.workspace && next.sourceCommit) {
+          this.db.query('UPDATE workspaces SET snapshot=? WHERE id=?').run(JSON.stringify({ ...run.workspace, lastIntegratedCommit: next.sourceCommit }), run.workspace.id);
+        }
+        this.log(run.taskId, run.id, { kind: 'integration', summary: next.status === 'merged' ? 'Проверенный результат принят в целевую ветку' : 'Проверка и слияние завершены',
+          details: [`Статус: ${next.status}.`, ...(next.error ? [next.error] : []), ...next.checks.map((check, index) => `Проверка ${index + 1}: код ${check.exitCode}.`)] });
+      }
+      return next;
+    }).immediate();
+  }
+  cancelIntegration(runId: string, pending: boolean, acknowledgement = false): Integration {
+    return this.db.transaction(() => {
+      const job = this.integrationForRun(runId);
+      if (!job) throw new AppError('У запуска нет слияния', 409);
+      if (job.status === 'interrupted' && !acknowledgement) throw new AppError('Сначала подтвердите, что прежние процессы проверки и слияния остановлены.', 409);
+      if (!['queued', 'checking', 'merging', 'interrupted'].includes(job.status)) throw new AppError('Слияние уже завершено', 409);
+      const next = { ...job, status: pending ? 'cancelling' as const : 'cancelled' as const, updatedAt: Date.now() };
+      this.writeIntegration(next); return next;
     }).immediate();
   }
   isCurrent(id: string, fence: RunFence): boolean {
@@ -1077,10 +1282,11 @@ export class Store {
   cancel(id: string, now = Date.now(), pending = false, acknowledgeInterruption = false): Run {
     return this.db.transaction(() => {
       const run = this.getRun(id);
-      if ((run.steps.length || run.followup) && run.status === 'interrupted' && !acknowledgeInterruption) throw new AppError('Сначала подтвердите, что предыдущий CLI-процесс остановлен. Отмена освобождает задачу для новых запусков.', 409);
-      const cancellable = ['running', 'waiting_input', 'interrupted', ...(run.steps.length ? ['failed', 'blocked'] : [])];
+      if ((run.steps.length || run.followup || this.executionNeedsAcknowledgement(id)) && run.status === 'interrupted' && !acknowledgeInterruption) throw new AppError('Сначала подтвердите, что предыдущий CLI-процесс остановлен. Отмена освобождает задачу для новых запусков.', 409);
+      const cancellable = ['queued', 'preparing', 'running', 'waiting_input', 'interrupted', ...(run.steps.length ? ['failed', 'blocked'] : [])];
       if (!cancellable.includes(run.status)) throw new AppError('Запуск уже завершён', 409);
       this.db.query('UPDATE runs SET status=?,updated_at=?,finished_at=?,cancel_requested=1 WHERE id=?').run(pending ? 'cancelling' : 'cancelled', now, pending ? null : now, id);
+      if (!pending) this.db.query("UPDATE execution_requests SET state='settled' WHERE run_id=? AND state IN ('queued','held','interrupted')").run(id);
       if (run.currentStepIndex !== null) {
         const current = run.steps[run.currentStepIndex]!;
         // Preserve the final failed/blocked attempt as history when abandoning it.
@@ -1106,7 +1312,12 @@ export class Store {
   }
   reconcile(now = Date.now()): number {
     return this.db.transaction(() => {
-      const rows = this.db.query("SELECT * FROM runs WHERE status IN ('running','cancelling')").all() as Row[];
+      const rows = this.db.query("SELECT * FROM runs WHERE status IN ('preparing','running','cancelling')").all() as Row[];
+      this.db.query("UPDATE execution_requests SET state='interrupted' WHERE state IN ('preparing','running')").run();
+      for (const row of this.db.query("SELECT snapshot FROM integrations WHERE state IN ('checking','merging','cancelling')").all() as Row[]) {
+        const job = JSON.parse(row.snapshot) as Integration;
+        this.writeIntegration({ ...job, status: 'interrupted', updatedAt: now, error: 'Сервис остановился во время проверки или слияния. Проверьте прежние процессы перед повтором.' });
+      }
       for (const row of rows) {
         const run = this.mapRun(row);
         const error = 'Сервис остановился во время запуска. Автоматический повтор отключён; проверьте предыдущий CLI-процесс перед продолжением.';

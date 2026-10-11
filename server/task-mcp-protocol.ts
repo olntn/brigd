@@ -1,6 +1,6 @@
 /** Wire-only definitions. The stdio helper must never import Store or database code. */
 import { ATTACHMENT_MAX_COUNT } from '../src/lib/attachments';
-export const TASK_MCP_TOOLS = ['list_attachments', 'read_attachment', 'view_attachment', 'add_comment', 'add_attachment'] as const;
+export const TASK_MCP_TOOLS = ['list_attachments', 'read_attachment', 'view_attachment', 'add_comment', 'add_attachment', 'commit_changes'] as const;
 export type TaskMcpTool = typeof TASK_MCP_TOOLS[number];
 export const TASK_MCP_ENV = ['BRIGD_TASK_SOCKET', 'BRIGD_TASK_CAPABILITY'] as const;
 export const MAX_TASK_REQUEST_BYTES = 64 * 1024;
@@ -41,5 +41,8 @@ export const TASK_MCP_DEFINITIONS = [
     annotations: { ...annotations, readOnlyHint: false, idempotentHint: false } },
   { name: 'add_attachment', description: 'Publish a regular file from this invocation’s output directory to this task. path must be a single relative filename, without directory separators. Never reads arbitrary project or home paths.',
     inputSchema: { type: 'object', properties: { idempotency_key: key, path: { ...string, maxLength: 240 }, name: { ...string, maxLength: 240 }, mime: { ...string, maxLength: 120 }, caption: { ...string, maxLength: 16000 } }, required: ['path', 'mime', 'idempotency_key'], additionalProperties: false },
+    annotations: { ...annotations, readOnlyHint: false, idempotentHint: false } },
+  { name: 'commit_changes', description: 'Create a Git commit in this task’s working folder; .git is read-only inside the sandbox, so brigd commits on your behalf. Stages new, changed and deleted files under the working folder, or only the given paths relative to it. Task artifact directories are never committed and Git hooks do not run. Returns the commit and committed files; committed=false means there was nothing to commit.',
+    inputSchema: { type: 'object', properties: { message: { ...string, maxLength: 5000 }, paths: { type: 'array', items: { ...string, maxLength: 1000 }, minItems: 1, maxItems: 100, uniqueItems: true } }, required: ['message'], additionalProperties: false },
     annotations: { ...annotations, readOnlyHint: false, idempotentHint: false } },
 ] as const;

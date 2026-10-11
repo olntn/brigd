@@ -154,7 +154,7 @@
   <div class="model-provider-groups">
     {#each providers as group}
       <section class="model-provider-group" aria-label={'Модели ' + providerName(group)}>
-        <div class="model-provider-heading"><h4>{providerName(group)} <span>{models.filter(entry => entry.provider === group).length}</span></h4><button type="button" data-add-provider={group} class="button secondary" disabled={busy} onclick={(event) => openEditor(group, event.currentTarget)} aria-label={'Добавить модель ' + providerName(group)}><Icon name="plus" size={15} />Добавить</button></div>
+        <div class="model-provider-heading"><h4>{providerName(group)}</h4><button type="button" data-add-provider={group} class="button secondary" disabled={busy} onclick={(event) => openEditor(group, event.currentTarget)} aria-label={'Добавить модель ' + providerName(group)}><Icon name="plus" size={15} />Добавить</button></div>
         <div class="model-catalog-list">
           {#each models.filter(entry => entry.provider === group) as entry (entry.id)}
             <article class="model-catalog-entry" data-model-id={entry.id} aria-label={'Модель: ' + entry.label}>

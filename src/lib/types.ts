@@ -70,8 +70,8 @@ export interface Tag extends TagInput {
   updatedAt: number;
 }
 
-export type RunStatus = 'running' | 'cancelling' | 'waiting_input' | 'completed' | 'blocked' | 'failed' | 'interrupted' | 'cancelled';
-export type TaskStatus = 'ready' | RunStatus;
+export type RunStatus = 'queued' | 'preparing' | 'running' | 'cancelling' | 'waiting_input' | 'completed' | 'blocked' | 'failed' | 'interrupted' | 'cancelled';
+export type TaskStatus = 'ready' | RunStatus | 'awaiting_merge' | 'integrating' | 'merge_conflict' | 'merge_failed' | 'merge_blocked' | 'merge_interrupted';
 export interface TaskStepInput {
   workerId: string;
   title: string;
@@ -150,6 +150,8 @@ export interface RunFollowup {
   workflow: { steps: RunStep[]; currentStepIndex: number } | null;
 }
 export interface Run {
+  integration?: Integration | null;
+  workspace?: WorkspaceSnapshot | null;
   followup?: RunFollowup | null;
   inputAttachments?: Attachment[];
   steps: RunStep[];
@@ -173,6 +175,38 @@ export interface Run {
   error: string | null;
   turn: number;
   mock: boolean;
+}
+/** Persisted before preparation; retained for exact-session continuations. */
+export interface WorkspaceSnapshot {
+  id: string;
+  repositoryId: string;
+  projectCwd: string;
+  repositoryRoot: string;
+  path: string;
+  cwd: string;
+  branch: string | null;
+  baseCommit: string | null;
+  targetBranch: string | null;
+  mode: 'worktree' | 'direct';
+  prepared: boolean;
+  checkCommands?: string[][];
+  lastIntegratedCommit?: string | null;
+}
+export type IntegrationStatus = 'queued' | 'checking' | 'merging' | 'cancelling' | 'merged' | 'conflict' | 'failed' | 'blocked' | 'interrupted' | 'cancelled';
+export interface Integration {
+  id: string;
+  runId: string;
+  repositoryId: string;
+  status: IntegrationStatus;
+  attempt: number;
+  rechecks?: number;
+  sourceCommit: string | null;
+  targetCommit: string | null;
+  resultCommit: string | null;
+  candidatePath: string | null;
+  checks: { argv: string[]; exitCode: number }[];
+  error: string | null;
+  updatedAt: number;
 }
 export interface Comment {
   attachments?: Attachment[];

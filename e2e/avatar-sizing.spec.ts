@@ -41,7 +41,7 @@ async function fixtureApi(page: Page) {
     if (path === '/api/info') return route.fulfill({ json: info });
     if (path === '/api/avatars/avatar-sizing-photo') return route.fulfill({ contentType: 'image/png', body: png });
     if (path === '/api/workers') return route.fulfill({ json: workers });
-    if (path === '/api/models' || path === '/api/instructions') return route.fulfill({ json: [] });
+    if (path === '/api/models' || path === '/api/instructions' || path === '/api/tags') return route.fulfill({ json: [] });
     if (path === '/api/tasks') return route.fulfill({ json: details.map(detail => detail.task) });
     const detail = details.find(detail => path === `/api/tasks/${detail.task.id}`);
     return route.fulfill(detail ? { json: detail } : { status: 404, json: { error: 'Unknown avatar fixture' } });
@@ -134,14 +134,16 @@ for (const layout of [
       await noPrivateText(drawer);
       const message = drawer.locator('#task-comment');
       await message.fill('Уточни результат в той же сессии.');
+      const recipientToggle = drawer.getByLabel('Выбрать сессию агента', { exact: true });
       const recipient = drawer.getByRole('combobox', { name: 'Получатель дополнительного запроса', exact: true });
-      if (detail.task.steps.length > 1) {
-        const picker = drawer.locator('.followup-session-picker summary');
-        await reachable(picker);
-        await picker.click();
+      if (detail.task.steps.length) {
+        await reachable(recipientToggle);
+        await recipientToggle.click();
         await reachable(recipient);
-        await picker.click();
+        await recipient.press('Escape');
+        await expect(recipient).not.toBeVisible();
       } else {
+        await expect(recipientToggle).toHaveCount(0);
         await expect(recipient).toHaveCount(0);
       }
       await reachable(drawer.getByRole('button', { name: 'Сохранить заметку', exact: true }));

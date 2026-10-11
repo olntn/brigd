@@ -176,10 +176,12 @@ export function createHandler(engine: Engine, options: HttpOptions) {
           return json(engine.store.comment(id, null, 'user', text, Date.now(), undefined, ids), 201);
         }
       }
-      const runMatch = path.match(/^\/api\/runs\/([a-zA-Z0-9-]+)\/(resume|cancel|retry)$/);
+      const runMatch = path.match(/^\/api\/runs\/([a-zA-Z0-9-]+)\/(resume|cancel|retry|integrate|cancel-integration)$/);
       if (runMatch && method === 'POST') {
         const [, id, action] = runMatch;
         const value = await body(req);
+        if (action === 'integrate') return json(engine.integrate(id, value.acknowledgeInterruption === true));
+        if (action === 'cancel-integration') return json(engine.cancelIntegration(id, value.acknowledgeInterruption === true));
         if (action === 'cancel') return json(engine.cancel(id, value.acknowledgeInterruption === true));
         if (action === 'retry') return json(engine.retry(id, value.acknowledgeInterruption === true));
         const ids = attachmentIds(value.attachmentIds);

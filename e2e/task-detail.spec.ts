@@ -174,7 +174,6 @@ test('a saved agent answer and its matching result appear as one final comment a
     await expect(comments.locator('.comment-entry')).toHaveCount(1);
     await expect(comments.getByText(answer, { exact: true })).toHaveCount(1);
     await expect(comments.locator('.comment-result').getByText(answer, { exact: true })).toBeVisible();
-    await expect(dialog.getByRole('tab', { name: /Комментарии/ }).locator('span')).toHaveText('1');
   }
 });
 

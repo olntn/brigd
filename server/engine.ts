@@ -1,18 +1,35 @@
-import type { FollowupInput, Run } from '../src/lib/types';
+import type { FollowupInput, Integration, Run } from '../src/lib/types';
 import { startAgent, buildPrompt, type AgentHandle, type AgentInput, type AgentCallbacks } from './adapter';
 import { AppError, Store, runFence, type RunFence } from './store';
 import { validateEnvelope, validateSessionId } from './protocol';
 import { workflowContext } from './workflows';
 import { createTaskBridge } from './task-mcp';
+import { dirname, join, resolve } from 'node:path';
+import { DirectWorkspaces, GitWorkspaces, WorkspaceError, type WorkspaceProvider } from './workspaces';
+import { GitIntegrator, type Integrator } from './integration';
 
 export type AgentFactory = (input: AgentInput, callbacks: AgentCallbacks) => AgentHandle;
 export type TaskBridgeFactory = (store: Store, run: Run, fence: RunFence) => ReturnType<typeof createTaskBridge>;
+export interface EngineOptions { workspaces?: WorkspaceProvider; maxParallel?: number; maxPerRepository?: number; integrator?: Integrator; integrationChecks?: string[][]; }
 interface Launch { taskId: string; handle: AgentHandle | null; fence: RunFence; cancelRequested: boolean; bridge?: ReturnType<typeof createTaskBridge>; settled?: Promise<void>; }
 export class Engine {
   private handles = new Map<string, Launch>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private closing = false;
-  constructor(readonly store: Store, readonly mock = false, private factory: AgentFactory = startAgent, private bridgeFactory?: TaskBridgeFactory) {}
+  private draining = false;
+  private readonly workspaces: WorkspaceProvider;
+  private readonly maxParallel: number;
+  private readonly maxPerRepository: number;
+  private readonly integrator: Integrator;
+  private integrationHandles = new Map<string, { abort: AbortController; settled: Promise<void> }>();
+  constructor(readonly store: Store, readonly mock = false, private factory: AgentFactory = startAgent, private bridgeFactory?: TaskBridgeFactory, options: EngineOptions = {}) {
+    this.workspaces = options.workspaces ?? (mock || factory !== startAgent ? new DirectWorkspaces() : new GitWorkspaces(join(dirname(resolve(store.db.filename)), 'workspaces')));
+    this.maxParallel = options.maxParallel ?? 4;
+    this.maxPerRepository = options.maxPerRepository ?? 1;
+    this.integrator = options.integrator ?? new GitIntegrator(options.integrationChecks);
+    if (!Number.isInteger(this.maxParallel) || this.maxParallel < 1 || this.maxParallel > 32) throw new Error('Лимит процессов должен быть 1–32');
+    if (!Number.isInteger(this.maxPerRepository) || this.maxPerRepository < 1 || this.maxPerRepository > 32) throw new Error('Лимит агентов на репозиторий должен быть 1–32');
+  }
   startScheduler() {
     if (this.timer || this.closing) return;
     this.store.reconcile();
@@ -21,7 +38,10 @@ export class Engine {
   }
   tick(now = Date.now()) {
     if (this.closing) return;
-    for (const run of this.store.claimDue(this.mock, now, [...this.handles.values()].map(launch => launch.taskId))) this.launch(run);
+    this.store.db.transaction(() => {
+      for (const run of this.store.claimDue(this.mock, now, [...this.handles.values()].map(launch => launch.taskId))) this.enqueue(run);
+    }).immediate();
+    this.drain();
   }
   private assertTaskSettled(taskId: string) {
     if ([...this.handles.values()].some(launch => launch.taskId === taskId)) throw new AppError('Предыдущий CLI-процесс этой задачи ещё завершается', 409);
@@ -29,8 +49,8 @@ export class Engine {
   start(taskId: string): Run {
     if (this.closing) throw new AppError('Сервис останавливается', 503);
     this.assertTaskSettled(taskId);
-    const run = this.store.startManual(taskId, this.mock);
-    this.launch(run);
+    const run = this.store.db.transaction(() => this.enqueue(this.store.startManual(taskId, this.mock))).immediate();
+    this.drain();
     return this.store.getRun(run.id);
   }
   followup(taskId: string, input: FollowupInput): Run {
@@ -40,22 +60,25 @@ export class Engine {
     if (prior) return prior;
     if (this.closing) throw new AppError('Сервис останавливается', 503);
     this.assertTaskSettled(taskId);
-    const { run, created } = this.store.startFollowup(taskId, input);
-    if (created) this.launch(run);
+    const { run, created } = this.store.db.transaction(() => {
+      const result = this.store.startFollowup(taskId, input);
+      return { run: result.created ? this.enqueue(result.run) : result.run, created: result.created };
+    }).immediate();
+    if (created) this.drain();
     return this.store.getRun(run.id);
   }
   resume(runId: string, answer: string, acknowledgement: boolean, attachmentIds: string[] = []): Run {
     if (this.closing) throw new AppError('Сервис останавливается', 503);
     if (this.handles.has(runId)) throw new AppError('Предыдущий CLI-процесс ещё завершается', 409);
-    const run = this.store.resume(runId, answer, acknowledgement, Date.now(), attachmentIds);
-    this.launch(run, answer);
+    const run = this.store.db.transaction(() => this.enqueue(this.store.resume(runId, answer, acknowledgement, Date.now(), attachmentIds), answer)).immediate();
+    this.drain();
     return this.store.getRun(run.id);
   }
   retry(runId: string, acknowledgement = false): Run {
     if (this.closing) throw new AppError('Сервис останавливается', 503);
     if (this.handles.has(runId)) throw new AppError('Предыдущий CLI-процесс ещё завершается', 409);
-    const run = this.store.retry(runId, acknowledgement);
-    this.launch(run);
+    const run = this.store.db.transaction(() => this.enqueue(this.store.retry(runId, acknowledgement))).immediate();
+    this.drain();
     return this.store.getRun(run.id);
   }
   cancel(runId: string, acknowledgement = false): Run {
@@ -66,20 +89,86 @@ export class Engine {
       launch.bridge?.close();
       launch.handle?.cancel();
     }
+    this.drain();
     return result;
   }
-  private launch(run: Run, answer?: string) {
+  private enqueue(run: Run, answer?: string): Run {
+    try {
+      const location = run.workspace ? { repositoryId: run.workspace.repositoryId, repositoryRoot: run.workspace.repositoryRoot, projectCwd: run.workspace.projectCwd } : this.workspaces.locate(run);
+      return this.store.enqueueExecution(run, location, answer);
+    } catch (error) {
+      if (!(error instanceof WorkspaceError)) throw error;
+      return this.store.finish(run.id, 'blocked', null, error.message, Date.now(), runFence(run));
+    }
+  }
+  private drain() {
+    if (this.closing || this.draining) return;
+    this.draining = true;
+    try {
+      for (const job of this.store.claimIntegrations(this.maxParallel)) this.integrateJob(job);
+      for (const request of this.store.pendingExecutions()) {
+        const run = this.store.claimExecution(request, this.maxParallel, this.maxPerRepository);
+        if (!run) continue;
+        const launch: Launch = { taskId: run.taskId, handle: null, fence: runFence(run), cancelRequested: false };
+        this.handles.set(run.id, launch);
+        const ready = () => {
+          if (launch.cancelRequested || this.closing) { this.release(run, launch); return; }
+          const current = this.store.beginExecution(run.id, launch.fence);
+          if (!current) { this.release(run, launch); return; }
+          return this.invoke(current, launch, request.answer);
+        };
+        const failed = (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          this.store.failPreparation(run.id, launch.fence, message.slice(0, 16_000), error instanceof WorkspaceError);
+          this.release(run, launch);
+        };
+        try {
+          const workspace = this.workspaces.plan(run, request.location);
+          this.store.attachWorkspace(run.id, launch.fence, workspace);
+          const preparation = this.workspaces.prepare(workspace);
+          if (preparation instanceof Promise) launch.settled = preparation.then(ready).catch(failed);
+          else launch.settled = ready() ?? Promise.resolve();
+        } catch (error) { failed(error); }
+      }
+    } finally { this.draining = false; }
+  }
+  integrate(runId: string, acknowledgement = false): Integration {
+    if (this.closing) throw new AppError('Сервис останавливается', 503);
+    if (this.integrationHandles.has(runId)) throw new AppError('Предыдущие процессы слияния ещё завершаются', 409);
+    const job = this.store.queueIntegration(runId, true, acknowledgement);
+    if (!job) throw new AppError('Для слияния нужен завершённый запуск в отдельном worktree', 409);
+    this.drain(); return this.store.integrationForRun(runId)!;
+  }
+  cancelIntegration(runId: string, acknowledgement = false): Integration {
+    const handle = this.integrationHandles.get(runId);
+    const job = this.store.cancelIntegration(runId, !!handle, acknowledgement);
+    handle?.abort.abort(new Error('Integration cancelled'));
+    this.drain(); return job;
+  }
+  private integrateJob(job: Integration) {
+    const abort = new AbortController();
+    const settled = this.integrator.execute(this.store.getRun(job.runId), job, abort.signal,
+      patch => { this.store.updateIntegration(job.id, job.attempt, patch); })
+      .then(result => { this.store.updateIntegration(job.id, job.attempt, result, true); })
+      .catch(error => { this.store.updateIntegration(job.id, job.attempt, { status: 'blocked', error: error instanceof Error ? error.message : 'Слияние остановлено' }, true); })
+      .finally(() => { this.integrationHandles.delete(job.runId); this.drain(); });
+    this.integrationHandles.set(job.runId, { abort, settled });
+  }
+  private release(run: Run, launch: Launch) {
+    launch.bridge?.close();
+    this.store.completeCancellation(run.id, Date.now(), launch.fence);
+    const current = this.store.getRun(run.id);
+    const hold = !current.mock && current.workspace?.mode === 'direct' &&
+      (current.status === 'waiting_input' || !!current.steps.length && ['failed', 'blocked'].includes(current.status));
+    this.store.settleExecution(run.id, launch.fence.turn, hold);
+    if (this.handles.get(run.id) === launch) this.handles.delete(run.id);
+    this.drain();
+  }
+  private invoke(run: Run, launch: Launch, answer?: string): Promise<void> | undefined {
     const fence = runFence(run);
-    if (this.closing || this.handles.has(run.id) || !this.store.isCurrent(run.id, fence)) return;
-    // Reserve before invoking a factory: even synchronous callback/cancel paths
-    // cannot launch another worker or lose a cancellation before the handle exists.
-    const launch: Launch = { taskId: run.taskId, handle: null, fence, cancelRequested: false };
-    this.handles.set(run.id, launch);
+    if (this.closing || !this.store.isCurrent(run.id, fence)) { this.release(run, launch); return; }
     const isCurrent = () => this.store.isCurrent(run.id, fence);
-    const release = () => {
-      launch.bridge?.close();
-      if (this.handles.get(run.id) === launch) this.handles.delete(run.id);
-    };
+    const release = () => this.release(run, launch);
     let handle: AgentHandle;
     let commentCursor: number;
     try {
@@ -88,9 +177,10 @@ export class Engine {
       // Mock and injected factories need no transport or filesystem authority.
       // An explicit bridge factory lets integration tests exercise the lifecycle.
       if (!run.mock && (this.factory === startAgent || this.bridgeFactory)) {
-        launch.bridge = (this.bridgeFactory ?? createTaskBridge)(this.store, run, fence);
+        launch.bridge = (this.bridgeFactory ?? createTaskBridge)(this.store, { ...run, cwd: run.workspace?.cwd ?? run.cwd }, fence);
       }
-      const input: AgentInput = { provider: run.provider, cwd: run.cwd, instruction: run.instruction, instructions: run.instructions,
+      const input: AgentInput = { provider: run.provider, cwd: run.workspace?.cwd ?? run.cwd, instruction: run.instruction, instructions: run.instructions,
+        ...(run.workspace?.mode === 'worktree' ? { workspace: run.workspace } : {}),
         ...(run.inputAttachments?.length ? { attachments: run.inputAttachments } : {}), ...(launch.bridge ? { taskBridge: launch.bridge.agentConfig } : {}),
         model: run.worker?.model ?? null, effort: run.worker?.effort ?? 'default', communicationStyle: run.worker?.communicationStyle ?? '',
         sessionId: run.sessionId ?? undefined, answer, mock: run.mock, ...(workflow ? { workflow } : {}),
@@ -132,12 +222,11 @@ export class Engine {
       release();
       return;
     }
-    launch.settled = handle.result.then(({ envelope: rawEnvelope, sessionId: rawSessionId }) => {
+    return handle.result.then(({ envelope: rawEnvelope, sessionId: rawSessionId }) => {
       launch.bridge?.close();
       if (!isCurrent()) return;
       const envelope = validateEnvelope(rawEnvelope);
       const sessionId = validateSessionId(rawSessionId);
-      let next: Run | null = null;
       this.store.db.transaction(() => {
         if (!isCurrent()) return;
         this.store.setSession(run.id, sessionId, fence);
@@ -152,12 +241,12 @@ export class Engine {
         }, Date.now(), run.currentStepIndex);
         this.store.recordAgentSummary(run.taskId, run.id, status === 'completed' ? 'result' : 'agent', envelope.summary, commentCursor, Date.now(), run.currentStepIndex);
         for (const question of envelope.questions) this.store.comment(run.taskId, run.id, 'question', question, Date.now(), run.currentStepIndex);
-        if (result.status === 'running' && result.turn !== run.turn) next = result;
+        if (result.status === 'running' && result.turn !== run.turn) this.enqueue(result);
+        else if (result.status === 'completed') this.store.queueIntegration(result.id);
       }).immediate();
       // The old process has settled. Its later finally must never remove or
       // complete cancellation of a newer step/attempt occupying this same run.
       release();
-      if (next) this.launch(next);
     }).catch(error => this.fail(run, fence, error)).finally(() => {
       this.store.completeCancellation(run.id, Date.now(), fence);
       release();
@@ -179,6 +268,8 @@ export class Engine {
     this.store.reconcile();
     const launches = [...this.handles.values()];
     for (const launch of launches) { launch.cancelRequested = true; launch.bridge?.close(); launch.handle?.cancel(); }
-    await Promise.allSettled(launches.map(launch => launch.settled ?? launch.handle?.result ?? Promise.resolve()));
+    const integrations = [...this.integrationHandles.values()];
+    for (const integration of integrations) integration.abort.abort(new Error('Service stopped'));
+    await Promise.allSettled([...launches.map(launch => launch.settled ?? launch.handle?.result ?? Promise.resolve()), ...integrations.map(integration => integration.settled)]);
   }
 }

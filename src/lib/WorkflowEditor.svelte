@@ -46,7 +46,7 @@
 </script>
 
 <div class="workflow-editor" bind:this={container}>
-  <div class="workflow-section-heading"><div><h3>Последовательность этапов</h3><p>От 2 до 20 этапов. Следующий работник начнёт только после успешного завершения предыдущего.</p></div><span class="workflow-count">{steps.length}/{WORKFLOW_MAX_STEPS}</span></div>
+  <div class="workflow-section-heading"><div><h3>Последовательность этапов</h3><p>От 2 до 20 этапов. Следующий работник начнёт только после успешного завершения предыдущего.</p></div></div>
   <p class="sr-only" role="status">{announcement}</p>
   <ol class="workflow-draft-list">
     {#each steps as step, index (step.key)}
