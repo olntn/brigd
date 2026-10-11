@@ -2,6 +2,8 @@
   import { onDestroy, tick } from 'svelte';
   import Icon from './Icon.svelte';
   import WorkerAvatar from './WorkerAvatar.svelte';
+  import AvatarEditor from './AvatarEditor.svelte';
+  import { defaultAvatarCrop, exportAvatar, type AvatarCrop } from './avatar';
   import { effortOptions, effortLabel, modelLabel, normalizeModel, MODEL_ID_LIMIT } from './workers';
   import type { Effort, ModelCatalogEntry, Provider, Worker, WorkerInput } from './types';
 
@@ -25,7 +27,11 @@
   let avatarUrl = $state<string | null>(null);
   let previewUrl = $state<string | null>(null);
   let avatarBlob = $state<Blob | null>(null);
-  let imageBusy = $state(false);
+  let imageSource = $state.raw<ImageBitmap | null>(null);
+  let avatarCrop = $state<AvatarCrop>(defaultAvatarCrop());
+  let imageLoading = $state(false);
+  let imageRendering = $state(false);
+  let imageBusy = $derived(imageLoading || imageRendering);
   let submitting = $state(false);
   let formError = $state('');
   let imageError = $state('');
@@ -57,12 +63,24 @@
     previewUrl = null;
     avatarBlob = null;
   }
-  onDestroy(() => { imageSequence++; clearPreview(); });
+  function clearImageSource() {
+    imageSource?.close();
+    imageSource = null;
+    imageRendering = false;
+    avatarCrop = defaultAvatarCrop();
+  }
+  function previewAvatar(blob: Blob) {
+    clearPreview();
+    avatarBlob = blob;
+    previewUrl = URL.createObjectURL(blob);
+  }
+  onDestroy(() => { imageSequence++; clearPreview(); clearImageSource(); });
 
   async function openEditor(worker?: Worker) {
     imageSequence++;
     clearPreview();
-    imageBusy = false;
+    clearImageSource();
+    imageLoading = false;
     editingId = worker?.id ?? null;
     name = worker?.name ?? '';
     description = worker?.description ?? '';
@@ -83,10 +101,11 @@
   function closeEditor() {
     if (submitting) return;
     imageSequence++;
-    imageBusy = false;
+    imageLoading = false;
     dialog.close();
     editing = false;
     clearPreview();
+    clearImageSource();
   }
 
   function changeProvider(event: Event) {
@@ -104,8 +123,9 @@
 
   function removeAvatar() {
     imageSequence++;
-    imageBusy = false;
+    imageLoading = false;
     clearPreview();
+    clearImageSource();
     avatarUrl = null;
     imageError = '';
     if (fileInput) fileInput.value = '';
@@ -113,7 +133,7 @@
 
   function resetImageError() {
     imageSequence++;
-    imageBusy = false;
+    imageLoading = false;
     imageError = '';
     if (fileInput) fileInput.value = '';
   }
@@ -123,37 +143,52 @@
     if (!file) return;
     const sequence = ++imageSequence;
     imageError = '';
-    imageBusy = false;
+    imageLoading = false;
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
       imageError = 'Выберите PNG, JPEG или WebP. SVG и другие форматы не поддерживаются.'; return;
     }
     if (file.size > 5 * 1024 * 1024 || file.size === 0) {
       imageError = 'Выберите непустое изображение размером до 5 МБ.'; return;
     }
-    imageBusy = true;
+    imageLoading = true;
     let bitmap: ImageBitmap | null = null;
     try {
       bitmap = await createImageBitmap(file);
       if (sequence !== imageSequence) return;
       if (bitmap.width * bitmap.height > 40_000_000) throw new Error('Изображение слишком большое. Уменьшите его до 40 мегапикселей.');
-      const scale = Math.min(1, 256 / Math.max(bitmap.width, bitmap.height));
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-      const context = canvas.getContext('2d');
-      if (!context) throw new Error('Не удалось обработать изображение в этом браузере.');
-      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/webp', .85));
-      if (sequence !== imageSequence) return;
-      if (!blob || blob.size > 256 * 1024) throw new Error('Не удалось уменьшить изображение до 256 КБ. Выберите другое.');
       clearPreview();
-      avatarBlob = blob;
-      previewUrl = URL.createObjectURL(blob);
+      clearImageSource();
+      imageSource = bitmap;
+      bitmap = null;
+      imageRendering = true;
     } catch (error) {
       if (sequence === imageSequence) imageError = error instanceof Error && error.name !== 'InvalidStateError' ? error.message : 'Не удалось прочитать изображение. Выберите другой файл.';
     } finally {
       bitmap?.close();
-      if (sequence === imageSequence) imageBusy = false;
+      if (sequence === imageSequence) imageLoading = false;
+    }
+  }
+
+  async function editAvatar() {
+    if (imageBusy || submitting || !avatarUrl || !/^\/api\/avatars\/[a-f0-9]{64}$/.test(avatarUrl)) return;
+    const sequence = ++imageSequence;
+    imageLoading = true;
+    imageError = '';
+    let bitmap: ImageBitmap | null = null;
+    try {
+      const response = await fetch(avatarUrl);
+      if (!response.ok) throw new Error('Не удалось загрузить аватар. Попробуйте ещё раз.');
+      bitmap = await createImageBitmap(await response.blob());
+      if (sequence !== imageSequence) return;
+      clearImageSource();
+      imageSource = bitmap;
+      bitmap = null;
+      imageRendering = true;
+    } catch (error) {
+      if (sequence === imageSequence) imageError = error instanceof Error ? error.message : 'Не удалось прочитать аватар.';
+    } finally {
+      bitmap?.close();
+      if (sequence === imageSequence) imageLoading = false;
     }
   }
 
@@ -170,6 +205,8 @@
     submitting = true;
     try {
       if (avatarBlob) {
+        // Use the current controls even if the last preview has not painted yet.
+        if (imageSource) avatarBlob = await exportAvatar(imageSource, avatarCrop);
         const uploaded = await request<{ avatarUrl: string }>('/api/avatars', {
           method: 'POST', headers: { 'Content-Type': avatarBlob.type }, body: avatarBlob,
         });
@@ -229,7 +266,8 @@
     <header class="editor-header"><div><span class="editor-kicker">ПРОФИЛЬ РАБОТНИКА</span><h2 id="worker-editor-title">{editingId ? 'Редактировать работника' : 'Новый работник'}</h2></div><button class="icon-button" type="button" aria-label="Закрыть профиль" disabled={submitting} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
     <div class="editor-fields">
       {#if formError}<div class="form-error" role="alert"><Icon name="alert" size={17} />{formError}</div>{/if}
-      <div class="worker-avatar-picker"><WorkerAvatar name={name || 'Работник'} avatarUrl={previewUrl ?? avatarUrl} size={88} /><div><label class="form-field"><span>Аватар</span><input bind:this={fileInput} name="workerAvatar" aria-label="Загрузить аватар" type="file" accept="image/png,image/jpeg,image/webp" onchange={selectImage} disabled={submitting} /><small>PNG, JPEG или WebP до 5 МБ. Уменьшим до 256 × 256 и загрузим при сохранении.</small></label>{#if previewUrl || avatarUrl || imageError}<button type="button" class="avatar-remove" disabled={submitting} onclick={() => imageError ? resetImageError() : removeAvatar()}>{imageError ? 'Сбросить выбор изображения' : 'Убрать аватар'}</button>{/if}</div></div>
+      <div class="worker-avatar-picker"><WorkerAvatar name={name || 'Работник'} avatarUrl={previewUrl ?? avatarUrl} size={88} /><div><label class="form-field"><span>Аватар</span><input bind:this={fileInput} name="workerAvatar" aria-label="Загрузить аватар" type="file" accept="image/png,image/jpeg,image/webp" onchange={selectImage} disabled={submitting} /><small>PNG, JPEG или WebP до 5 МБ. Настройте масштаб и область изображения перед сохранением.</small></label>{#if avatarUrl && !imageSource}<button type="button" class="avatar-remove" disabled={submitting || imageBusy} onclick={editAvatar}>Изменить размер аватара</button>{/if}{#if previewUrl || avatarUrl || imageError}<button type="button" class="avatar-remove" disabled={submitting} onclick={() => imageError ? resetImageError() : removeAvatar()}>{imageError ? 'Сбросить выбор изображения' : 'Убрать аватар'}</button>{/if}</div></div>
+      {#if imageSource}{@const source = imageSource}{#key source}<AvatarEditor image={source} bind:crop={avatarCrop} disabled={submitting} onpreview={(blob) => { if (imageSource === source) previewAvatar(blob); }} onbusy={(busy) => { if (imageSource === source) imageRendering = busy; }} onerror={(message) => { if (imageSource === source) imageError = message; }} />{/key}{/if}
       {#if imageBusy}<p class="worker-image-status" role="status">Подготавливаем изображение…</p>{/if}
       {#if imageError}<div class="form-error" role="alert">{imageError}</div>{/if}
       <label class="form-field"><span>Имя работника <span class="required">*</span></span><input name="workerName" aria-label="Имя работника" bind:value={name} maxlength="80" placeholder="Например, Мира" required disabled={submitting} /></label>

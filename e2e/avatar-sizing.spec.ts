@@ -134,7 +134,16 @@ for (const layout of [
       await noPrivateText(drawer);
       const message = drawer.locator('#task-comment');
       await message.fill('Уточни результат в той же сессии.');
-      await reachable(drawer.getByRole('combobox', { name: 'Получатель дополнительного запроса', exact: true }));
+      const recipient = drawer.getByRole('combobox', { name: 'Получатель дополнительного запроса', exact: true });
+      if (detail.task.steps.length > 1) {
+        const picker = drawer.locator('.followup-session-picker summary');
+        await reachable(picker);
+        await picker.click();
+        await reachable(recipient);
+        await picker.click();
+      } else {
+        await expect(recipient).toHaveCount(0);
+      }
       await reachable(drawer.getByRole('button', { name: 'Сохранить заметку', exact: true }));
       await reachable(drawer.getByRole('button', { name: 'Отправить агенту', exact: true }));
       await expect(drawer.getByRole('button', { name: 'Отправить агенту', exact: true })).toBeEnabled();
