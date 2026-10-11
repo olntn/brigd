@@ -158,7 +158,7 @@ describe('real official SDK stdio transport', () => {
     const transport = new StdioClientTransport({ command: bridge.agentConfig.command, args: bridge.agentConfig.args, env: bridge.agentConfig.env, stderr: 'pipe' });
     try {
       await client.connect(transport);
-      expect((await client.listTools()).tools).toHaveLength(5);
+      expect((await client.listTools()).tools).toHaveLength(6);
       const result = await client.callTool({ name: 'view_attachment', arguments: { attachment_id: a.id } });
       expect(result.isError).not.toBe(true); expect((result.content as any[]).some(x => x.type === 'image')).toBe(true);
       writeFileSync(join(bridge.agentConfig.context.outputDirectory, 'result.txt'), 'SDK publication');
