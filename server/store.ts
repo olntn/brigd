@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
+import type { Attachment, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { DEFAULT_TAG_COLOR, TAG_COUNT_LIMIT } from '../src/lib/tags';
@@ -11,7 +11,7 @@ import { validateInstruction, validateInstructionPatch, validateInstructionSnaps
 import { AppError } from './errors';
 import { validateWorkflowSteps } from './workflows';
 import { validateSessionId } from './protocol';
-import { effortOptions, MODEL_CATALOG_PROVIDER_LIMIT, modelPresets, normalizeModel, normalizeWorkerDescription } from '../src/lib/workers';
+import { effortOptions, INTEGRATOR_WORKER_ID, integratorSnapshot, isBuiltinWorker, MODEL_CATALOG_PROVIDER_LIMIT, modelPresets, normalizeModel, normalizeWorkerDescription } from '../src/lib/workers';
 import { validateModel, validateModelPatch } from './models';
 import { followupRequestText, validateFollowup } from './followups';
 import { attachmentIds, preparedAttachmentPayload, type PreparedAttachment } from './attachments';
@@ -36,6 +36,10 @@ function workerSnapshot(worker: Worker): WorkerSnapshot {
   return { id: worker.id, name: worker.name, description: worker.description, provider: worker.provider, model: worker.model, effort: worker.effort,
     communicationStyle: worker.communicationStyle, avatarUrl: worker.avatarUrl };
 }
+/** The built-in integrator has no catalog row, so runs it performs keep worker_id NULL beside its frozen snapshot. */
+const storedWorkerId = (worker: WorkerSnapshot | null | undefined): string | null => worker && !isBuiltinWorker(worker.id) ? worker.id : null;
+/** Resolved results that conflict again are reconciled once more; constant churn stops here for a human. */
+export const RECONCILE_DEPTH_LIMIT = 3;
 function validatedModel(value: unknown): string | null {
   try { return normalizeModel(value); }
   catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректная модель'); }
@@ -110,7 +114,7 @@ function followupSnapshot(row: Row, worker: WorkerSnapshot | null): RunFollowup 
       typeof value.request !== 'string' || !value.request.trim() || value.request.length > 8_000 || value.request.includes('\0')) invalidSnapshot();
   validateSessionId(row.session_id);
   validateInstructionSnapshots(JSON.parse(row.instructions_snapshot));
-  if (worker ? worker.id !== row.worker_id || worker.provider !== row.provider : row.worker_id !== null) invalidSnapshot();
+  if (worker ? storedWorkerId(worker) !== row.worker_id || worker.provider !== row.provider : row.worker_id !== null) invalidSnapshot();
   if (!['codex', 'claude'].includes(row.provider) || typeof row.cwd !== 'string' || !isAbsolute(row.cwd) || row.cwd.length > 4_096 || row.cwd.includes('\0') ||
       !Number.isSafeInteger(row.turn) || row.turn < 1 ||
       typeof row.instruction !== 'string' || !row.instruction.trim() || row.instruction.length > 16_000 || row.instruction.includes('\0')) invalidSnapshot();
@@ -120,6 +124,24 @@ function followupSnapshot(row: Row, worker: WorkerSnapshot | null): RunFollowup 
     const selected = value.workflow.steps[value.workflow.currentStepIndex]!;
     if (!worker || !sameWorker(worker, selected.worker) || row.session_id !== selected.sessionId) invalidSnapshot();
   } else if (value.sourceStepIndex !== null) invalidSnapshot();
+  return value;
+}
+function reconcileSnapshot(row: Row, worker: WorkerSnapshot | null): RunReconcile | null {
+  if (row.reconcile_snapshot == null) {
+    if (row.trigger === 'reconcile') invalidSnapshot();
+    return null;
+  }
+  if (row.trigger !== 'reconcile' || row.workflow_version !== 0 || row.steps_snapshot !== '[]' || row.current_step_index !== null || row.scheduled_for !== null || row.followup_snapshot != null) invalidSnapshot();
+  const value = JSON.parse(row.reconcile_snapshot) as RunReconcile;
+  const id = (text: unknown) => typeof text === 'string' && /^[a-zA-Z0-9-]{1,100}$/.test(text);
+  const path = (text: unknown) => typeof text === 'string' && !!text && text.length <= 4_096 && !text.includes('\0');
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).sort().join(',') !== 'conflicts,depth,integrationId,sourceRunId,targetBranch,targetCommit' ||
+      !id(value.sourceRunId) || value.sourceRunId === row.id || !id(value.integrationId) || !path(value.targetBranch) ||
+      (value.targetCommit !== null && (typeof value.targetCommit !== 'string' || !/^[a-f0-9]{40,64}$/.test(value.targetCommit))) ||
+      !Array.isArray(value.conflicts) || value.conflicts.length > 200 || !value.conflicts.every(path) ||
+      !Number.isInteger(value.depth) || value.depth < 1 || value.depth > RECONCILE_DEPTH_LIMIT) invalidSnapshot();
+  if (!worker || worker.id !== INTEGRATOR_WORKER_ID || row.worker_id !== null || worker.provider !== row.provider) invalidSnapshot();
   return value;
 }
 function beginAttempt(step: RunStep, turn: number, now: number) {
@@ -226,6 +248,7 @@ export class Store {
         ['runs', 'cancel_requested', 'INTEGER NOT NULL DEFAULT 0'],
         ['runs', 'followup_snapshot', 'TEXT'],
         ['runs', 'workspace_id', 'TEXT'],
+        ['runs', 'reconcile_snapshot', 'TEXT'],
         ['comments', 'step_index', 'INTEGER'],
         ['tasks', 'archived_at', 'INTEGER'],
       ]) {
@@ -765,8 +788,9 @@ export class Store {
       }
     } else invalid();
     const followup = followupSnapshot(row, worker as WorkerSnapshot | null);
+    const reconcile = reconcileSnapshot(row, worker as WorkerSnapshot | null);
     const workspace = row.workspace_id ? this.getWorkspace(row.workspace_id) : null;
-    return { integration: this.integrationForRun(row.id), workspace, followup, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
+    return { integration: this.integrationForRun(row.id), workspace, followup, reconcile, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
       trigger: row.trigger, scheduledFor: row.scheduled_for, status: row.status, sessionId: row.session_id,
       startedAt: row.started_at, updatedAt: row.updated_at, finishedAt: row.finished_at, summary: row.summary,
       error: row.error, turn: row.turn, mock: !!row.mock };
@@ -969,7 +993,7 @@ export class Store {
       // A scalar agent that stopped as blocked awaits guidance in its saved
       // session; blocked workflow stages keep the explicit retry/cancel path.
       if (source.status !== 'completed' && !(source.status === 'blocked' && !source.steps.length)) throw new AppError('Продолжить можно только завершённый или заблокированный агентом запуск', 409);
-      if (source.workerId !== (source.worker?.id ?? null) || (source.worker && source.worker.provider !== source.provider)) invalidSnapshot();
+      if (source.workerId !== storedWorkerId(source.worker) || (source.worker && source.worker.provider !== source.provider)) invalidSnapshot();
       if (this.activeRun(taskId)) throw new AppError('У задачи уже есть активный запуск. Сначала завершите или отмените его.', 409);
       let selected: RunStep | null = null;
       if (source.steps.length) {
@@ -989,7 +1013,7 @@ export class Store {
       this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,status,session_id,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,followup_snapshot)
         VALUES (?,?,?,?,?,'followup','running',?,?,?,?,?,?,?,?)`)
         .run(id, taskId, worker?.provider ?? source.provider, source.cwd, source.instruction, sessionId, now, now, +source.mock,
-          worker?.id ?? null, worker ? JSON.stringify(worker) : null, JSON.stringify(source.instructions), JSON.stringify(followup));
+          storedWorkerId(worker), worker ? JSON.stringify(worker) : null, JSON.stringify(source.instructions), JSON.stringify(followup));
       this.db.query('UPDATE runs SET workspace_id=(SELECT workspace_id FROM runs WHERE id=?) WHERE id=?').run(source.id, id);
       // Freeze only the selected saved turn's inputs. No current task edits or
       // later workflow stages may leak into an earlier stage's continuation.
@@ -1003,6 +1027,44 @@ export class Store {
       for (const attachmentId of input.attachmentIds) this.db.query('INSERT OR IGNORE INTO run_attachment_inputs(run_id,turn,attachment_id) VALUES (?,1,?)').run(id, attachmentId);
       this.db.query('INSERT INTO followup_requests(task_id,request_id,fingerprint,run_id) VALUES (?,?,?,?)').run(taskId, input.requestId, this.followupFingerprint(input), id);
       return { run: this.getRun(id), created: true };
+    }).immediate();
+  }
+  /** Hands the newest conflicted result of a worktree to the built-in integrator in a fresh session. */
+  startReconcile(sourceRunId: string, now = Date.now()): Run {
+    return this.db.transaction(() => {
+      const source = this.getRun(sourceRunId);
+      const task = this.getTask(source.taskId);
+      this.assertNotArchived(task);
+      const integration = source.integration;
+      if (source.status !== 'completed' || source.workspace?.mode !== 'worktree' || !integration) throw new AppError('Интегратор работает только с завершённым запуском в отдельном worktree', 409);
+      if (integration.status !== 'conflict') throw new AppError('Интегратору нужен конфликт слияния. Сейчас слияние в другом состоянии.', 409);
+      if (!source.workspace.targetBranch) throw new AppError('Запуск создан из detached HEAD. Для объединения нужна именованная целевая ветка.', 409);
+      if (this.activeRun(task.id)) throw new AppError('У задачи уже есть активный запуск. Сначала завершите или отмените его.', 409);
+      // Only the newest result of a worktree can be reconciled; a failed earlier attempt may be repeated.
+      const newest = this.db.query('SELECT id FROM runs WHERE workspace_id=? ORDER BY started_at DESC, rowid DESC LIMIT 1').get(source.workspace.id) as Row | null;
+      if (newest && newest.id !== source.id) {
+        const later = this.getRun(newest.id);
+        if (later.reconcile?.sourceRunId !== source.id || later.status === 'completed') throw new AppError('Результат уже заменён более новым запуском этой рабочей папки. Интегратору можно поручить только последний результат.', 409);
+      }
+      const depth = (source.reconcile?.depth ?? 0) + 1;
+      if (depth > RECONCILE_DEPTH_LIMIT) throw new AppError(`Интегратор уже ${RECONCILE_DEPTH_LIMIT} раза объединял этот результат, а целевая ветка снова конфликтует. Разрешите конфликт вручную в исходном worktree и повторите проверку.`, 409);
+      const worker = integratorSnapshot(source.worker?.provider ?? source.provider, source.worker?.model ?? null, source.worker?.effort ?? 'default');
+      const reconcile: RunReconcile = { sourceRunId: source.id, integrationId: integration.id, targetBranch: source.workspace.targetBranch,
+        targetCommit: integration.targetCommit, conflicts: integration.conflicts ?? [], depth };
+      const id = crypto.randomUUID();
+      this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,status,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,reconcile_snapshot,workspace_id)
+        VALUES (?,?,?,?,?,'reconcile','running',?,?,?,NULL,?,?,?,?)`)
+        .run(id, task.id, worker.provider, source.cwd, source.instruction, now, now, +source.mock, JSON.stringify(worker), JSON.stringify(this.enabledInstructions()), JSON.stringify(reconcile), source.workspace.id);
+      this.comment(task.id, id, 'system', `Интегратор разрешает конфликт слияния с веткой ${reconcile.targetBranch}${reconcile.conflicts.length ? `: ${reconcile.conflicts.slice(0, 10).join(', ')}` : ''}. Результат задачи остаётся в её worktree.`, now);
+      return this.getRun(id);
+    }).immediate();
+  }
+  /** Records what the prepared merge actually left to resolve, before the integrator is invoked. */
+  attachReconciliation(runId: string, fence: RunFence, patch: Pick<RunReconcile, 'targetCommit' | 'conflicts'>) {
+    this.db.transaction(() => {
+      const run = this.getRun(runId);
+      if (run.status !== 'preparing' || !matchesFence(run, fence) || !run.reconcile) return;
+      this.db.query('UPDATE runs SET reconcile_snapshot=? WHERE id=?').run(JSON.stringify({ ...run.reconcile, ...patch }), runId);
     }).immediate();
   }
   claimDue(mock: boolean, now = Date.now(), settlingTaskIds: readonly string[] = []): Run[] {
@@ -1181,9 +1243,20 @@ export class Store {
           this.db.query('UPDATE workspaces SET snapshot=? WHERE id=?').run(JSON.stringify({ ...run.workspace, lastIntegratedCommit: next.sourceCommit }), run.workspace.id);
         }
         this.log(run.taskId, run.id, { kind: 'integration', summary: next.status === 'merged' ? 'Проверенный результат принят в целевую ветку' : 'Проверка и слияние завершены',
-          details: [`Статус: ${next.status}.`, ...(next.error ? [next.error] : []), ...next.checks.map((check, index) => `Проверка ${index + 1}: код ${check.exitCode}.`)] });
+          details: [`Статус: ${next.status}.`, ...(next.error ? [next.error] : []), ...(next.conflicts?.length ? [`Конфликтующие файлы: ${next.conflicts.join(', ')}.`] : []),
+            ...next.checks.map((check, index) => `Проверка ${index + 1}: код ${check.exitCode}.`)] });
       }
       return next;
+    }).immediate();
+  }
+  /** Appends what happened to a finished conflict, such as the integrator being started or declined. */
+  noteIntegration(id: string, attempt: number, note: string): void {
+    this.db.transaction(() => {
+      const row = this.db.query('SELECT snapshot FROM integrations WHERE id=?').get(id) as Row | null;
+      if (!row) return;
+      const job = JSON.parse(row.snapshot) as Integration;
+      if (job.attempt !== attempt || job.status !== 'conflict') return;
+      this.writeIntegration({ ...job, error: [job.error, note].filter(Boolean).join(' ').slice(0, 4_000), updatedAt: Date.now() });
     }).immediate();
   }
   cancelIntegration(runId: string, pending: boolean, acknowledgement = false): Integration {

@@ -5,7 +5,7 @@
     integration: Integration;
     busy?: boolean;
     historical?: boolean;
-    onaction?: (action: 'integrate' | 'cancel-integration', acknowledgement: boolean) => void;
+    onaction?: (action: 'integrate' | 'cancel-integration' | 'reconcile', acknowledgement: boolean) => void;
   } = $props();
   let acknowledged = $state(false);
   let acknowledgementKey = $state('');
@@ -25,13 +25,15 @@
 <section class="integration-panel" aria-label="Слияние результата">
   <h3><Icon name={integration.status === 'merged' ? 'circlecheck' : active ? 'refresh' : 'alert'} size={17} />{labels[integration.status]}</h3>
   {#if integration.error}<p class="integration-error">{integration.error}</p>{/if}
+  {#if integration.conflicts?.length}<p>Конфликтующие файлы:</p><ul class="integration-conflicts">{#each integration.conflicts as path}<li><code>{path}</code></li>{/each}</ul>{/if}
   {#if integration.checks.length}<ul class="integration-checks">{#each integration.checks as check, index}<li>Проверка {index + 1}: {check.exitCode === 0 ? 'пройдена' : `код ${check.exitCode}`}<code>{check.argv.join(' ')}</code></li>{/each}</ul>{/if}
   {#if integration.resultCommit}<p>Коммит результата: <code>{integration.resultCommit.slice(0, 12)}</code></p>{/if}
   {#if integration.candidatePath}<details><summary>Рабочая папка объединённого кода</summary><code class="integration-path">{integration.candidatePath}</code></details>{/if}
   {#if !historical && onaction && integration.status !== 'merged'}
     {#if interrupted}<p>После перезапуска процесс проверки мог остаться запущенным. Остановите его перед повтором или отменой.</p><label class="interruption-confirm"><input type="checkbox" bind:checked={acknowledged} disabled={busy} /><span>Я проверил(а), что предыдущие процессы проверки и слияния остановлены</span></label>{/if}
     <div class="integration-actions">
-      {#if !active}<button class="button primary" disabled={busy || (interrupted && !acknowledged)} onclick={() => onaction?.('integrate', acknowledged)}>Повторить проверку и слияние</button>{/if}
+      {#if integration.status === 'conflict'}<button class="button primary" disabled={busy} title="Встроенный Интегратор объединит целевую ветку с результатом в worktree задачи, разрешит конфликты и повторит проверку." onclick={() => onaction?.('reconcile', acknowledged)}>Поручить интегратору</button>{/if}
+      {#if !active}<button class="button {integration.status === 'conflict' ? 'secondary' : 'primary'}" disabled={busy || (interrupted && !acknowledged)} onclick={() => onaction?.('integrate', acknowledged)}>Повторить проверку и слияние</button>{/if}
       {#if active || interrupted}<button class="button secondary" disabled={busy || integration.status === 'cancelling' || (interrupted && !acknowledged)} onclick={() => onaction?.('cancel-integration', acknowledged)}>{integration.status === 'cancelling' ? 'Останавливаем…' : 'Отменить слияние'}</button>{/if}
     </div>
   {/if}

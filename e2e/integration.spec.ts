@@ -8,7 +8,8 @@ async function fixture(page: Page, status: IntegrationStatus) {
   const integration: Integration = { id: 'integration-fixture', runId: 'run-fixture', repositoryId: '/project/.git', status, attempt: 1,
     sourceCommit: 'a'.repeat(40), targetCommit: 'b'.repeat(40), resultCommit: status === 'merged' ? 'c'.repeat(40) : null,
     candidatePath: '/data/workspaces/project/integration-fixture-1', checks: [{ argv: ['bun', 'test'], exitCode: status === 'failed' ? 1 : 0 }],
-    error: status === 'failed' ? 'Проверка завершилась с кодом 1. Целевая ветка сохранена.' : null, updatedAt: now };
+    error: status === 'failed' ? 'Проверка завершилась с кодом 1. Целевая ветка сохранена.' : status === 'conflict' ? 'Обнаружен конфликт слияния с веткой main: src/value.txt.' : null,
+    ...(status === 'conflict' ? { conflicts: ['src/value.txt', 'README.md'] } : {}), updatedAt: now };
   const run: Run = { id: integration.runId, taskId: 'task-fixture', workerId: null, worker: null, steps: [], currentStepIndex: null, instructions: [],
     provider: 'codex', cwd: '/project', instruction: 'Добавь изолированное изменение.', trigger: 'manual', scheduledFor: null, status: 'completed',
     sessionId: 'saved-session', startedAt: now, updatedAt: now, finishedAt: now, summary: 'Изменения готовы.', error: null, turn: 1, mock: false, integration,
@@ -22,9 +23,9 @@ async function fixture(page: Page, status: IntegrationStatus) {
   const actions: { path: string; body: unknown }[] = [];
   await page.route('**/api/**', async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (request.method() === 'POST' && /^\/api\/runs\/run-fixture\/(integrate|cancel-integration)$/.test(path)) {
+    if (request.method() === 'POST' && /^\/api\/runs\/run-fixture\/(integrate|cancel-integration|reconcile)$/.test(path)) {
       actions.push({ path, body: request.postDataJSON() });
-      integration.status = path.endsWith('/integrate') ? 'queued' : 'cancelled'; task.status = states[integration.status];
+      integration.status = path.endsWith('/integrate') ? 'queued' : path.endsWith('/reconcile') ? 'conflict' : 'cancelled'; task.status = states[integration.status];
       await route.fulfill({ json: integration });
     } else if (path === '/api/info') await route.fulfill({ json: info });
     else if (path === '/api/tasks') await route.fulfill({ json: [task] });
@@ -54,6 +55,17 @@ test('a failed check shows details and retries through the integration queue', a
   await expect(panel).toContainText('Проверка 1: код 1'); await expect(panel).toContainText('Целевая ветка сохранена.');
   await panel.getByRole('button', { name: 'Повторить проверку и слияние', exact: true }).click();
   await expect.poll(() => actions).toEqual([{ path: '/api/runs/run-fixture/integrate', body: { acknowledgeInterruption: false } }]);
+});
+
+test('a conflict lists the files and offers the built-in integrator beside a manual retry', async ({ page }) => {
+  const { dialog, actions } = await fixture(page, 'conflict');
+  const panel = dialog.getByRole('region', { name: 'Слияние результата', exact: true });
+  await expect(panel.getByText('Конфликт слияния', { exact: true })).toBeVisible();
+  await expect(panel.locator('.integration-conflicts li')).toHaveText(['src/value.txt', 'README.md']);
+  await expect(panel.getByRole('button', { name: 'Повторить проверку и слияние', exact: true })).toBeVisible();
+  await panel.getByRole('button', { name: 'Поручить интегратору', exact: true }).click();
+  await expect.poll(() => actions).toEqual([{ path: '/api/runs/run-fixture/reconcile', body: { acknowledgeInterruption: false } }]);
+  await expect(page.getByText(/Интегратор объединит результат/)).toBeVisible();
 });
 
 test('interrupted integration requires explicit process-stop acknowledgement before retry', async ({ page }) => {

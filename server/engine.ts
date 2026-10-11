@@ -10,7 +10,9 @@ import { GitIntegrator, type Integrator } from './integration';
 
 export type AgentFactory = (input: AgentInput, callbacks: AgentCallbacks) => AgentHandle;
 export type TaskBridgeFactory = (store: Store, run: Run, fence: RunFence) => ReturnType<typeof createTaskBridge>;
-export interface EngineOptions { workspaces?: WorkspaceProvider; maxParallel?: number; maxPerRepository?: number; integrator?: Integrator; integrationChecks?: string[][]; }
+export interface EngineOptions { workspaces?: WorkspaceProvider; maxParallel?: number; maxPerRepository?: number; integrator?: Integrator; integrationChecks?: string[][];
+  /** Hand every merge conflict to the built-in integrator without waiting for a click. */
+  autoReconcile?: boolean; }
 interface Launch { taskId: string; handle: AgentHandle | null; fence: RunFence; cancelRequested: boolean; bridge?: ReturnType<typeof createTaskBridge>; settled?: Promise<void>; }
 export class Engine {
   private handles = new Map<string, Launch>();
@@ -21,12 +23,14 @@ export class Engine {
   private readonly maxParallel: number;
   private readonly maxPerRepository: number;
   private readonly integrator: Integrator;
+  private readonly autoReconcile: boolean;
   private integrationHandles = new Map<string, { abort: AbortController; settled: Promise<void> }>();
   constructor(readonly store: Store, readonly mock = false, private factory: AgentFactory = startAgent, private bridgeFactory?: TaskBridgeFactory, options: EngineOptions = {}) {
     this.workspaces = options.workspaces ?? (mock || factory !== startAgent ? new DirectWorkspaces() : new GitWorkspaces(join(dirname(resolve(store.db.filename)), 'workspaces')));
     this.maxParallel = options.maxParallel ?? 4;
     this.maxPerRepository = options.maxPerRepository ?? 1;
     this.integrator = options.integrator ?? new GitIntegrator(options.integrationChecks);
+    this.autoReconcile = options.autoReconcile ?? true;
     if (!Number.isInteger(this.maxParallel) || this.maxParallel < 1 || this.maxParallel > 32) throw new Error('Лимит процессов должен быть 1–32');
     if (!Number.isInteger(this.maxPerRepository) || this.maxPerRepository < 1 || this.maxPerRepository > 32) throw new Error('Лимит агентов на репозиторий должен быть 1–32');
   }
@@ -81,6 +85,15 @@ export class Engine {
     this.drain();
     return this.store.getRun(run.id);
   }
+  /** Starts the built-in integrator for a conflicted result; the merge itself happens when the run is prepared. */
+  reconcile(sourceRunId: string): Run {
+    if (this.closing) throw new AppError('Сервис останавливается', 503);
+    this.assertTaskSettled(this.store.getRun(sourceRunId).taskId);
+    if (this.integrationHandles.has(sourceRunId)) throw new AppError('Предыдущие процессы слияния ещё завершаются', 409);
+    const run = this.store.db.transaction(() => this.enqueue(this.store.startReconcile(sourceRunId))).immediate();
+    this.drain();
+    return this.store.getRun(run.id);
+  }
   cancel(runId: string, acknowledgement = false): Run {
     const launch = this.handles.get(runId);
     const result = this.store.cancel(runId, Date.now(), !!launch, acknowledgement);
@@ -113,6 +126,8 @@ export class Engine {
         this.handles.set(run.id, launch);
         const ready = () => {
           if (launch.cancelRequested || this.closing) { this.release(run, launch); return; }
+          // A resumed integrator session keeps the merge it was already working in.
+          if (run.trigger === 'reconcile' && run.turn === 1 && !run.sessionId) return this.prepareReconcile(run, launch);
           const current = this.store.beginExecution(run.id, launch.fence);
           if (!current) { this.release(run, launch); return; }
           return this.invoke(current, launch, request.answer);
@@ -145,11 +160,45 @@ export class Engine {
     handle?.abort.abort(new Error('Integration cancelled'));
     this.drain(); return job;
   }
+  /** Merges the current target into the saved worktree, then invokes the integrator only if conflicts remain. */
+  private async prepareReconcile(run: Run, launch: Launch): Promise<void> {
+    let prepared: Awaited<ReturnType<Integrator['prepareReconcile']>>;
+    try { prepared = await this.integrator.prepareReconcile(this.store.getRun(run.id), new AbortController().signal); }
+    catch (error) {
+      this.store.failPreparation(run.id, launch.fence, (error instanceof Error ? error.message : String(error)).slice(0, 16_000), true);
+      this.release(run, launch); return;
+    }
+    if (launch.cancelRequested || this.closing) { this.release(run, launch); return; }
+    this.store.attachReconciliation(run.id, launch.fence, prepared);
+    const current = this.store.beginExecution(run.id, launch.fence);
+    if (!current) { this.release(run, launch); return; }
+    if (prepared.conflicts.length) return this.invoke(current, launch);
+    // The target moved on since the conflict was found; the ordinary candidate check decides again.
+    this.store.db.transaction(() => {
+      const summary = 'Конфликтов с актуальной целевой веткой больше нет. Результат отправлен на повторную проверку без вызова агента.';
+      const result = this.store.finish(run.id, 'completed', summary, null, Date.now(), launch.fence);
+      this.store.log(run.taskId, run.id, { kind: 'lifecycle', summary: 'Интегратор не потребовался', details: [summary, `Целевой коммит: ${prepared.targetCommit}.`] }, Date.now());
+      this.store.comment(run.taskId, run.id, 'system', summary, Date.now());
+      if (result.status === 'completed') this.store.queueIntegration(result.id);
+    }).immediate();
+    this.release(run, launch);
+  }
+  private autoReconcileConflict(job: Integration) {
+    try {
+      this.store.db.transaction(() => this.enqueue(this.store.startReconcile(job.runId))).immediate();
+      this.store.noteIntegration(job.id, job.attempt, 'Конфликт передан Интегратору.');
+    } catch (error) {
+      this.store.noteIntegration(job.id, job.attempt, `Интегратор не запущен автоматически: ${error instanceof Error ? error.message : 'внутренняя ошибка'}`);
+    }
+  }
   private integrateJob(job: Integration) {
     const abort = new AbortController();
     const settled = this.integrator.execute(this.store.getRun(job.runId), job, abort.signal,
       patch => { this.store.updateIntegration(job.id, job.attempt, patch); })
-      .then(result => { this.store.updateIntegration(job.id, job.attempt, result, true); })
+      .then(result => {
+        const finished = this.store.updateIntegration(job.id, job.attempt, result, true);
+        if (finished?.status === 'conflict' && this.autoReconcile && !this.closing) this.autoReconcileConflict(finished);
+      })
       .catch(error => { this.store.updateIntegration(job.id, job.attempt, { status: 'blocked', error: error instanceof Error ? error.message : 'Слияние остановлено' }, true); })
       .finally(() => { this.integrationHandles.delete(job.runId); this.drain(); });
     this.integrationHandles.set(job.runId, { abort, settled });
@@ -184,7 +233,9 @@ export class Engine {
         ...(run.inputAttachments?.length ? { attachments: run.inputAttachments } : {}), ...(launch.bridge ? { taskBridge: launch.bridge.agentConfig } : {}),
         model: run.worker?.model ?? null, effort: run.worker?.effort ?? 'default', communicationStyle: run.worker?.communicationStyle ?? '',
         sessionId: run.sessionId ?? undefined, answer, mock: run.mock, ...(workflow ? { workflow } : {}),
-        ...(run.followup ? { followup: { sourceRunId: run.followup.sourceRunId, sourceStepIndex: run.followup.sourceStepIndex, request: run.followup.request } } : {}) };
+        ...(run.followup ? { followup: { sourceRunId: run.followup.sourceRunId, sourceStepIndex: run.followup.sourceStepIndex, request: run.followup.request } } : {}),
+        ...(run.reconcile ? { reconcile: { targetBranch: run.reconcile.targetBranch, targetCommit: run.reconcile.targetCommit, conflicts: run.reconcile.conflicts,
+          checkCommands: run.workspace?.checkCommands ?? [], resultSummary: this.store.getRun(run.reconcile.sourceRunId).summary ?? '' } } : {}) };
       buildPrompt(input); // Enforce the complete UTF-8 bound before even a custom factory.
       if (!isCurrent() || launch.cancelRequested || this.closing) {
         this.store.completeCancellation(run.id, Date.now(), fence);

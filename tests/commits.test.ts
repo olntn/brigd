@@ -52,6 +52,20 @@ describe('commits for sandboxed agents', () => {
     expect(commitPaths(['src//value.txt', ':(glob)*'])).toEqual(['src/value.txt', ':(glob)*']);
   });
 
+  test('a merge in progress refuses partial commits and leftover markers, then commits the whole tree as a merge commit', async () => {
+    git(root, 'checkout', '-b', 'brigd/run-1'); writeFileSync(join(root, 'src/value.txt'), 'ours\n'); git(root, 'commit', '-am', 'ours');
+    git(root, 'checkout', 'main'); writeFileSync(join(root, 'src/value.txt'), 'theirs\n'); git(root, 'commit', '-am', 'theirs'); git(root, 'checkout', 'brigd/run-1');
+    Bun.spawnSync(['git', '-C', root, 'merge', 'main'], { stdout: 'ignore', stderr: 'ignore' });
+    await rejects(commitWorkspace(direct(), 'Merge', ['src/value.txt']));
+    await rejects(commitWorkspace(direct(), 'Merge'));
+    expect(git(root, 'rev-list', '--count', 'HEAD')).toBe('2');
+    writeFileSync(join(root, 'src/value.txt'), 'resolved\n');
+    const result = await commitWorkspace(direct(), 'Merge main');
+    expect(result).toMatchObject({ committed: true, branch: 'brigd/run-1', files: ['src/value.txt'] });
+    expect(git(root, 'log', '-1', '--format=%P').split(' ')).toHaveLength(2);
+    expect(git(root, 'status', '--porcelain')).toBe('');
+  });
+
   test('hooks never run, including in-tree hook directories the agent could write', async () => {
     const markers = [join(folder, 'trusted-hook'), join(folder, 'tree-hook')];
     hook(join(root, '.git/hooks/pre-commit'), markers[0]!);

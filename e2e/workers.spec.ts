@@ -240,6 +240,17 @@ test('profile avatar, task assignment and immutable identity through edit and re
   expect(errors).toEqual([]);
 });
 
+test('the built-in integrator is a read-only card: no edit, archive or private text', async ({ page }) => {
+  await page.goto('/');
+  await openWorkers(page);
+  const card = page.getByRole('article', { name: 'Встроенный работник: Интегратор', exact: true });
+  await expect(card).toBeVisible();
+  await expect(card).toContainText('Встроенный');
+  await expect(card).toContainText('конфликты слияния');
+  await expect(card.getByRole('button')).toHaveCount(0);
+  await noPrivateInstructions(card);
+});
+
 test('archive preserves assigned scheduled task, disallows new assignment, and restore is reversible', async ({ page, request }) => {
   const name = unique('Архивный помощник');
   const title = unique('Назначенная задача');

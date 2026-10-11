@@ -1,9 +1,20 @@
-import type { Effort, ModelCatalogEntry, Provider } from './types';
+import type { Effort, ModelCatalogEntry, Provider, WorkerSnapshot } from './types';
 
 export const MODEL_ID_LIMIT = 128;
 export const MODEL_LABEL_LIMIT = 80;
 export const MODEL_CATALOG_PROVIDER_LIMIT = 100;
 export const WORKER_DESCRIPTION_LIMIT = 1_000;
+/** The only built-in worker. It is never stored in the catalog and cannot be edited, assigned, or archived. */
+export const INTEGRATOR_WORKER_ID = 'brigd-integrator';
+export const INTEGRATOR_WORKER = {
+  id: INTEGRATOR_WORKER_ID, name: 'Интегратор',
+  description: 'Встроенный работник brigd. Разрешает конфликты слияния в worktree задачи, когда результат не объединяется с целевой веткой автоматически.',
+} as const;
+export const isBuiltinWorker = (id: string | null | undefined): boolean => id === INTEGRATOR_WORKER_ID;
+/** The built-in worker has no stored profile: the user's own settings grow stale, so the source run's are frozen instead. */
+export function integratorSnapshot(provider: Provider, model: string | null, effort: Effort): WorkerSnapshot {
+  return { ...INTEGRATOR_WORKER, provider, model, effort, communicationStyle: '', avatarUrl: null };
+}
 
 /** Optional display metadata, kept separate from executable personal instructions. */
 export function normalizeWorkerDescription(value: unknown): string {
