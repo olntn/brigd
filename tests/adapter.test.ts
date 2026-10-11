@@ -541,7 +541,7 @@ describe('ephemeral task attachment CLI configuration', () => {
     env: { BRIGD_TASK_SOCKET: '/tmp/private-app-socket/broker.sock', BRIGD_TASK_CAPABILITY: 'a'.repeat(64) },
     context: { taskId: 'task-1', runId: 'run-1', turn: 3, stepIndex: 0, attachments: [{ id: 'file-1', name: 'image.png', mime: 'image/png', size: 200, previewable: true }], outputDirectory: '/workspace/.brigd-outbox-1234' },
   };
-  const tools = ['list_attachments', 'read_attachment', 'view_attachment', 'add_comment', 'add_attachment'];
+  const tools = ['list_attachments', 'read_attachment', 'view_attachment', 'add_comment', 'add_attachment', 'commit_changes'];
   const input: AgentInput = { provider: 'codex', cwd: '/workspace', instruction: 'Inspect inputs and publish a report.', taskBridge: bridge };
   const caps = { schema: true, permissionPrompts: true, taskMcp: true };
   test.each(['codex', 'claude'] as const)('%s model and effort coexist with exact task tools and native safety on new/resume', provider => {
@@ -576,7 +576,7 @@ describe('ephemeral task attachment CLI configuration', () => {
     expect(settings).toContain(`mcp_servers.${bridge.name}.env_vars=["BRIGD_TASK_SOCKET","BRIGD_TASK_CAPABILITY"]`);
     expect(settings).toContain(`mcp_servers.${bridge.name}.enabled_tools=${JSON.stringify(tools)}`);
     for (const tool of tools) expect(settings).toContain(`mcp_servers.${bridge.name}.tools.${tool}.approval_mode="approve"`);
-    expect(settings.filter(s => s.includes('.approval_mode='))).toHaveLength(5);
+    expect(settings.filter(s => s.includes('.approval_mode='))).toHaveLength(tools.length);
     expect(settings.some(s => s.includes('default_tools_approval'))).toBe(false);
     expect(JSON.stringify(args)).not.toContain(bridge.env.BRIGD_TASK_CAPABILITY); expect(JSON.stringify(args)).not.toContain(bridge.env.BRIGD_TASK_SOCKET);
     expect(args).not.toContain('--dangerously-bypass-approvals-and-sandbox'); expect(args).not.toContain('--full-auto');

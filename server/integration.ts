@@ -19,7 +19,8 @@ async function git(cwd: string, args: string[], signal: AbortSignal) {
   signal.throwIfAborted();
   return runBoundedProcess(['git', '-C', cwd, ...args], { cwd, signal, onStdout: () => {}, maxOutputBytes: 1024 * 1024 });
 }
-const artifact = (path: string) => path.split('/').some(part => /^\.brigd-(?:inputs|outbox)-/.test(part));
+export const artifact = (path: string) => path.split('/').some(part => /^\.brigd-(?:inputs|outbox)-/.test(part));
+export const ARTIFACT_PATHSPECS = [':(exclude,glob).brigd-inputs-*/**', ':(exclude,glob).brigd-outbox-*/**', ':(exclude,glob)**/.brigd-inputs-*/**', ':(exclude,glob)**/.brigd-outbox-*/**'];
 function sourceClean(cwd: string): boolean {
   return readGit(cwd, ['status', '--porcelain', '-z']).split('\0').filter(Boolean).every(line => line.startsWith('?? ') && artifact(line.slice(3)));
 }
@@ -42,8 +43,7 @@ export class GitIntegrator implements Integrator {
       if (!workspace.targetBranch) throw new IntegrationError('blocked', 'Запуск создан из detached HEAD. Для слияния нужна именованная целевая ветка.');
       const targetRef = `refs/heads/${workspace.targetBranch}`;
       // Snapshot only this worktree. Task artifact directories never enter a commit.
-      if (await git(workspace.path, ['add', '-A', '--', '.', ':(exclude,glob).brigd-inputs-*/**', ':(exclude,glob).brigd-outbox-*/**',
-        ':(exclude,glob)**/.brigd-inputs-*/**', ':(exclude,glob)**/.brigd-outbox-*/**'], signal)) throw new IntegrationError('blocked', 'Не удалось сохранить изменения worktree в индексе Git.');
+      if (await git(workspace.path, ['add', '-A', '--', '.', ...ARTIFACT_PATHSPECS], signal)) throw new IntegrationError('blocked', 'Не удалось сохранить изменения worktree в индексе Git.');
       const staged = readGit(workspace.path, ['diff', '--cached', '--name-only', '-z']).split('\0');
       if (staged.some(artifact)) throw new IntegrationError('blocked', 'В индекс попали служебные вложения задачи. Уберите их из индекса перед слиянием.');
       if (staged.some(Boolean)) {

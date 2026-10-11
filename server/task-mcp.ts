@@ -8,6 +8,7 @@ import type { Attachment, Run } from '../src/lib/types';
 import { ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_COUNT } from '../src/lib/attachments';
 import { AppError, type RunFence, type Store } from './store';
 import { attachmentName, prepareAttachment } from './attachments';
+import { commitPaths, commitWorkspace } from './commits';
 import { MAX_TASK_IMAGE_BYTES, MAX_TASK_READ_BYTES, MAX_TASK_REQUEST_BYTES, MAX_TASK_RESULT_BYTES, MAX_TASK_RESULT_TOTAL_BYTES, MAX_TASK_TOOL_CALLS, TASK_MCP_TOOLS, type TaskAttachmentContext, type TaskBridgeConfig, type TaskBrokerRequest, type TaskToolResult } from './task-mcp-protocol';
 export type { TaskBridgeConfig } from './task-mcp-protocol';
 
@@ -203,6 +204,14 @@ export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence
         allowed.add(attachment.id);
         return text({ attachment: context(attachment), published: true });
       }
+      case 'commit_changes': {
+        const args = object(request.arguments, ['message', 'paths']);
+        const message = string(args.message, 5000, 'commit message');
+        const paths = args.paths === undefined ? undefined : commitPaths(args.paths);
+        if (!current()) return expired();
+        const result = await commitWorkspace(run, message, paths);
+        return text({ committed: result.committed, commit: result.commit, branch: result.branch, files: result.files, file_count: result.fileCount });
+      }
       default: throw new AppError('Unknown task attachment tool.');
     }
   };
@@ -218,10 +227,11 @@ export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence
     }
     // Reserve the entire bounded receipt before a mutation. Never commit a write
     // and then report failure merely because its success receipt exceeded budget.
-    if ((raw.tool === 'add_comment' || raw.tool === 'add_attachment') && resultBytes + 4096 > MAX_TASK_RESULT_TOTAL_BYTES) {
+    const mutation = raw.tool === 'add_comment' || raw.tool === 'add_attachment' || raw.tool === 'commit_changes';
+    if (mutation && resultBytes + 4096 > MAX_TASK_RESULT_TOTAL_BYTES) {
       close(); return failure('Task attachment tool output budget exhausted before publication. Nothing was published.');
     }
-    receiptReservation = (raw.tool === 'add_comment' || raw.tool === 'add_attachment') ? 4096 : 0;
+    receiptReservation = mutation ? 4096 : 0;
     busy = true;
     let result: TaskToolResult;
     try {
