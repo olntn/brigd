@@ -42,6 +42,7 @@ async function fixtures(page: Page, detail: TaskDetail, options: { workers?: Wor
       await route.fulfill(result); return;
     }
     if (path === '/api/info') await route.fulfill({ json: info });
+    else if (['/api/tags', '/api/models', '/api/instructions'].includes(path)) await route.fulfill({ json: [] });
     else if (path === '/api/workers') await route.fulfill({ json: options.workers ?? fixtureWorkers });
     else if (path === '/api/tasks') await route.fulfill({ json: [detail.task, ...(options.others ?? []).map(item => item.task)] });
     else if (path === `/api/tasks/${detail.task.id}`) await route.fulfill({ json: detail });

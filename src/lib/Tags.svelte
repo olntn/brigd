@@ -176,8 +176,7 @@
 
 <section class="page-heading">
   <div>
-    <div class="eyebrow">ПОРЯДОК В ЗАДАЧАХ</div>
-    <h1 bind:this={heading} tabindex="-1">Теги<span>{tags.length}</span></h1>
+    <h1 bind:this={heading} tabindex="-1">Теги</h1>
     <p>Объединяйте задачи по проектам, темам и приоритетам.</p>
   </div>
   <button bind:this={createButton} type="button" class="button primary create-button" disabled={!!pending || loading || tags.length >= TAG_COUNT_LIMIT} onclick={() => openEditor()}><Icon name="plus" size={17} />Новый тег</button>
@@ -214,7 +213,7 @@
 <dialog bind:this={editor} class="editor-dialog tag-editor" aria-labelledby="tag-editor-title" oncancel={(event) => { event.preventDefault(); void closeEditor(); }} onclick={(event) => backdropClick(event, editor, closeEditor)}>
   {#if editing}
     <form class="editor-form" onsubmit={save} aria-busy={saving}>
-      <header class="editor-header"><div><span class="editor-kicker">ТЕГ ДЛЯ ЗАДАЧ</span><h2 id="tag-editor-title">{editingId ? 'Редактировать тег' : 'Новый тег'}</h2></div><button type="button" class="icon-button" aria-label="Закрыть редактор тега" disabled={saving} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
+      <header class="editor-header"><div><h2 id="tag-editor-title">{editingId ? 'Редактировать тег' : 'Новый тег'}</h2></div><button type="button" class="icon-button" aria-label="Закрыть редактор тега" disabled={saving} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
       <div class="editor-fields">
         {#if formError}<div class="form-error" role="alert"><Icon name="alert" size={17} /><span>{formError}</span></div>{/if}
         <label class="form-field"><span>Название <span class="required">*</span></span><input name="tagName" aria-label="Название тега" aria-describedby="tag-name-count" bind:value={name} maxlength={TAG_NAME_LIMIT} placeholder="Например, Сайт" required disabled={saving} /><small id="tag-name-count">{name.length} / {TAG_NAME_LIMIT} символов</small></label>

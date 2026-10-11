@@ -1,4 +1,4 @@
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 
 type Environment = Record<string, string | undefined>;
 
@@ -26,5 +26,18 @@ export function readConfig(root: string, env: Environment = process.env) {
   }
   // Do not rename the default database: existing tasks must remain visible.
   const dbPath = resolve(root, setting('DB') ?? (mode === 'mock' ? 'data/demo.sqlite' : 'data/trackt.sqlite'));
-  return { mode, port, hostname, allowedHosts, allowedOrigins, dbPath, dev: setting('DEV') === '1', defaultCwd: setting('DEFAULT_CWD') };
+  const workspacesDir = resolve(root, setting('WORKSPACES_DIR') ?? resolve(dirname(dbPath), 'workspaces'));
+  const maxParallel = Number(setting('MAX_PARALLEL') ?? 4);
+  if (!Number.isInteger(maxParallel) || maxParallel < 1 || maxParallel > 32) throw new Error('BRIGD_MAX_PARALLEL / TRACKT_MAX_PARALLEL должен быть 1–32');
+  const maxPerRepository = Number(setting('MAX_PER_REPOSITORY') ?? 1);
+  if (!Number.isInteger(maxPerRepository) || maxPerRepository < 1 || maxPerRepository > 32) throw new Error('BRIGD_MAX_PER_REPOSITORY / TRACKT_MAX_PER_REPOSITORY должен быть 1–32');
+  let integrationChecks: string[][] | undefined;
+  if (setting('INTEGRATION_CHECKS') !== undefined) {
+    try { integrationChecks = JSON.parse(setting('INTEGRATION_CHECKS')!); } catch { throw new Error('BRIGD_INTEGRATION_CHECKS должен быть JSON-массивом массивов аргументов'); }
+    if (!Array.isArray(integrationChecks) || !integrationChecks.length || integrationChecks.length > 10 || JSON.stringify(integrationChecks).length > 32_000 ||
+        integrationChecks.some(argv => !Array.isArray(argv) || !argv.length || argv.length > 30 || argv.some(arg => typeof arg !== 'string' || !arg.length || arg.length > 4096 || arg.includes('\0')))) {
+      throw new Error('BRIGD_INTEGRATION_CHECKS: укажите 1–10 непустых команд массивами аргументов');
+    }
+  }
+  return { mode, port, hostname, allowedHosts, allowedOrigins, dbPath, workspacesDir, maxParallel, maxPerRepository, integrationChecks, dev: setting('DEV') === '1', defaultCwd: setting('DEFAULT_CWD') };
 }

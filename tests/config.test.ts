@@ -50,4 +50,20 @@ describe('brigd configuration compatibility', () => {
     expect(() => readConfig(root, { TRACKT_HOST: '127.0.0.1', BRIGD_HOST: 'invalid' })).toThrow('HOST');
     expect(() => readConfig(root, { ...prefixed('TRACKT'), BRIGD_ALLOWED_HOSTS: '' })).toThrow();
   });
+  test('workspace storage and total process limit support both configuration prefixes', () => {
+    expect(readConfig(root, {})).toMatchObject({ workspacesDir: resolve(root, 'data/workspaces'), maxParallel: 4 });
+    expect(readConfig(root, { TRACKT_WORKSPACES_DIR: '/tmp/old', BRIGD_WORKSPACES_DIR: '/tmp/new', TRACKT_MAX_PARALLEL: '2' }))
+      .toMatchObject({ workspacesDir: '/tmp/new', maxParallel: 2 });
+    for (const value of ['0', '33', '1.5', 'NaN', '']) expect(() => readConfig(root, { BRIGD_MAX_PARALLEL: value })).toThrow('MAX_PARALLEL');
+  });
+  test('per-repository concurrency and explicit argv checks are validated without shell parsing', () => {
+    expect(readConfig(root, {})).toMatchObject({ maxPerRepository: 1 });
+    const checks = [['bun', 'test', '--timeout', '10000'], ['bun', 'run', 'build']];
+    expect(readConfig(root, { TRACKT_MAX_PER_REPOSITORY: '2', BRIGD_INTEGRATION_CHECKS: JSON.stringify(checks) }))
+      .toMatchObject({ maxPerRepository: 2, integrationChecks: checks });
+    for (const value of ['0', '33', '1.5', 'NaN', '']) expect(() => readConfig(root, { BRIGD_MAX_PER_REPOSITORY: value })).toThrow('MAX_PER_REPOSITORY');
+    for (const value of ['no json', '[]', '["bun test"]', '[[]]', '[["bun",null]]', '[["bun",""]]', '[["bun","\\u0000"]]']) {
+      expect(() => readConfig(root, { BRIGD_INTEGRATION_CHECKS: value })).toThrow('INTEGRATION_CHECKS');
+    }
+  });
 });

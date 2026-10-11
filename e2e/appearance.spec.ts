@@ -141,7 +141,7 @@ test('brigd branding appears in the title, navigation and workspace', async ({ p
 });
 
 test('all task statuses live in the Tasks tab with local filters and no overview', async ({ page }) => {
-  const statuses: Task['status'][] = ['ready', 'running', 'cancelling', 'waiting_input', 'completed', 'blocked', 'failed', 'interrupted', 'cancelled'];
+  const statuses: ('ready' | Run['status'])[] = ['ready', 'running', 'cancelling', 'waiting_input', 'completed', 'blocked', 'failed', 'interrupted', 'cancelled'];
   const tasks: Task[] = statuses.map(status => ({
     ...task,
     id: `status-${status}`,

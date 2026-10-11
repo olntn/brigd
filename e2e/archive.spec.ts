@@ -12,10 +12,6 @@ async function createThroughUi(page: Page, title: string, instruction: string) {
   await expect(drawer).toBeVisible();
   return drawer;
 }
-// The browser database is shared across specs, so counts are compared relative to the start.
-async function archiveCount(page: Page) {
-  return Number(await page.getByRole('heading', { name: /^Архив/, level: 1 }).locator('span').textContent());
-}
 async function expectNoHorizontalOverflow(page: Page) {
   const size = await page.evaluate(() => ({ viewport: document.documentElement.clientWidth, document: document.documentElement.scrollWidth }));
   expect(size.document).toBeLessThanOrEqual(size.viewport + 1);
@@ -39,7 +35,6 @@ test('a task moves to the archive from its card, stays read-only there and retur
   const [archiveBox, settingsBox] = [await archiveButton.boundingBox(), await settingsButton.boundingBox()];
   expect(archiveBox!.y + archiveBox!.height, 'Archive sits above Settings').toBeLessThanOrEqual(settingsBox!.y + 1);
   await archiveButton.click();
-  const before = await archiveCount(page);
   await navigation.getByRole('button', { name: 'Задачи', exact: true }).click();
 
   const title = unique('Задача для архива');
@@ -66,7 +61,6 @@ test('a task moves to the archive from its card, stays read-only there and retur
 
   await archiveButton.click();
   await expect(page.getByRole('heading', { name: /^Архив/ })).toBeVisible();
-  await expect.poll(() => archiveCount(page)).toBe(before + 1);
   await page.getByLabel('Поиск в архиве', { exact: true }).fill(title);
   await expect(page.getByRole('button', { name: `Открыть: ${title}`, exact: true })).toBeVisible();
   await page.getByLabel('Поиск в архиве', { exact: true }).fill(`${title} нет такой`);
@@ -81,7 +75,6 @@ test('a task moves to the archive from its card, stays read-only there and retur
   await page.getByRole('button', { name: `Восстановить: ${title}`, exact: true }).click();
   await expect(page.getByText('Задача восстановлена и снова на доске', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: `Открыть: ${title}`, exact: true })).toHaveCount(0);
-  await expect.poll(() => archiveCount(page)).toBe(before);
   await navigation.getByRole('button', { name: 'Задачи', exact: true }).click();
   await page.getByLabel('Поиск задач', { exact: true }).fill(title);
   await page.getByRole('button', { name: `Открыть задачу: ${title}`, exact: true }).click();

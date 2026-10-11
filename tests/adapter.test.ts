@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -183,9 +183,9 @@ describe('provider protocol', () => {
 describe('CLI argument safety and compatibility', () => {
   const base = { cwd: process.cwd(), instruction: 'a; echo $(oops)\n"quoted"', provider: 'codex' as const };
   const caps = { schema: true, permissionPrompts: true };
-  test('Codex uses exact resume ID, schema, and safe sandbox without bypass', () => {
+  test('Codex uses exact resume ID, schema, and safe sandbox with network but without bypass', () => {
     const args = buildArgv({ ...base, sessionId: sid, answer: 'this one' }, 'codex', caps);
-    expect(args.slice(0, 7)).toEqual(['codex', 'exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="on-request"', 'resume']);
+    expect(args.slice(0, 9)).toEqual(['codex', 'exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="on-request"', '-c', 'sandbox_workspace_write.network_access=true', 'resume']);
     expect(args).toContain('--json');
     expect(args).toContain('--output-schema');
     expect(args[args.indexOf('--') + 1]).toBe(sid);
@@ -239,7 +239,7 @@ describe('CLI argument safety and compatibility', () => {
         for (const sessionId of [undefined, sid]) {
           const input = { ...base, provider, effort, sessionId, communicationStyle: 'Кратко и по делу.', ...(sessionId ? { answer: 'Use the original target.' } : {}) };
           const expected = provider === 'codex'
-            ? [provider, 'exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="on-request"', '--strict-config', '-c', `model_reasoning_effort="${effort}"`, ...(sessionId ? ['resume'] : []), '--json', '--', ...(sessionId ? [sessionId] : []), buildPrompt(input)]
+            ? [provider, 'exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="on-request"', '-c', 'sandbox_workspace_write.network_access=true', '--strict-config', '-c', `model_reasoning_effort="${effort}"`, ...(sessionId ? ['resume'] : []), '--json', '--', ...(sessionId ? [sessionId] : []), buildPrompt(input)]
             : [provider, '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'default', '--effort', effort, ...(sessionId ? ['--resume', sessionId] : []), buildPrompt(input)];
           expect(buildArgv(input, provider, supported)).toEqual(expected);
         }
@@ -442,10 +442,25 @@ describe('bounded subprocess runner (synthetic processes, no real model calls)',
     expect(stdout.trim()).toBe('$(echo should-not-execute); & literal');
     expect(stderr).toContain('diagnostic');
   });
-  test('times out and terminates a stuck child', async () => {
+  test('a normal run completes even when the former ten-minute deadline would expire', async () => {
+    // Accelerate only the removed default deadline; the child uses its own
+    // timers and remains running past it. No real provider or paid call is used.
+    const nativeSetTimeout = globalThis.setTimeout;
+    const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((...[handler, delay, ...args]: Parameters<typeof setTimeout>) =>
+      nativeSetTimeout(handler, delay === 10 * 60 * 1000 ? 1 : delay, ...args)) as typeof setTimeout);
+    let output = '';
+    try {
+      const exitCode = await runBoundedProcess(synthetic('await Bun.sleep(100); console.log("completed after former deadline")'), {
+        cwd: process.cwd(), signal: new AbortController().signal, onStdout: chunk => { output += chunk; },
+      });
+      expect(exitCode).toBe(0);
+      expect(output.trim()).toBe('completed after former deadline');
+    } finally { timer.mockRestore(); }
+  });
+  test('an explicitly configured diagnostic timeout terminates a stuck child', async () => {
     await expect(runBoundedProcess(synthetic('setInterval(() => {}, 1000)'), {
       cwd: process.cwd(), signal: new AbortController().signal, timeoutMs: 50, onStdout: () => {},
-    })).rejects.toMatchObject({ code: 'TIMEOUT' });
+    })).rejects.toMatchObject({ code: 'TIMEOUT', message: 'The CLI reached the configured time limit. The run did not complete.' });
   });
   test('oversized output fails instead of buffering indefinitely', async () => {
     await expect(runBoundedProcess(synthetic('console.log("x".repeat(10000))'), {
