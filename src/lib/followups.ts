@@ -24,12 +24,12 @@ export function followupStage(run: Run): { index: number; title: string } | null
   return workflow && step ? { index: workflow.currentStepIndex, title: step.title } : null;
 }
 
-/** One choice per native session, using its newest completed run and frozen identity. */
+/** One choice per native session, using its newest completed (or scalar blocked) run and frozen identity. */
 export function followupTargets(runs: Run[]): FollowupTarget[] {
   const result: FollowupTarget[] = [];
   const sessions = new Set<string>();
   for (const run of [...runs].sort((a, b) => b.startedAt - a.startedAt)) {
-    if (run.status !== 'completed') continue;
+    if (run.status !== 'completed' && !(run.status === 'blocked' && !run.steps?.length)) continue;
     const add = (target: FollowupTarget) => {
       const session = target.sessionId ? `${target.provider}:${target.sessionId}` : null;
       if (session && sessions.has(session)) return;
@@ -62,9 +62,10 @@ export function followupFingerprint(input: Omit<FollowupInput, 'requestId'>): st
     body: input.body, attachmentIds: input.attachmentIds });
 }
 
-/** Older cached responses lack the persisted flag, but completed/follow-up runs still prove completion. */
+/** Older cached responses lack the persisted flag, but completed/follow-up runs still prove completion there. */
 export function taskHasCompletedRun(task: Task): boolean {
-  return task.hasCompletedRun === true || task.status === 'completed' || task.latestRun?.status === 'completed' || !!task.latestRun?.followup;
+  // Follow-ups of blocked runs exist only alongside the persisted flag and prove nothing.
+  return task.hasCompletedRun ?? (task.status === 'completed' || task.latestRun?.status === 'completed' || !!task.latestRun?.followup);
 }
 
 export function followupSessionKey(target: FollowupTarget): string {

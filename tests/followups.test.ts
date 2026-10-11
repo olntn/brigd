@@ -180,7 +180,7 @@ describe('explicit follow-up HTTP contract', () => {
     expect(store.detail(task.id).runs).toHaveLength(1);
   });
 
-  test.each(['running', 'waiting_input', 'failed', 'blocked', 'interrupted', 'cancelled'] as RunStatus[])('a %s source cannot be followed up', async status => {
+  test.each(['running', 'waiting_input', 'failed', 'interrupted', 'cancelled'] as RunStatus[])('a %s source cannot be followed up', async status => {
     const task = store.createTask(taskInput());
     let source = store.startManual(task.id, true);
     store.setSession(source.id, 'noncompleted-session');
@@ -188,6 +188,32 @@ describe('explicit follow-up HTTP contract', () => {
     const before = store.detail(task.id);
     expect((await request(`/api/tasks/${task.id}/followups`, 'POST', input(source))).status).toBe(409);
     expect(store.detail(task.id)).toEqual(before);
+    expect(calls).toHaveLength(0);
+  });
+
+  test('a blocked scalar source continues its saved session without counting as a successful completion', async () => {
+    const task = store.createTask(taskInput());
+    let source = store.startManual(task.id, true);
+    store.setSession(source.id, 'blocked-session');
+    source = store.finish(source.id, 'blocked', 'Browser checks need a less restricted sandbox.', 'Browser checks need a less restricted sandbox.');
+    const response = await request(`/api/tasks/${task.id}/followups`, 'POST', input(source, { body: 'Skip browser checks and finish.' }));
+    expect(response.status).toBe(201);
+    const run: Run = await response.json();
+    expect(run).toMatchObject({ trigger: 'followup', sessionId: 'blocked-session', followup: { sourceRunId: source.id, sourceStepIndex: null, workflow: null } });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.input.sessionId).toBe('blocked-session');
+    await settle(0, 'blocked-session', 'blocked');
+    expect(store.getTask(task.id).hasCompletedRun).toBe(false);
+  });
+
+  test('a blocked workflow stage keeps the retry path instead of follow-ups', async () => {
+    const task = workflow();
+    let source = store.startManual(task.id, true);
+    store.setSession(source.id, 'blocked-stage-session');
+    source = store.finish(source.id, 'blocked', 'Stage blocked.', 'Stage blocked.');
+    expect(source.status).toBe('blocked');
+    expectError(() => engine.followup(task.id, input(source, { sourceStepIndex: 0 })));
+    expectError(() => engine.followup(task.id, input(source)));
     expect(calls).toHaveLength(0);
   });
 

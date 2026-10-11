@@ -966,7 +966,9 @@ export class Store {
       this.assertNotArchived(this.getTask(taskId));
       const source = this.getRun(input.sourceRunId);
       if (source.taskId !== taskId) throw new AppError('Исходный запуск относится к другой задаче', 409);
-      if (source.status !== 'completed') throw new AppError('Продолжить можно только завершённый запуск', 409);
+      // A scalar agent that stopped as blocked awaits guidance in its saved
+      // session; blocked workflow stages keep the explicit retry/cancel path.
+      if (source.status !== 'completed' && !(source.status === 'blocked' && !source.steps.length)) throw new AppError('Продолжить можно только завершённый или заблокированный агентом запуск', 409);
       if (source.workerId !== (source.worker?.id ?? null) || (source.worker && source.worker.provider !== source.provider)) invalidSnapshot();
       if (this.activeRun(taskId)) throw new AppError('У задачи уже есть активный запуск. Сначала завершите или отмените его.', 409);
       let selected: RunStep | null = null;

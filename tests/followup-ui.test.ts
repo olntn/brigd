@@ -36,17 +36,20 @@ test('newest completed continuation replaces a duplicate session but preserves o
   expect(followup.steps).toEqual([]);
 });
 
-test('only completed source runs become targets; missing sessions stay explicit and providers do not collide', () => {
+test('only completed and scalar blocked source runs become targets; missing sessions stay explicit and providers do not collide', () => {
   const failed = run('failed', { status: 'failed', steps: [stage(0), { ...stage(1), status: 'failed' }], currentStepIndex: 1 });
+  const blockedStage = run('blocked-stage', { status: 'blocked', steps: [stage(0), { ...stage(1), status: 'blocked' }], currentStepIndex: 1 });
   const waiting = run('waiting', { status: 'waiting_input' });
   const cancelled = run('cancelled', { status: 'cancelled' });
   const interrupted = run('interrupted', { status: 'interrupted' });
+  const failedScalar = run('failed-scalar', { status: 'failed' });
+  const blocked = run('blocked', { status: 'blocked', startedAt: 11 });
   const missing = run('missing', { sessionId: null, startedAt: 10 });
   const codex = run('codex', { sessionId: 'shared-session', startedAt: 9 });
   const claude = run('claude', { provider: 'claude', worker: worker('claude', 'claude'), sessionId: 'shared-session', startedAt: 8 });
-  const targets = followupTargets([failed, waiting, cancelled, interrupted, missing, codex, claude]);
-  expect(targets.map(target => target.sourceRunId)).toEqual(['missing', 'codex', 'claude']);
-  expect(targets[0]!.sessionId).toBeNull();
+  const targets = followupTargets([failed, blockedStage, waiting, cancelled, interrupted, failedScalar, blocked, missing, codex, claude]);
+  expect(targets.map(target => target.sourceRunId)).toEqual(['blocked', 'missing', 'codex', 'claude']);
+  expect(targets[1]!.sessionId).toBeNull();
 });
 
 test('equal-time input order stays stable for database newest-row ordering', () => {
@@ -80,6 +83,8 @@ test('successful history forbids fresh manual reruns even after failed or cancel
     expect(taskHasCompletedRun(task(run(status, { status, followup: { sourceRunId: 'completed', sourceStepIndex: null,
       request: 'Additional work', workflow: null } })))).toBe(true);
   }
+  expect(taskHasCompletedRun(task(run('blocked-followup', { status: 'blocked', followup: { sourceRunId: 'blocked', sourceStepIndex: null,
+    request: 'Guidance', workflow: null } }), false))).toBe(false);
 });
 
 test('an open draft keeps its native recipient when other tabs complete newer requests for different stages', () => {
