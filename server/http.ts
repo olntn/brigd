@@ -3,7 +3,7 @@ import type { AppInfo } from '../src/lib/types';
 import { Engine } from './engine';
 import { AppError } from './store';
 import { MAX_AVATAR_BYTES, validateAvatar } from './avatars';
-import { textField, validateTask, validateWorker } from './validation';
+import { textField, validateIntegratorProfile, validateTask, validateWorker } from './validation';
 import { TASK_JSON_LIMIT } from './workflows';
 import { ATTACHMENT_MAX_BYTES } from '../src/lib/attachments';
 import { attachmentIds, attachmentDisposition, prepareAttachment } from './attachments';
@@ -128,6 +128,12 @@ export function createHandler(engine: Engine, options: HttpOptions) {
           return json(engine.store.updateWorker(id, validateWorker({ ...current, model, ...patch })));
         }
         if (method === 'DELETE') return json(engine.store.archiveWorker(id));
+      }
+      if (path === '/api/integrator' && method === 'GET') return json(engine.store.getIntegratorProfile());
+      if (path === '/api/integrator' && method === 'PATCH') {
+        const current = engine.store.getIntegratorProfile(), patch = await body(req);
+        const model = patch.model === undefined && patch.provider !== undefined && patch.provider !== current.provider ? null : current.model;
+        return json(engine.store.updateIntegratorProfile(validateIntegratorProfile({ ...current, model, ...patch })));
       }
       if (path === '/api/instructions' && method === 'GET') return json(engine.store.listInstructions());
       if (path === '/api/instructions' && method === 'POST') return json(engine.store.createInstruction(validateInstruction(await body(req, INSTRUCTION_JSON_LIMIT))), 201);

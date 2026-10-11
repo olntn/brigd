@@ -7,6 +7,7 @@ const privateInstructions = 'PRIVATE_WORKER_INSTRUCTIONS: Коротко и по
 const changedPrivateInstructions = 'PRIVATE_WORKER_INSTRUCTIONS_EDITED: Подробно, с примерами.';
 const publicDescription = 'Помогает разобраться в архитектуре проекта.';
 const changedDescription = 'Редактор технических обзоров и итоговых отчётов.';
+const integratorGuidance = 'PRIVATE_INTEGRATOR_GUIDANCE: README брать из целевой ветки.';
 
 async function noPrivateInstructions(scope: Locator) {
   await expect(scope).not.toContainText('PRIVATE_WORKER_INSTRUCTIONS');
@@ -240,15 +241,51 @@ test('profile avatar, task assignment and immutable identity through edit and re
   expect(errors).toEqual([]);
 });
 
-test('the built-in integrator is a read-only card: no edit, archive or private text', async ({ page }) => {
+test('the built-in integrator has one editable profile: inherit by default, own CLI settings and guidance on demand, never archive', async ({ page, request }) => {
+  const catalog = await (await request.get('/api/models')).json() as ModelCatalogEntry[];
+  const claude = catalog.find(model => model.provider === 'claude')!;
+  expect(claude).toBeDefined();
+  expect((await request.patch('/api/integrator', { headers: origin, data: { mode: 'inherit', provider: 'codex', model: null, effort: 'default', communicationStyle: '', avatarUrl: null } })).ok()).toBe(true);
   await page.goto('/');
   await openWorkers(page);
   const card = page.getByRole('article', { name: 'Встроенный работник: Интегратор', exact: true });
   await expect(card).toBeVisible();
   await expect(card).toContainText('Встроенный');
   await expect(card).toContainText('конфликты слияния');
-  await expect(card.getByRole('button')).toHaveCount(0);
+  await expect(card).toContainText('как у запуска, результат которого объединяется');
+  await expect(card.getByRole('button', { name: /архив/i })).toHaveCount(0);
   await noPrivateInstructions(card);
+
+  await card.getByRole('button', { name: 'Изменить работника: Интегратор', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Настройки Интегратора', exact: true });
+  await expect(editor.locator('[name="integratorMode"]')).toBeFocused();
+  await expect(editor.locator('[name="workerName"]')).toHaveCount(0);
+  await expect(editor.locator('[name="workerDescription"]')).toHaveCount(0);
+  await expect(editor.locator('[name="workerProvider"]')).toHaveCount(0);
+  await editor.locator('[name="integratorMode"]').selectOption('custom');
+  await editor.locator('[name="workerProvider"]').selectOption('claude');
+  await editor.locator('[name="workerModel"]').selectOption(claude.modelId);
+  await editor.locator('[name="workerEffort"]').selectOption('max');
+  await editor.locator('[name="communicationStyle"]').fill(integratorGuidance);
+  await editor.getByRole('button', { name: 'Сохранить настройки', exact: true }).click();
+  await expect(editor).toBeHidden();
+  await expect(card).toContainText(`Claude Code · ${claude.label} · Максимальный`);
+  await noPrivateInstructions(card);
+  await expect(card).not.toContainText('PRIVATE_INTEGRATOR_GUIDANCE');
+  expect(await (await request.get('/api/integrator')).json()).toMatchObject({ mode: 'custom', provider: 'claude', model: claude.modelId, effort: 'max', communicationStyle: integratorGuidance });
+
+  await page.reload();
+  await openWorkers(page);
+  await expect(card).toContainText(`Claude Code · ${claude.label} · Максимальный`);
+  await card.getByRole('button', { name: 'Изменить работника: Интегратор', exact: true }).click();
+  await expect(editor.locator('[name="communicationStyle"]')).toHaveValue(integratorGuidance);
+  await expect(editor.locator('[name="workerEffort"]')).toHaveValue('max');
+  await editor.locator('[name="integratorMode"]').selectOption('inherit');
+  await expect(editor.locator('[name="workerProvider"]')).toHaveCount(0);
+  await editor.getByRole('button', { name: 'Сохранить настройки', exact: true }).click();
+  await expect(editor).toBeHidden();
+  await expect(card).toContainText('как у запуска, результат которого объединяется');
+  expect(await (await request.get('/api/integrator')).json()).toMatchObject({ mode: 'inherit', provider: 'claude', model: claude.modelId, effort: 'max', communicationStyle: integratorGuidance });
 });
 
 test('archive preserves assigned scheduled task, disallows new assignment, and restore is reversible', async ({ page, request }) => {

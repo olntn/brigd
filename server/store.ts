@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
+import type { Attachment, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { DEFAULT_TAG_COLOR, TAG_COUNT_LIMIT } from '../src/lib/tags';
@@ -279,6 +279,16 @@ export class Store {
       fingerprint TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
       PRIMARY KEY(task_id,request_id)
     )`);
+    // The built-in integrator's single profile. The seeded inherit mode keeps the earlier behaviour until it is edited.
+    this.db.transaction(() => {
+      this.db.exec(`CREATE TABLE IF NOT EXISTS integrator_profile (
+        singleton INTEGER PRIMARY KEY CHECK(singleton=1), mode TEXT NOT NULL CHECK(mode IN ('inherit','custom')),
+        provider TEXT NOT NULL CHECK(provider IN ('codex','claude')), model TEXT, effort TEXT NOT NULL,
+        communication_style TEXT NOT NULL DEFAULT '', avatar_url TEXT, updated_at INTEGER NOT NULL
+      )`);
+      this.db.query(`INSERT OR IGNORE INTO integrator_profile (singleton,mode,provider,model,effort,communication_style,avatar_url,updated_at)
+        VALUES (1,'inherit','codex',NULL,'default','',NULL,?)`).run(Date.now());
+    }).immediate();
     // The explicit marker makes even an intentionally empty catalog persistent.
     // Creation, seeding and the marker commit together, including concurrent opens.
     this.db.transaction(() => {
@@ -556,6 +566,21 @@ export class Store {
     // Keep references and immutable avatars so scheduled tasks and old sessions remain usable.
     this.db.query('UPDATE workers SET archived=1,updated_at=? WHERE id=?').run(now, id);
     return this.getWorker(id);
+  }
+  private mapIntegratorProfile(row: Row): IntegratorProfile {
+    return { mode: row.mode, provider: row.provider, model: row.model ?? null, effort: row.effort,
+      communicationStyle: row.communication_style, avatarUrl: row.avatar_url, updatedAt: row.updated_at };
+  }
+  getIntegratorProfile(): IntegratorProfile {
+    return this.mapIntegratorProfile(this.db.query('SELECT * FROM integrator_profile WHERE singleton=1').get() as Row);
+  }
+  /** Applies to reconcile runs created afterwards; started runs keep their frozen snapshot. */
+  updateIntegratorProfile(input: IntegratorProfileInput, now = Date.now()): IntegratorProfile {
+    const model = validatedModel(input.model);
+    this.assertAvatar(input.avatarUrl);
+    this.db.query('UPDATE integrator_profile SET mode=?,provider=?,model=?,effort=?,communication_style=?,avatar_url=?,updated_at=? WHERE singleton=1')
+      .run(input.mode, input.provider, model, input.effort, input.communicationStyle, input.avatarUrl, now);
+    return this.getIntegratorProfile();
   }
   saveAvatar(data: Uint8Array, mime: string, now = Date.now()): string {
     const id = createHash('sha256').update(data).digest('hex');
@@ -1048,7 +1073,7 @@ export class Store {
       }
       const depth = (source.reconcile?.depth ?? 0) + 1;
       if (depth > RECONCILE_DEPTH_LIMIT) throw new AppError(`Интегратор уже ${RECONCILE_DEPTH_LIMIT} раза объединял этот результат, а целевая ветка снова конфликтует. Разрешите конфликт вручную в исходном worktree и повторите проверку.`, 409);
-      const worker = integratorSnapshot(source.worker?.provider ?? source.provider, source.worker?.model ?? null, source.worker?.effort ?? 'default');
+      const worker = integratorSnapshot(this.getIntegratorProfile(), { provider: source.worker?.provider ?? source.provider, model: source.worker?.model ?? null, effort: source.worker?.effort ?? 'default' });
       const reconcile: RunReconcile = { sourceRunId: source.id, integrationId: integration.id, targetBranch: source.workspace.targetBranch,
         targetCommit: integration.targetCommit, conflicts: integration.conflicts ?? [], depth };
       const id = crypto.randomUUID();

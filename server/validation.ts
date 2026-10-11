@@ -1,6 +1,6 @@
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
-import type { Effort, TaskInput, WorkerInput } from '../src/lib/types';
+import type { Effort, IntegratorProfileInput, TaskInput, WorkerInput } from '../src/lib/types';
 import { AppError } from './store';
 import { validateWorkflowSteps } from './workflows';
 import { attachmentIds } from './attachments';
@@ -41,24 +41,37 @@ export async function validateTask(value: unknown): Promise<TaskInput> {
   return { ...(v.tagIds !== undefined ? { tagIds: validateTagIds(v.tagIds) } : {}), ...(v.attachmentIds !== undefined ? { attachmentIds: attachmentIds(v.attachmentIds) } : {}), steps: validateWorkflowSteps(v.steps), workerId, title, instruction, provider: v.provider, cwd, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
 }
 
-export function validateWorker(value: unknown): WorkerInput & { archived?: boolean } {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError('Ожидается JSON-объект');
-  const v = value as Record<string, unknown>;
-  const name = textField(v.name, 'Имя работника', 80);
+/** CLI settings, private instructions and avatar shared by worker profiles and the integrator profile. */
+function executionProfile(v: Record<string, unknown>, instructionsLabel: string): Pick<WorkerInput, 'provider' | 'effort' | 'communicationStyle' | 'avatarUrl'> & { model: string | null } {
   if (v.provider !== 'codex' && v.provider !== 'claude') throw new AppError('Выберите Codex или Claude Code');
   const effort = v.effort === undefined ? 'default' : v.effort;
   let model: string | null;
   try { model = normalizeModel(v.model); }
   catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректная модель'); }
+  if (typeof effort !== 'string' || !effortOptions[v.provider].includes(effort as Effort)) throw new AppError('Этот effort не поддерживается выбранным провайдером');
+  const communicationStyle = v.communicationStyle === undefined ? '' : v.communicationStyle;
+  if (typeof communicationStyle !== 'string' || communicationStyle.length > 4_000 || communicationStyle.includes('\0')) throw new AppError(`${instructionsLabel}: не больше 4000 символов`);
+  const avatarUrl = v.avatarUrl ?? null;
+  if (avatarUrl !== null && (typeof avatarUrl !== 'string' || !/^\/api\/avatars\/[a-f0-9]{64}$/.test(avatarUrl))) throw new AppError('Используйте загруженный аватар');
+  return { provider: v.provider, model, effort: effort as Effort, communicationStyle: communicationStyle.trim(), avatarUrl };
+}
+
+export function validateWorker(value: unknown): WorkerInput & { archived?: boolean } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError('Ожидается JSON-объект');
+  const v = value as Record<string, unknown>;
+  const name = textField(v.name, 'Имя работника', 80);
   let description: string;
   try { description = normalizeWorkerDescription(v.description); }
   catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректное описание'); }
-  if (typeof effort !== 'string' || !effortOptions[v.provider].includes(effort as Effort)) throw new AppError('Этот effort не поддерживается выбранным провайдером');
-  const communicationStyle = v.communicationStyle === undefined ? '' : v.communicationStyle;
-  if (typeof communicationStyle !== 'string' || communicationStyle.length > 4_000 || communicationStyle.includes('\0')) throw new AppError('Личные инструкции: не больше 4000 символов');
-  const avatarUrl = v.avatarUrl ?? null;
-  if (avatarUrl !== null && (typeof avatarUrl !== 'string' || !/^\/api\/avatars\/[a-f0-9]{64}$/.test(avatarUrl))) throw new AppError('Используйте загруженный аватар');
+  const profile = executionProfile(v, 'Личные инструкции');
   if ('archived' in v && typeof v.archived !== 'boolean') throw new AppError('archived должен быть boolean');
-  return { name, description, provider: v.provider, model, effort: effort as Effort, communicationStyle: communicationStyle.trim(), avatarUrl,
-    ...(typeof v.archived === 'boolean' ? { archived: v.archived } : {}) };
+  return { name, description, ...profile, ...(typeof v.archived === 'boolean' ? { archived: v.archived } : {}) };
+}
+
+/** The built-in integrator's single profile. Inherit mode still stores CLI settings so switching back restores them. */
+export function validateIntegratorProfile(value: unknown): IntegratorProfileInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError('Ожидается JSON-объект');
+  const v = value as Record<string, unknown>;
+  if (v.mode !== 'inherit' && v.mode !== 'custom') throw new AppError('Выберите, откуда Интегратор берёт настройки: как у запуска или свои');
+  return { mode: v.mode, ...executionProfile(v, 'Указания Интегратору') };
 }

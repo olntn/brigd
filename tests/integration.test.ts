@@ -56,6 +56,9 @@ test('combined candidate is checked before a clean target receives the saved res
   expect(integration.status).toBe('merged'); expect(existsSync(marker)).toBe(true);
   expect(integration.targetCommit).toBe(target); expect(integration.checks[0]?.exitCode).toBe(0);
   expect(git(root, 'rev-parse', 'HEAD')).toBe(integration.resultCommit!);
+  // The worker's own result keeps the repository identity; the verified merge commit is the integrator's.
+  expect(git(root, 'log', '-1', '--format=%an', integration.sourceCommit!)).toBe('Test');
+  expect(git(root, 'log', '-1', '--format=%an <%ae>', integration.resultCommit!)).toBe('Интегратор <integrator@localhost>');
   expect(readFileSync(join(root, 'src/value.txt'), 'utf8')).toBe('worker result\n');
   expect(git(root, 'ls-files')).not.toContain('.brigd-outbox'); expect(existsSync(join(artifacts, 'answer.txt'))).toBe(true);
   expect(store.getTask(run.taskId).status).toBe('completed');
@@ -305,4 +308,26 @@ test('an unchecked-out target is updated with a compare-and-swap while the curre
   expect(integration.status).toBe('merged'); expect(git(root, 'rev-parse', 'main')).toBe(integration.resultCommit!);
   expect(git(root, 'symbolic-ref', '--short', 'HEAD')).toBe('other'); expect(git(root, 'rev-parse', 'HEAD')).toBe(other);
   expect(readFileSync(join(root, 'src/value.txt'), 'utf8')).toBe('base\n');
+});
+
+test('the saved integrator profile decides the reconcile run, and merge commits name the integrator as author', async () => {
+  store.updateIntegratorProfile({ mode: 'custom', provider: 'claude', model: 'claude-opus-5-5', effort: 'max', communicationStyle: 'Prefer the target version of documentation.', avatarUrl: null });
+  const run = await start();
+  conflictingTarget('conflicting target\n'); complete(run);
+  await until(() => agent.calls.length === 2);
+  const call = agent.calls[1]!;
+  expect(call.input).toMatchObject({ provider: 'claude', model: 'claude-opus-5-5', effort: 'max', communicationStyle: 'Prefer the target version of documentation.', reconcile: { conflicts: ['src/value.txt'] } });
+  const integrator = store.getTask(run.taskId).latestRun!;
+  expect(integrator.provider).toBe('claude');
+  expect(integrator.worker).toMatchObject({ id: 'brigd-integrator', provider: 'claude', model: 'claude-opus-5-5', effort: 'max', communicationStyle: 'Prefer the target version of documentation.' });
+  // Later edits apply to the next conflict only; a started run keeps its frozen snapshot.
+  store.updateIntegratorProfile({ mode: 'inherit', provider: 'codex', model: null, effort: 'default', communicationStyle: '', avatarUrl: null });
+  expect(store.getRun(integrator.id).worker).toMatchObject({ provider: 'claude', effort: 'max' });
+  writeFileSync(join(run.workspace!.path, 'src/value.txt'), 'resolved by integrator\n'); call.resolve(outcome('integrator-session'));
+  const merged = await settled(integrator);
+  expect(merged.status).toBe('merged'); expect(git(root, 'rev-parse', 'HEAD')).toBe(merged.resultCommit!);
+  for (const commit of [merged.sourceCommit!, merged.resultCommit!]) {
+    expect(git(root, 'log', '-1', '--format=%an <%ae>', commit)).toBe('Интегратор <integrator@localhost>');
+    expect(git(root, 'log', '-1', '--format=%cn', commit)).toBe('Test');
+  }
 });

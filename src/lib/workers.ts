@@ -1,19 +1,22 @@
-import type { Effort, ModelCatalogEntry, Provider, WorkerSnapshot } from './types';
+import type { Effort, IntegratorProfileInput, ModelCatalogEntry, Provider, WorkerSnapshot } from './types';
 
 export const MODEL_ID_LIMIT = 128;
 export const MODEL_LABEL_LIMIT = 80;
 export const MODEL_CATALOG_PROVIDER_LIMIT = 100;
 export const WORKER_DESCRIPTION_LIMIT = 1_000;
-/** The only built-in worker. It is never stored in the catalog and cannot be edited, assigned, or archived. */
+/** The only built-in worker. It is never stored in the catalog and cannot be assigned or archived; its single profile is edited separately. */
 export const INTEGRATOR_WORKER_ID = 'brigd-integrator';
 export const INTEGRATOR_WORKER = {
   id: INTEGRATOR_WORKER_ID, name: 'Интегратор',
   description: 'Встроенный работник brigd. Разрешает конфликты слияния в worktree задачи, когда результат не объединяется с целевой веткой автоматически.',
 } as const;
 export const isBuiltinWorker = (id: string | null | undefined): boolean => id === INTEGRATOR_WORKER_ID;
-/** The built-in worker has no stored profile: the user's own settings grow stale, so the source run's are frozen instead. */
-export function integratorSnapshot(provider: Provider, model: string | null, effort: Effort): WorkerSnapshot {
-  return { ...INTEGRATOR_WORKER, provider, model, effort, communicationStyle: '', avatarUrl: null };
+/** The single saved integrator profile decides each reconcile run: its own CLI settings in custom mode,
+ * the merged run's in inherit mode. Guidance and avatar always come from the profile; the run freezes the result. */
+export function integratorSnapshot(profile: IntegratorProfileInput, source: { provider: Provider; model: string | null; effort: Effort }): WorkerSnapshot {
+  const custom = profile.mode === 'custom';
+  return { ...INTEGRATOR_WORKER, provider: custom ? profile.provider : source.provider, model: custom ? profile.model ?? null : source.model,
+    effort: custom ? profile.effort : source.effort, communicationStyle: profile.communicationStyle, avatarUrl: profile.avatarUrl };
 }
 
 /** Optional display metadata, kept separate from executable personal instructions. */

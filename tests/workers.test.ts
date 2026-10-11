@@ -752,6 +752,7 @@ describe('worker and avatar HTTP security boundaries', () => {
       ['/api/workers', 'POST', JSON.stringify(workerInput()), 'application/json'],
       [`/api/workers/${worker.id}`, 'PATCH', JSON.stringify({ name: 'Do not save' }), 'application/json'],
       [`/api/workers/${worker.id}`, 'DELETE', '{}', 'application/json'],
+      ['/api/integrator', 'PATCH', JSON.stringify({ mode: 'custom' }), 'application/json'],
       ['/api/avatars', 'POST', new Uint8Array(PNG), 'image/png'],
     ] as [string, string, string | Uint8Array<ArrayBuffer>, string][]) {
       expect((await handler(new Request(ORIGIN + path, { method, headers: { 'content-type': type }, body }))).status).toBe(403);
@@ -796,5 +797,42 @@ describe('worker and avatar HTTP security boundaries', () => {
     expect((await upload(PNG, 'application/json')).status).toBe(415);
     expect(store.listWorkers()).toEqual([]);
     expect(avatarCount()).toBe(0);
+  });
+});
+
+describe('built-in integrator profile', () => {
+  const custom = { mode: 'custom', provider: 'claude', model: 'claude-opus-5-5', effort: 'max', communicationStyle: '  Keep docs from the target branch.  ', avatarUrl: null };
+  test('starts in inherit mode, persists edits across reopen, and keeps hidden CLI settings when switching back', async () => {
+    const initial = await (await request('/api/integrator')).json();
+    expect(initial).toMatchObject({ mode: 'inherit', provider: 'codex', model: null, effort: 'default', communicationStyle: '', avatarUrl: null });
+    expect(typeof initial.updatedAt).toBe('number');
+    const saved = await request('/api/integrator', 'PATCH', custom);
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ mode: 'custom', provider: 'claude', model: 'claude-opus-5-5', effort: 'max', communicationStyle: 'Keep docs from the target branch.' });
+    await reopen();
+    expect(store.getIntegratorProfile()).toMatchObject({ mode: 'custom', provider: 'claude', model: 'claude-opus-5-5', effort: 'max' });
+    const inherit = await (await request('/api/integrator', 'PATCH', { mode: 'inherit' })).json();
+    expect(inherit).toMatchObject({ mode: 'inherit', provider: 'claude', model: 'claude-opus-5-5', effort: 'max', communicationStyle: 'Keep docs from the target branch.' });
+    const uploaded = await (await upload(PNG)).json();
+    expect((await request('/api/integrator', 'PATCH', { avatarUrl: uploaded.avatarUrl })).status).toBe(200);
+    expect(store.getIntegratorProfile().avatarUrl).toBe(uploaded.avatarUrl);
+  });
+
+  test('provider changes reset an omitted model while invalid patches leave the profile untouched', async () => {
+    expect((await request('/api/integrator', 'PATCH', custom)).status).toBe(200);
+    expect((await request('/api/integrator', 'PATCH', { provider: 'codex' })).status).toBe(400);
+    expect(await (await request('/api/integrator', 'PATCH', { provider: 'codex', effort: 'xhigh' })).json()).toMatchObject({ provider: 'codex', model: null, effort: 'xhigh' });
+    expect(await (await request('/api/integrator', 'PATCH', { provider: 'claude', model: 'claude-sonnet-5-5' })).json()).toMatchObject({ provider: 'claude', model: 'claude-sonnet-5-5' });
+    const before = store.getIntegratorProfile();
+    for (const patch of [{ mode: 'auto' }, { provider: 'gemini' }, { effort: 'ultra' }, { model: 'bad model' }, { communicationStyle: 'x'.repeat(4001) },
+      { communicationStyle: 'a\0b' }, { avatarUrl: '/api/avatars/' + 'a'.repeat(64) }, { avatarUrl: 'https://evil.example/a.png' }]) {
+      expect((await request('/api/integrator', 'PATCH', patch)).status).toBe(400);
+      expect(store.getIntegratorProfile()).toEqual(before);
+    }
+    expect((await (await request('/api/integrator', 'PATCH', { communicationStyle: 'x'.repeat(4001) })).json()).error).toContain('Указания Интегратору');
+    expectAppError(() => store.updateIntegratorProfile({ ...before, avatarUrl: '/api/avatars/' + 'b'.repeat(64) }), 400);
+    expect((await request('/api/integrator', 'PATCH', custom, { 'content-type': 'text/plain' })).status).toBe(415);
+    expect((await handler(new Request(ORIGIN + '/api/integrator', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: '{}' }))).status).toBe(403);
+    expect(store.getIntegratorProfile()).toEqual(before);
   });
 });

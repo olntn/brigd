@@ -3,6 +3,10 @@ import { dirname, join } from 'node:path';
 import type { Integration, Run } from '../src/lib/types';
 import { runBoundedProcess } from './adapter';
 import { GitWorkspaces } from './workspaces';
+import { INTEGRATOR_WORKER } from '../src/lib/workers';
+
+/** Merge commits are authored by the built-in integrator so history separates them from human and worker commits; the committer stays the repository identity. */
+export const INTEGRATOR_AUTHOR = `${INTEGRATOR_WORKER.name} <integrator@localhost>`;
 
 class IntegrationError extends Error {
   constructor(readonly status: 'conflict' | 'failed' | 'blocked' | 'queued', message: string, readonly patch: Partial<Integration> = {}) { super(message); }
@@ -82,7 +86,7 @@ export class GitIntegrator implements Integrator {
         const identity = readGit(workspace.path, ['var', 'GIT_AUTHOR_IDENT'], true);
         const options = identity ? [] : ['-c', 'user.name=brigd', '-c', 'user.email=brigd@localhost'];
         const message = merging ? `brigd: объединение ${workspace.targetBranch} в ${workspace.branch}` : `brigd: результат ${run.id}`;
-        if (await git(workspace.path, [...options, 'commit', '-m', message], signal)) throw new IntegrationError('blocked', 'Не удалось создать коммит результата. Проверьте Git-конфигурацию, hooks и нативные разрешения.');
+        if (await git(workspace.path, [...options, 'commit', ...(merging ? ['--author', INTEGRATOR_AUTHOR] : []), '-m', message], signal)) throw new IntegrationError('blocked', 'Не удалось создать коммит результата. Проверьте Git-конфигурацию, hooks и нативные разрешения.');
       }
       if (!sourceClean(workspace.path)) throw new IntegrationError('blocked', 'В worktree остались несохранённые изменения. Завершите их перед слиянием.');
       const sourceCommit = readGit(workspace.path, ['rev-parse', '--verify', 'HEAD^{commit}']);
@@ -118,7 +122,7 @@ export class GitIntegrator implements Integrator {
       if (readGit(workspace.path, ['rev-parse', targetRef]) !== targetCommit) throw new IntegrationError('queued', 'Целевая ветка изменилась во время проверки. Кандидат будет подготовлен заново.');
       update({ status: 'merging' });
       const identity = readGit(candidatePath, ['var', 'GIT_AUTHOR_IDENT'], true);
-      if (await git(candidatePath, [...(identity ? [] : ['-c', 'user.name=brigd', '-c', 'user.email=brigd@localhost']), 'commit', '-m', `brigd: объединение ${run.id}`], signal)) throw new IntegrationError('blocked', 'Не удалось создать проверенный коммит объединения.');
+      if (await git(candidatePath, [...(identity ? [] : ['-c', 'user.name=brigd', '-c', 'user.email=brigd@localhost']), 'commit', '--author', INTEGRATOR_AUTHOR, '-m', `brigd: объединение ${run.id}`], signal)) throw new IntegrationError('blocked', 'Не удалось создать проверенный коммит объединения.');
       const resultCommit = readGit(candidatePath, ['rev-parse', 'HEAD']);
       if (readGit(candidatePath, ['rev-parse', 'HEAD^{tree}']) !== testedTree) throw new IntegrationError('failed', 'Git hook изменил коммит после проверки. Перенос остановлен.');
       update({ resultCommit });

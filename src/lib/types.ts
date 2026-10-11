@@ -48,6 +48,19 @@ export interface Worker extends WorkerInput {
 }
 /** Immutable identity and execution settings captured when a run starts. */
 export interface WorkerSnapshot extends WorkerInput { id: string; model: string | null; description: string; }
+/** How the built-in integrator chooses its CLI: the merged run's settings, or its own saved ones. */
+export type IntegratorMode = 'inherit' | 'custom';
+export interface IntegratorProfileInput {
+  mode: IntegratorMode;
+  /** Used only in custom mode; kept in inherit mode so switching back restores the last choice. */
+  provider: Provider;
+  model?: string | null;
+  effort: Effort;
+  /** Guidance for conflict resolution, passed to the agent like a worker's personal instructions. */
+  communicationStyle: string;
+  avatarUrl: string | null;
+}
+export interface IntegratorProfile extends IntegratorProfileInput { model: string | null; updatedAt: number; }
 
 export interface InstructionInput {
   title: string;

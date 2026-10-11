@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import Icon from './Icon.svelte';
   import WorkerAvatar from './WorkerAvatar.svelte';
   import AvatarEditor from './AvatarEditor.svelte';
   import { defaultAvatarCrop, exportAvatar, type AvatarCrop } from './avatar';
   import { effortOptions, effortLabel, modelLabel, normalizeModel, INTEGRATOR_WORKER, MODEL_ID_LIMIT } from './workers';
-  import type { Effort, ModelCatalogEntry, Provider, Worker, WorkerInput } from './types';
+  import type { Effort, IntegratorMode, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, Provider, Worker, WorkerInput } from './types';
 
   let { workers, loading, error, retry, onchange, notify, models, modelsLoading, modelsError, retryModels }: {
     workers: Worker[]; loading: boolean; error: string; retry: () => void;
@@ -39,6 +39,12 @@
   let pending = $state<string[]>([]);
   let imageSequence = 0;
   let fileInput = $state<HTMLInputElement>();
+  // The built-in integrator has one profile; the same dialog edits it with a reduced field set.
+  let integrator = $state<IntegratorProfile | null>(null);
+  let integratorLoading = $state(true);
+  let integratorError = $state('');
+  let editingBuiltin = $state(false);
+  let integratorMode = $state<IntegratorMode>('inherit');
   let activeWorkers = $derived(workers.filter(worker => !worker.archived));
   let archivedWorkers = $derived(workers.filter(worker => worker.archived));
   let providerModels = $derived(modelsError ? [] : models.filter(model => model.provider === provider));
@@ -49,6 +55,9 @@
     if (editing && draftModel && !customSelection && !providerModels.some(option => option.modelId === draftModel)) customSelection = true;
   });
   const providerName = (value: Provider) => value === 'codex' ? 'Codex' : 'Claude Code';
+  let integratorSettings = $derived(!integrator ? (integratorError ? 'Настройки недоступны' : 'Загружаем настройки…') : integrator.mode === 'inherit'
+    ? 'Провайдер, модель и усилия — как у запуска, результат которого объединяется'
+    : `${providerName(integrator.provider)} · ${modelLabel(integrator.model, modelsError ? undefined : models, integrator.provider)} · ${effortLabel(integrator.effort)}`);
 
   async function request<T>(path: string, options: RequestInit): Promise<T> {
     const response = await fetch(path, options);
@@ -76,11 +85,32 @@
   }
   onDestroy(() => { imageSequence++; clearPreview(); clearImageSource(); });
 
-  async function openEditor(worker?: Worker) {
+  async function loadIntegrator() {
+    integratorLoading = true;
+    integratorError = '';
+    try { integrator = await request<IntegratorProfile>('/api/integrator', {}); }
+    catch (error) { integratorError = error instanceof Error ? error.message : 'Не удалось загрузить настройки Интегратора'; }
+    finally { integratorLoading = false; }
+  }
+  onMount(() => { void loadIntegrator(); });
+
+  function resetEditorMedia() {
     imageSequence++;
     clearPreview();
     clearImageSource();
     imageLoading = false;
+  }
+  async function presentEditor(focus: string) {
+    formError = '';
+    imageError = '';
+    editing = true;
+    await tick();
+    dialog.showModal();
+    dialog.querySelector<HTMLElement>(focus)?.focus();
+  }
+  async function openEditor(worker?: Worker) {
+    resetEditorMedia();
+    editingBuiltin = false;
     editingId = worker?.id ?? null;
     name = worker?.name ?? '';
     description = worker?.description ?? '';
@@ -90,12 +120,23 @@
     effort = worker?.effort ?? 'default';
     communicationStyle = worker?.communicationStyle ?? '';
     avatarUrl = worker?.avatarUrl ?? null;
-    formError = '';
-    imageError = '';
-    editing = true;
-    await tick();
-    dialog.showModal();
-    dialog.querySelector<HTMLInputElement>('[name="workerName"]')?.focus();
+    await presentEditor('[name="workerName"]');
+  }
+  async function openIntegratorEditor() {
+    if (!integrator) return;
+    resetEditorMedia();
+    editingBuiltin = true;
+    editingId = null;
+    name = INTEGRATOR_WORKER.name;
+    description = '';
+    integratorMode = integrator.mode;
+    provider = integrator.provider;
+    draftModel = integrator.model ?? '';
+    customSelection = !!draftModel && (modelsError !== '' || !models.some(option => option.provider === provider && option.modelId === draftModel));
+    effort = integrator.effort;
+    communicationStyle = integrator.communicationStyle;
+    avatarUrl = integrator.avatarUrl;
+    await presentEditor('[name="integratorMode"]');
   }
 
   function closeEditor() {
@@ -196,11 +237,13 @@
     event.preventDefault();
     if (submitting || imageBusy || imageError) return;
     formError = '';
-    if (!name.trim()) { formError = 'Укажите имя работника.'; return; }
+    if (!editingBuiltin && !name.trim()) { formError = 'Укажите имя работника.'; return; }
+    // In inherit mode the hidden CLI fields keep their saved values for a later switch back.
+    const ownSettings = !editingBuiltin || integratorMode === 'custom';
     let model: string | null;
     try {
-      model = normalizeModel(draftModel);
-      if (modelSelection === '__custom__' && !model) throw new Error('Укажите ID модели или выберите «По умолчанию CLI».');
+      model = ownSettings ? normalizeModel(draftModel) : integrator?.model ?? null;
+      if (ownSettings && modelSelection === '__custom__' && !model) throw new Error('Укажите ID модели или выберите «По умолчанию CLI».');
     } catch (error) { formError = error instanceof Error ? error.message : 'Проверьте ID модели.'; return; }
     submitting = true;
     try {
@@ -213,12 +256,18 @@
         avatarUrl = uploaded.avatarUrl;
         avatarBlob = null; // A failed profile save can reuse this upload on retry.
       }
-      const payload: WorkerInput = { name: name.trim(), description: description.trim(), provider, model, effort, communicationStyle: communicationStyle.trim(), avatarUrl };
-      const saved = await request<Worker>(editingId ? `/api/workers/${encodeURIComponent(editingId)}` : '/api/workers', {
-        method: editingId ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
-      });
-      onchange(saved);
-      notify(editingId ? 'Профиль работника сохранён' : 'Работник создан');
+      if (editingBuiltin) {
+        const payload: IntegratorProfileInput = { mode: integratorMode, provider, model, effort, communicationStyle: communicationStyle.trim(), avatarUrl };
+        integrator = await request<IntegratorProfile>('/api/integrator', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        notify('Настройки Интегратора сохранены');
+      } else {
+        const payload: WorkerInput = { name: name.trim(), description: description.trim(), provider, model, effort, communicationStyle: communicationStyle.trim(), avatarUrl };
+        const saved = await request<Worker>(editingId ? `/api/workers/${encodeURIComponent(editingId)}` : '/api/workers', {
+          method: editingId ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+        onchange(saved);
+        notify(editingId ? 'Профиль работника сохранён' : 'Работник создан');
+      }
       submitting = false;
       closeEditor();
     } catch (error) { formError = error instanceof Error ? error.message : 'Не удалось сохранить работника'; }
@@ -262,23 +311,30 @@
 <section class="builtin-section" aria-label="Встроенные работники">
   <h2 class="builtin-heading">Встроенный работник</h2>
   <article class="worker-card builtin-worker" aria-label={'Встроенный работник: ' + INTEGRATOR_WORKER.name}>
-    <div class="worker-card-heading"><WorkerAvatar name={INTEGRATOR_WORKER.name} size={64} /><div><h2>{INTEGRATOR_WORKER.name}</h2><p class="worker-description">{INTEGRATOR_WORKER.description}</p><p>Провайдер, модель и усилия — как у запуска, результат которого объединяется</p></div><span class="worker-archived-label">Встроенный</span></div>
-    <p class="builtin-worker-note">Запускается сам при конфликте слияния (или кнопкой «Поручить интегратору» в карточке задачи), разрешает конфликты в worktree задачи, после чего brigd заново проверяет и переносит результат. Профиль нельзя изменить, назначить задаче или архивировать.</p>
+    <div class="worker-card-heading"><WorkerAvatar name={INTEGRATOR_WORKER.name} avatarUrl={integrator?.avatarUrl ?? null} size={64} /><div><h2>{INTEGRATOR_WORKER.name}</h2><p class="worker-description">{INTEGRATOR_WORKER.description}</p><p class="integrator-settings">{integratorSettings}</p></div><span class="worker-archived-label">Встроенный</span></div>
+    <p class="builtin-worker-note">Запускается сам при конфликте слияния (или кнопкой «Поручить интегратору» в карточке задачи), разрешает конфликты в worktree задачи, после чего brigd заново проверяет и переносит результат. Коммиты объединения подписаны его именем. Его нельзя назначить задаче или архивировать; настройки запуска, указания и аватар меняются здесь.</p>
+    {#if integratorError}<div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{integratorError}</span><button onclick={() => { void loadIntegrator(); }}>Повторить</button></div>{/if}
+    <div class="worker-card-actions"><button class="button secondary" disabled={!integrator || integratorLoading} onclick={() => { void openIntegratorEditor(); }} aria-label={'Изменить работника: ' + INTEGRATOR_WORKER.name}><Icon name="edit" size={14} />Изменить</button></div>
   </article>
 </section>
 {#if archivedWorkers.length}<section class="archive-section"><button class="archive-toggle" aria-expanded={archivedVisible} onclick={() => archivedVisible = !archivedVisible}><Icon name={archivedVisible ? 'down' : 'chevron'} size={16} /><strong>Архив работников</strong></button>{#if archivedVisible}<p class="workers-archive-help">Архивные работники сохраняются в назначенных задачах и истории; их расписания продолжают работать. Для новых назначений восстановите профиль.</p><div class="workers-grid">{#each archivedWorkers as worker (worker.id)}{@render workerCard(worker)}{/each}</div>{/if}</section>{/if}
 
 <dialog bind:this={dialog} class="editor-dialog worker-editor" aria-labelledby="worker-editor-title" oncancel={(event) => { event.preventDefault(); closeEditor(); }} onclick={backdropClick}>
   {#if editing}<form class="editor-form" onsubmit={saveWorker}>
-    <header class="editor-header"><div><h2 id="worker-editor-title">{editingId ? 'Редактировать работника' : 'Новый работник'}</h2></div><button class="icon-button" type="button" aria-label="Закрыть профиль" disabled={submitting} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
+    <header class="editor-header"><div><h2 id="worker-editor-title">{editingBuiltin ? 'Настройки Интегратора' : editingId ? 'Редактировать работника' : 'Новый работник'}</h2></div><button class="icon-button" type="button" aria-label="Закрыть профиль" disabled={submitting} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
     <div class="editor-fields">
       {#if formError}<div class="form-error" role="alert"><Icon name="alert" size={17} />{formError}</div>{/if}
       <div class="worker-avatar-picker"><WorkerAvatar name={name || 'Работник'} avatarUrl={previewUrl ?? avatarUrl} size={88} /><div><label class="form-field"><span>Аватар</span><input bind:this={fileInput} name="workerAvatar" aria-label="Загрузить аватар" type="file" accept="image/png,image/jpeg,image/webp" onchange={selectImage} disabled={submitting} /><small>PNG, JPEG или WebP до 5 МБ. Настройте масштаб и область изображения перед сохранением.</small></label>{#if avatarUrl && !imageSource}<button type="button" class="avatar-remove" disabled={submitting || imageBusy} onclick={editAvatar}>Изменить размер аватара</button>{/if}{#if previewUrl || avatarUrl || imageError}<button type="button" class="avatar-remove" disabled={submitting} onclick={() => imageError ? resetImageError() : removeAvatar()}>{imageError ? 'Сбросить выбор изображения' : 'Убрать аватар'}</button>{/if}</div></div>
       {#if imageSource}{@const source = imageSource}{#key source}<AvatarEditor image={source} bind:crop={avatarCrop} disabled={submitting} onpreview={(blob) => { if (imageSource === source) previewAvatar(blob); }} onbusy={(busy) => { if (imageSource === source) imageRendering = busy; }} onerror={(message) => { if (imageSource === source) imageError = message; }} />{/key}{/if}
       {#if imageBusy}<p class="worker-image-status" role="status">Подготавливаем изображение…</p>{/if}
       {#if imageError}<div class="form-error" role="alert">{imageError}</div>{/if}
+      {#if editingBuiltin}
+      <label class="form-field"><span>Настройки запуска</span><select name="integratorMode" aria-label="Настройки запуска" bind:value={integratorMode} disabled={submitting}><option value="inherit">Как у запуска, результат которого объединяется</option><option value="custom">Свои провайдер, модель и усилия</option></select><small>Сессия Интегратора всегда новая: настройки объединяемого запуска не дают ему контекста задачи, только тот же CLI.</small></label>
+      {:else}
       <label class="form-field"><span>Имя работника <span class="required">*</span></span><input name="workerName" aria-label="Имя работника" bind:value={name} maxlength="80" placeholder="Например, Мира" required disabled={submitting} /></label>
       <label class="form-field"><span>Описание</span><textarea name="workerDescription" aria-label="Описание" bind:value={description} rows="3" maxlength="1000" disabled={submitting}></textarea><small>Показывается рядом с именем работника в задачах.</small></label>
+      {/if}
+      {#if !editingBuiltin || integratorMode === 'custom'}
       <div class="worker-model-fields">
         <label class="form-field"><span>Провайдер</span><select name="workerProvider" aria-label="Провайдер" bind:value={provider} onchange={changeProvider} disabled={submitting}><option value="codex">Codex</option><option value="claude">Claude Code</option></select><small>При смене провайдера модель сбросится на значение CLI по умолчанию.</small></label>
         <label class="form-field"><span>Модель</span><select name="workerModel" aria-label="Модель" value={modelSelection} onchange={changeModel} disabled={submitting}><option value="">По умолчанию CLI</option>{#each providerModels as option (option.id)}<option value={option.modelId}>{option.label} · {option.modelId}</option>{/each}<option value="__custom__">Другая модель…</option></select><small>Список можно изменить в настройках. Доступность зависит от вашего CLI и аккаунта; ID можно указать вручную.</small></label>
@@ -288,9 +344,14 @@
       {:else if !providerModels.length}<p class="worker-image-status">В списке этого провайдера пока нет моделей. Добавьте их в настройках или укажите ID вручную.</p>{/if}
       {#if modelSelection === '__custom__'}<label class="form-field"><span>ID модели <span class="required">*</span></span><input name="workerCustomModel" aria-label="ID модели" bind:value={draftModel} maxlength={MODEL_ID_LIMIT} placeholder={providerModels[0]?.modelId ?? 'model-id'} autocomplete="off" autocapitalize="off" spellcheck="false" required disabled={submitting} /><small>Укажите ID или алиас, который принимает ваш CLI, до {MODEL_ID_LIMIT} символов. Без пробелов внутри и символов управления.</small></label>{/if}
       <label class="form-field"><span>Уровень усилий</span><select name="workerEffort" aria-label="Уровень усилий" bind:value={effort} disabled={submitting}>{#each effortOptions[provider] as option}<option value={option}>{effortLabel(option)}</option>{/each}</select><small>Поддержка уровня зависит от выбранной модели, аккаунта и версии CLI. «По умолчанию CLI» сохраняет настройки CLI.</small></label>
+      {/if}
+      {#if editingBuiltin}
+      <label class="form-field"><span>Указания Интегратору</span><textarea name="communicationStyle" aria-label="Указания Интегратору" bind:value={communicationStyle} rows="5" maxlength="4000" disabled={submitting}></textarea><small>Передаются при разрешении конфликта: например, какие файлы не трогать или чью версию предпочитать. Показываются только здесь.</small></label>
+      {:else}
       <label class="form-field"><span>Личные инструкции</span><textarea name="communicationStyle" aria-label="Личные инструкции" bind:value={communicationStyle} rows="5" maxlength="4000" disabled={submitting}></textarea><small>Передаются работнику при запуске. Показываются только в его профиле.</small></label>
-      {#if editingId}<div class="form-note">Уже начатые запуски и их продолжения сохранят прежний профиль. Обновления будут действовать со следующего запуска.</div>{/if}
+      {/if}
+      {#if editingId || editingBuiltin}<div class="form-note">Уже начатые запуски и их продолжения сохранят прежний профиль. Обновления будут действовать со следующего запуска.</div>{/if}
     </div>
-    <footer class="editor-footer"><button type="button" class="button secondary" disabled={submitting} onclick={closeEditor}>Отмена</button><button type="submit" class="button primary" disabled={submitting || imageBusy || !!imageError}>{#if submitting}<Icon name="refresh" class="spin" size={16} />{:else}<Icon name={editingId ? 'check' : 'plus'} size={16} />{/if}{submitting ? 'Сохраняем…' : editingId ? 'Сохранить профиль' : 'Создать работника'}</button></footer>
+    <footer class="editor-footer"><button type="button" class="button secondary" disabled={submitting} onclick={closeEditor}>Отмена</button><button type="submit" class="button primary" disabled={submitting || imageBusy || !!imageError}>{#if submitting}<Icon name="refresh" class="spin" size={16} />{:else}<Icon name={editingId || editingBuiltin ? 'check' : 'plus'} size={16} />{/if}{submitting ? 'Сохраняем…' : editingBuiltin ? 'Сохранить настройки' : editingId ? 'Сохранить профиль' : 'Создать работника'}</button></footer>
   </form>{/if}
 </dialog>
