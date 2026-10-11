@@ -96,7 +96,7 @@ test('profile avatar, task assignment and immutable identity through edit and re
   await expect(profile).toBeVisible();
   await expect(profile.locator('img')).toHaveJSProperty('complete', true);
   const dimensions = await profile.locator('img').evaluate((image: HTMLImageElement) => ({ width: image.naturalWidth, height: image.naturalHeight }));
-  expect(dimensions).toEqual({ width: 256, height: 128 });
+  expect(dimensions).toEqual({ width: 256, height: 256 });
   const worker = (await (await request.get('/api/workers')).json() as Worker[]).find(row => row.name === name)!;
   expect(worker.avatarUrl).toMatch(/^\/api\/avatars\//);
   expect(worker.model).toBe(codexModel);
