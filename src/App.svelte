@@ -5,6 +5,7 @@
   import ModelSettings from './lib/ModelSettings.svelte';
   import Instructions from './lib/Instructions.svelte';
   import Autopilot from './lib/Autopilot.svelte';
+  import CliSetup from './lib/CliSetup.svelte';
   import { TASK_STATUS_LABELS } from './lib/status';
   import Tags from './lib/Tags.svelte';
   import TagPicker from './lib/TagPicker.svelte';
@@ -83,6 +84,7 @@
   const settingsSections = [
     { id: 'appearance', label: 'Внешний вид', icon: 'palette' },
     { id: 'models', label: 'Модели', icon: 'spark' },
+    { id: 'permissions', label: 'Разрешения', icon: 'lock' },
   ] as const;
   let settingsSection = $state<(typeof settingsSections)[number]['id']>('appearance');
   const themeGroups = [{ scheme: 'light', label: 'Светлые' }, { scheme: 'dark', label: 'Тёмные' }] as const;
@@ -375,7 +377,8 @@
     return () => { clearInterval(interval); clearTimeout(toastTimer); document.removeEventListener('visibilitychange', onVisible); window.removeEventListener('storage', onThemeStorage); };
   });
 
-  function openSettings() {
+  function openSettings(section?: (typeof settingsSections)[number]['id']) {
+    if (section) settingsSection = section;
     settingsOpen = true;
     settings.showModal();
     void loadModels();
@@ -834,7 +837,7 @@
     </nav>
     <div class="sidebar-bottom">
       <button class="archive-button" class:active={page === 'archive'} aria-label="Архив" onclick={() => { page = 'archive'; }}><Icon name="archive" /><span>Архив</span></button>
-      <button class="settings-button" onclick={openSettings} aria-haspopup="dialog"><Icon name="sliders" /><span>Настройки</span></button>
+      <button class="settings-button" onclick={() => openSettings()} aria-haspopup="dialog"><Icon name="sliders" /><span>Настройки</span></button>
     </div>
   </aside>
 
@@ -843,7 +846,7 @@
       {#if page === 'instructions'}
         <Instructions {notify} />
       {:else if page === 'autopilot'}
-        <Autopilot {tasks} {notify} onopen={openTask} onchanged={taskChanged} />
+        <Autopilot {tasks} {notify} onopen={openTask} onchanged={taskChanged} onsettings={() => openSettings('permissions')} />
       {:else if page === 'tags'}
         <Tags {tags} loading={tagsLoading} error={tagsError} onreload={loadTags} onchanged={tagChanged} ondeleted={tagDeleted} onmutation={tagMutation} {notify} />
       {:else if page === 'archive'}
@@ -1088,6 +1091,9 @@
       </div>
       <div id="settings-models-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-models-tab" hidden={settingsSection !== 'models'}>
         {#if settingsOpen}<ModelSettings {models} loading={modelsLoading} error={modelsError} retry={() => { void loadModels(); }} onchange={modelChanged} ondelete={modelDeleted} bind:busy={modelMutationPending} />{/if}
+      </div>
+      <div id="settings-permissions-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-permissions-tab" hidden={settingsSection !== 'permissions'}>
+        {#if settingsOpen}<CliSetup />{/if}
       </div>
     </div>
   </div>

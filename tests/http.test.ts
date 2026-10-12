@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentCallbacks, AgentInput, AgentOutcome } from '../server/adapter';
@@ -55,7 +55,7 @@ beforeEach(() => {
   store = new Store(join(folder, 'trackt.sqlite'));
   calls = [];
   engine = new Engine(store, true, factory);
-  handler = createHandler(engine, { port: PORT, root: folder, startedAt: 12345 });
+  handler = createHandler(engine, { port: PORT, root: folder, startedAt: 12345, cliHome: join(folder, 'home') });
 });
 afterEach(async () => {
   for (const call of calls) call.reject(new Error('Test cleanup'));
@@ -475,5 +475,33 @@ describe('autopilot endpoint', () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ enabled: false, stopReason: 'manual' });
     expect(store.getAutopilot().stoppedAt).not.toBeNull();
+  });
+});
+
+describe('CLI setup endpoints', () => {
+  test('report both files in the configured home and write only the Claude allow rules', async () => {
+    let response = await request('/api/cli-config');
+    expect(response.status).toBe(200);
+    const overview = await response.json();
+    expect(overview.claude).toMatchObject({ provider: 'claude', path: join(folder, 'home', '.claude', 'settings.json'), exists: false, ready: false });
+    expect(overview.claude.missing).toHaveLength(9);
+    expect(overview.codex).toMatchObject({ provider: 'codex', path: join(folder, 'home', '.codex', 'config.toml'), ready: false, login: false });
+    expect(overview.codex.missing).toHaveLength(3);
+    expect((await request('/api/cli-config/claude', 'POST', {}, { origin: 'http://evil.test' })).status).toBe(403);
+    expect((await request('/api/cli-config/gemini', 'POST')).status).toBe(404);
+    response = await request('/api/cli-config/claude', 'POST');
+    expect(response.status).toBe(200);
+    const report = await response.json();
+    expect(report.added).toHaveLength(9);
+    expect(report.status).toMatchObject({ ready: true, exists: true, missing: [] });
+    expect(JSON.parse(readFileSync(join(folder, 'home', '.claude', 'settings.json'), 'utf8')).permissions.allow).toContain('Edit');
+    expect((await (await request('/api/cli-config/claude', 'POST')).json()).added).toEqual([]);
+    response = await request('/api/cli-config/codex', 'POST');
+    expect(response.status).toBe(200);
+    const codex = await response.json();
+    expect(codex).toMatchObject({ backup: null, status: { provider: 'codex', ready: true, login: false } });
+    expect(codex.added).toHaveLength(3);
+    expect(readFileSync(join(folder, 'home', '.codex', 'config.toml'), 'utf8')).toContain('sandbox_mode = "workspace-write"');
+    expect((await (await request('/api/cli-config/codex', 'POST')).json()).added).toEqual([]);
   });
 });

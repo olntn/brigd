@@ -987,3 +987,48 @@ button.autopilot-task:hover strong { color: var(--accent-text); }
 .autopilot-checklist li { margin-bottom: 6px; overflow-wrap: anywhere; }
 .autopilot-checklist strong { color: var(--text); font-weight: 600; }
 @media (max-width: 640px) { .autopilot-row { grid-template-columns: 28px minmax(0, 1fr); } .autopilot-row > .status-badge, .autopilot-row > .button { grid-column: 2; justify-self: start; } }
+.inline-link { padding: 0; font: inherit; color: var(--accent-text); text-decoration: underline; text-underline-offset: 2px; }
+.inline-link:hover { color: var(--accent); }
+.help-article { max-width: 64rem; }
+.help-section { margin-bottom: 36px; scroll-margin-top: 16px; }
+.help-section h2 { margin: 0 0 10px; font-size: 1.3rem; font-weight: 600; overflow-wrap: anywhere; }
+.help-section h3 { margin: 22px 0 8px; font-size: 1.02rem; font-weight: 600; }
+.help-section p, .help-section li { font-size: .92rem; line-height: 1.7; color: var(--secondary); overflow-wrap: anywhere; }
+.help-section p { margin: 0 0 12px; }
+.help-section ul, .help-section ol { margin: 0 0 12px; padding-left: 22px; }
+.help-section li { margin-bottom: 6px; }
+.help-section strong { color: var(--text); font-weight: 600; }
+.help-section code { font-size: .85em; padding: 1px 5px; border-radius: var(--radius-sm); background: var(--soft); color: var(--text); overflow-wrap: anywhere; }
+.help-table-wrap { overflow-x: auto; margin: 0 0 14px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
+.help-table { width: 100%; border-collapse: collapse; font-size: .85rem; line-height: 1.6; }
+.help-table th, .help-table td { padding: 10px 12px; text-align: left; vertical-align: top; border-top: 1px solid var(--line); color: var(--secondary); min-width: 9rem; }
+.help-table th { border-top: 0; background: var(--subtle); color: var(--muted); font-size: .72rem; font-weight: 600; letter-spacing: .5px; text-transform: uppercase; }
+.help-table td:first-child { color: var(--text); font-weight: 550; }
+.help-code-block { position: relative; margin: 0 0 14px; }
+.help-code { margin: 0; padding: 14px 16px; padding-right: 9rem; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--subtle); color: var(--text); font-size: .8rem; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.help-copy { position: absolute; top: 8px; right: 8px; min-height: 30px; padding: 5px 10px; font-size: .77rem; }
+.help-note { display: flex; gap: 10px; align-items: flex-start; margin: 0 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--soft); font-size: .85rem; line-height: 1.6; color: var(--secondary); }
+.help-note svg { flex-shrink: 0; margin-top: 2px; color: var(--warning); }
+@media (max-width: 640px) { .help-code { padding-right: 16px; padding-top: 44px; } }
+.help-code code { padding: 0; background: none; font-size: inherit; }
+.cli-setup-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: 16px; margin-top: 6px; }
+.cli-setup-card { min-width: 0; padding: 18px 20px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
+.cli-setup-card h3 { margin: 0 0 10px; font-size: 1.05rem; font-weight: 600; }
+.cli-setup-card .cli-setup-path { display: flex; align-items: center; gap: 7px; margin: 0 0 8px; font-size: .8rem; color: var(--muted); }
+.cli-setup-card .cli-setup-path svg { flex-shrink: 0; }
+.cli-setup-card .cli-setup-state { display: flex; align-items: center; gap: 7px; margin: 0 0 10px; font-size: .85rem; font-weight: 600; color: var(--warning); }
+.cli-setup-card .cli-setup-state.is-ready { color: var(--accent-text); }
+.cli-setup-card .cli-setup-error { margin: 0 0 10px; font-size: .8rem; line-height: 1.6; color: var(--error); }
+.cli-setup-card .button { margin-top: 4px; }
+.cli-setup-card .cli-setup-result { margin: 12px 0 0; font-size: .85rem; line-height: 1.6; color: var(--accent-text); }
+.cli-setup { min-width: 0; }
+.cli-setup-heading { display: flex; align-items: flex-start; gap: 12px; }
+.cli-setup-heading > svg { flex-shrink: 0; margin-top: 3px; color: var(--accent-text); }
+.cli-setup-heading > div { min-width: 0; }
+.cli-setup-heading h3 { margin: 0; font-size: 1.15rem; line-height: 1.5; font-weight: 550; overflow-wrap: anywhere; }
+.cli-setup-heading p { margin: 5px 0 0; font-size: .85rem; line-height: 1.7; color: var(--muted); overflow-wrap: anywhere; }
+.cli-setup-top { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 18px; }
+.cli-setup > .connection-error { margin-bottom: 14px; }
+.cli-guide-dialog { width: 62rem; }
+.cli-guide-body { padding: 24px 27px; min-width: 0; }
+.cli-guide-body .help-section:last-child { margin-bottom: 0; }

@@ -8,7 +8,7 @@ import { ATTACHMENT_MAX_BYTES } from '../src/lib/attachments';
 import { GitWorkspaces } from './workspaces';
 
 const root = resolve(import.meta.dir, '..');
-const { mode, port, hostname, allowedHosts, allowedOrigins, dbPath, dev, defaultCwd, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile } = readConfig(root);
+const { mode, port, hostname, allowedHosts, allowedOrigins, dbPath, dev, defaultCwd, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile, cliHome } = readConfig(root);
 mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
 const store = new Store(dbPath);
 if (process.platform !== 'win32') chmodSync(dbPath, 0o600);
@@ -16,7 +16,7 @@ const lease = store.acquireLease();
 const engine = new Engine(store, mode === 'mock', undefined, undefined, { maxParallel, maxPerRepository, integrationChecks, autoReconcile, ...(mode === 'cli' ? { workspaces: new GitWorkspaces(workspacesDir, integrationChecks) } : {}) });
 const server = Bun.serve({
   hostname, port, maxRequestBodySize: ATTACHMENT_MAX_BYTES,
-  fetch: createHandler(engine, { port, root, dev, allowedHosts, allowedOrigins, defaultCwd })
+  fetch: createHandler(engine, { port, root, dev, allowedHosts, allowedOrigins, defaultCwd, cliHome })
 });
 store.cleanupAttachments();
 const attachmentCleanup = setInterval(() => store.cleanupAttachments(), 60_000);

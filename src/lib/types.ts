@@ -270,6 +270,23 @@ export interface Envelope {
   summary: string;
   questions: string[];
 }
+/** One CLI's permission setup as brigd sees it in the service user's home. */
+export interface CliConfigStatus {
+  provider: Provider;
+  /** Absolute path of the file the button edits or checks. */
+  path: string;
+  exists: boolean;
+  /** Every required entry is present in the file: allow rules for Claude, the mirrored sandbox settings for Codex. */
+  ready: boolean;
+  /** Codex: whether auth.json exists. Claude: not checked. */
+  login: boolean | null;
+  missing: string[];
+  present: string[];
+  notes: string[];
+  error: string | null;
+}
+export interface CliConfigReport { status: CliConfigStatus; added: string[]; backup: string | null; }
+export interface CliConfigOverview { claude: CliConfigStatus; codex: CliConfigStatus; }
 export type AutopilotStopReason = 'manual' | 'until' | 'failures' | 'restart';
 export interface AutopilotInput {
   enabled: boolean;

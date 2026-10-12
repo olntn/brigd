@@ -282,9 +282,11 @@ test('settings sections use side navigation that stacks on narrow screens', asyn
   const sections = dialog.getByRole('tablist', { name: 'Разделы настроек', exact: true });
   const appearance = sections.getByRole('tab', { name: 'Внешний вид', exact: true });
   const models = sections.getByRole('tab', { name: 'Модели', exact: true });
+  const permissions = sections.getByRole('tab', { name: 'Разрешения', exact: true });
   const appearancePanel = dialog.getByRole('tabpanel', { name: 'Внешний вид', exact: true });
   const modelsPanel = dialog.getByRole('tabpanel', { name: 'Модели', exact: true });
-  await expect(sections.getByRole('tab')).toHaveCount(2);
+  const permissionsPanel = dialog.getByRole('tabpanel', { name: 'Разрешения', exact: true });
+  await expect(sections.getByRole('tab')).toHaveCount(3);
   await expect(appearance).toHaveAttribute('aria-selected', 'true');
   await expect(appearancePanel.getByRole('group', { name: 'Цветовая схема', exact: true })).toBeVisible();
   await expect(appearancePanel.getByRole('heading', { name: 'Светлые', exact: true })).toBeVisible();
@@ -301,7 +303,10 @@ test('settings sections use side navigation that stacks on narrow screens', asyn
   await expect(appearance).toBeFocused();
   await expect(appearance).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('End');
-  await expect(models).toBeFocused();
+  await expect(permissions).toBeFocused();
+  await expect(permissions).toHaveAttribute('aria-selected', 'true');
+  await expect(permissionsPanel.getByRole('heading', { name: 'Разрешения', exact: true })).toBeVisible();
+  await expect(modelsPanel).toBeHidden();
   await page.keyboard.press('Home');
   await expect(appearance).toBeFocused();
   await expect(appearancePanel).toBeVisible();
