@@ -94,7 +94,7 @@ describe('commit_changes in an isolated worktree', () => {
       brokers.push(broker);
       return broker;
     },
-      { workspaces: new GitWorkspaces(join(folder, 'workspaces'), [[process.execPath, '-e', 'process.exit(0)']]) });
+      { workspaces: new GitWorkspaces(join(folder, 'workspaces')), integrationChecks: [[process.execPath, '-e', 'process.exit(0)']] });
   });
   afterEach(async () => {
     for (const call of agent.calls) call.reject(new Error('cleanup'));

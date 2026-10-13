@@ -44,7 +44,7 @@ export class DirectWorkspaces implements WorkspaceProvider {
   prepare() {}
 }
 export class GitWorkspaces implements WorkspaceProvider {
-  constructor(readonly root: string, private readonly checks?: string[][]) {}
+  constructor(readonly root: string, private readonly checks?: string[][] | (() => string[][] | undefined)) {}
   locate(run: Pick<Run, 'cwd' | 'workspace'>): RepositoryLocation {
     if (run.workspace) return { repositoryId: run.workspace.repositoryId, repositoryRoot: run.workspace.repositoryRoot, projectCwd: run.workspace.projectCwd };
     return repository(run.cwd);
@@ -61,7 +61,7 @@ export class GitWorkspaces implements WorkspaceProvider {
     const path = resolve(this.root, bucket, run.id);
     const subdirectory = relative(location.repositoryRoot, location.projectCwd);
     if (subdirectory === '..' || subdirectory.startsWith(`..${sep}`) || isAbsolute(subdirectory)) throw new WorkspaceError('Рабочая папка находится вне репозитория.');
-    let checkCommands = this.checks;
+    let checkCommands = typeof this.checks === 'function' ? this.checks() : this.checks;
     if (!checkCommands) {
       // Choose commands from the trusted starting commit, before an agent can
       // change package scripts. Other projects can configure explicit argv.

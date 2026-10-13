@@ -13,6 +13,7 @@ import { validateModel, validateModelPatch } from './models';
 import { validateFollowup } from './followups';
 import { validateTag, validateTagPatch, validateTaskTags } from './tags';
 import { claudeStatus, codexStatus, configureClaude, configureCodex } from './cli-config';
+import { validateIntegrationChecks } from '../src/lib/integration-checks';
 
 export interface HttpOptions { port: number; dev?: boolean; root?: string; startedAt?: number; allowedHosts?: string[]; allowedOrigins?: string[]; defaultCwd?: string;
   /** Home folder whose ~/.claude and ~/.codex the CLI setup buttons check and edit. */
@@ -137,6 +138,15 @@ export function createHandler(engine: Engine, options: HttpOptions) {
       if (path === '/api/cli-config' && method === 'GET') return json({ claude: claudeStatus(cliHome), codex: codexStatus(cliHome) });
       const cliMatch = path.match(/^\/api\/cli-config\/(claude|codex)$/);
       if (cliMatch && method === 'POST') { await body(req); return json(cliMatch[1] === 'claude' ? configureClaude(cliHome) : configureCodex(cliHome)); }
+      if (path === '/api/settings/autopilot' && method === 'GET') return json(engine.getAutopilotSettings());
+      if (path === '/api/settings/autopilot' && method === 'PATCH') {
+        const value = await body(req, 128_128);
+        if (Object.keys(value).length !== 1 || !Object.hasOwn(value, 'integrationChecks')) throw new AppError('Укажите только поле integrationChecks');
+        let integrationChecks: string[][] | null;
+        try { integrationChecks = value.integrationChecks === null ? null : validateIntegrationChecks(value.integrationChecks); }
+        catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректный BRIGD_INTEGRATION_CHECKS'); }
+        return json(engine.setAutopilotSettings({ integrationChecks }));
+      }
       if (path === '/api/autopilot' && method === 'GET') return json(engine.store.autopilotOverview());
       if (path === '/api/autopilot' && method === 'PATCH') return json(engine.setAutopilot(validateAutopilot(await body(req))));
       if (path === '/api/integrator' && method === 'GET') return json(engine.store.getIntegratorProfile());

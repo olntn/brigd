@@ -3,14 +3,16 @@
   import Icon from './Icon.svelte';
   import { AUTOPILOT_FAILURE_LIMIT, AUTOPILOT_STOP_REASONS, defaultAutopilotUntil } from './autopilot';
   import { TASK_STATUS_LABELS } from './status';
-  import type { AutopilotInput, AutopilotOverview, Run, Task, TaskStatus } from './types';
+  import type { AutopilotInput, AutopilotOverview, AutopilotSettings, Run, Task, TaskStatus } from './types';
 
-  let { tasks, notify, onopen, onchanged, onsettings }: {
+  let { tasks, settings, checksRequired, notify, onopen, onchanged, onsettings }: {
     tasks: Task[];
+    settings: AutopilotSettings | null;
+    checksRequired: boolean;
     notify: (message: string, type?: 'success' | 'error') => void;
     onopen: (task: Task) => void;
     onchanged: (task: Task) => void;
-    onsettings: () => void;
+    onsettings: (section: 'autopilot' | 'permissions') => void;
   } = $props();
   let overview = $state<AutopilotOverview | null>(null);
   let loading = $state(true);
@@ -23,6 +25,7 @@
   let reading = false;
   let alive = true;
   let formInitialized = false;
+  let checksConfigured = $derived(!checksRequired || !!settings?.integrationChecks?.length);
   let deferred = $derived(tasks.filter(task => task.schedule === 'auto' && task.paused && task.archivedAt === null && !task.hasCompletedRun));
   let summary = $derived.by(() => {
     const counts = { done: 0, waiting: 0, failed: 0, merge: 0, active: 0 };
@@ -113,6 +116,7 @@
 
   function enable(event: SubmitEvent) {
     event.preventDefault();
+    if (!checksConfigured) { formError = 'Сначала задайте BRIGD_INTEGRATION_CHECKS в настройках автопилота.'; return; }
     let until: number | null = null;
     if (limited) {
       until = untilInput ? new Date(untilInput).getTime() : Number.NaN;
@@ -153,12 +157,13 @@
       <label class="autopilot-limit"><input type="checkbox" bind:checked={limited} disabled={!!pending} /><span>Остановить в</span></label>
       <input type="datetime-local" aria-label="Время остановки" bind:value={untilInput} disabled={!!pending || !limited} />
       {#if overview.enabled}
-        <button type="submit" class="button secondary" disabled={!!pending}><Icon name="check" size={15} />Обновить время</button>
+        <button type="submit" class="button secondary" disabled={!!pending || !checksConfigured}><Icon name="check" size={15} />Обновить время</button>
         <button type="button" class="button secondary danger-hover" disabled={!!pending} onclick={() => { void save({ enabled: false, until: null }, 'Автопилот выключен. Начатые запуски доработают.'); }}><Icon name="stop" size={14} />Выключить автопилот</button>
       {:else}
-        <button type="submit" class="button primary" disabled={!!pending}><Icon name={pending === 'switch' ? 'refresh' : 'moon'} size={15} class={pending === 'switch' ? 'spin' : ''} />Включить автопилот</button>
+        <button type="submit" class="button primary" disabled={!!pending || !checksConfigured}><Icon name={pending === 'switch' ? 'refresh' : 'moon'} size={15} class={pending === 'switch' ? 'spin' : ''} />Включить автопилот</button>
       {/if}
     </form>
+    {#if !checksConfigured}<p class="autopilot-help autopilot-form-error" role="status">Сначала задайте BRIGD_INTEGRATION_CHECKS: <button type="button" class="inline-link" onclick={() => onsettings('autopilot')}>открыть настройки автопилота</button>. Без команд проверки запуск недоступен.</p>{/if}
     {#if formError}<div class="form-error autopilot-form-error" role="alert"><Icon name="alert" size={17} /><span>{formError}</span></div>{/if}
   </section>
 
@@ -226,9 +231,9 @@
   <section class="autopilot-section" aria-label="Перед ночной сессией">
     <h2>Перед тем как уйти</h2>
     <ul class="autopilot-checklist">
-      <li><strong>Разрешения CLI.</strong> Claude Code работает в режиме разрешений default: неразрешённый инструмент завершает запуск блокировкой. Заранее разрешите в настройках проекта редактирование файлов и проверенные команды. У Codex есть своя песочница. Включаются кнопкой в <button type="button" class="inline-link" aria-label="Открыть раздел Разрешения" onclick={onsettings}>настройках, раздел «Разрешения»</button>, там же инструкция.</li>
+      <li><strong>Разрешения CLI.</strong> Claude Code работает в режиме разрешений default: неразрешённый инструмент завершает запуск блокировкой. Заранее разрешите в настройках проекта редактирование файлов и проверенные команды. У Codex есть своя песочница. Включаются кнопкой в <button type="button" class="inline-link" aria-label="Открыть раздел Разрешения" onclick={() => onsettings('permissions')}>настройках, раздел «Разрешения»</button>, там же инструкция.</li>
       <li><strong>Чистая целевая ветка.</strong> Если ветка открыта в рабочей папке, перенос результата требует чистого состояния Git. Закоммитьте или уберите незакоммиченные правки.</li>
-      <li><strong>Команды проверки.</strong> Нужны verify, check или test в package.json либо переменная BRIGD_INTEGRATION_CHECKS, иначе перенос блокируется.</li>
+      <li><strong>Команды проверки.</strong> Задайте BRIGD_INTEGRATION_CHECKS в <button type="button" class="inline-link" onclick={() => onsettings('autopilot')}>настройках автопилота</button>. В рабочем режиме без этой настройки автопилот и зависимые процессы недоступны.</li>
       <li><strong>Компьютер не должен уснуть.</strong> Очередь разбирается, только пока запущен сервер brigd.</li>
       <li><strong>Вопросы ждут до утра.</strong> Задача со статусом «Нужен ответ» остаётся занятой, автопилот переходит к следующей. Общая инструкция «принимай разумные решения вместо вопросов» уменьшит число таких остановок.</li>
       <li><strong>Предохранитель.</strong> После {AUTOPILOT_FAILURE_LIMIT} ошибок или блокировок подряд автопилот выключается сам, чтобы не прогнать всю очередь впустую. Перезапуск сервиса тоже выключает его.</li>

@@ -63,7 +63,7 @@ function checkedOutTarget(cwd: string, ref: string): string | null {
   return matches[0] ?? null;
 }
 export class GitIntegrator implements Integrator {
-  constructor(private readonly configuredChecks?: string[][]) {}
+  constructor(private readonly configuredChecks?: string[][] | (() => string[][] | undefined)) {}
   async execute(run: Run, job: Integration, signal: AbortSignal, update: IntegrationUpdate) {
     const workspace = run.workspace!;
     try {
@@ -98,8 +98,9 @@ export class GitIntegrator implements Integrator {
       if (await git(workspace.path, ['merge-base', '--is-ancestor', sourceCommit, targetCommit], signal) === 0) {
         return { status: 'merged' as const, sourceCommit, targetCommit, resultCommit: targetCommit, checks: [], error: null };
       }
-      const commands = this.configuredChecks ?? workspace.checkCommands;
-      if (!commands?.length) throw new IntegrationError('blocked', 'Нет команд проверки проекта. Настройте BRIGD_INTEGRATION_CHECKS, перезапустите сервис и повторите слияние.');
+      const configuredChecks = typeof this.configuredChecks === 'function' ? this.configuredChecks() : this.configuredChecks;
+      const commands = configuredChecks ?? workspace.checkCommands;
+      if (!commands?.length) throw new IntegrationError('blocked', 'Нет команд проверки проекта. Укажите BRIGD_INTEGRATION_CHECKS в настройках → Автопилот и повторите слияние.');
       const candidatePath = join(dirname(workspace.path), `integration-${job.id}-${job.attempt}`);
       update({ candidatePath });
       if (await git(workspace.repositoryRoot, ['worktree', 'add', '--detach', candidatePath, targetCommit], signal)) throw new IntegrationError('blocked', 'Не удалось подготовить worktree для проверки слияния.');

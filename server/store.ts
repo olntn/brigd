@@ -6,6 +6,7 @@ import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, Aut
 import type { RepositoryLocation } from './workspaces';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { AUTOPILOT_FAILURE_LIMIT } from '../src/lib/autopilot';
+import { validateIntegrationChecks } from '../src/lib/integration-checks';
 import { DEFAULT_TAG_COLOR, TAG_COUNT_LIMIT } from '../src/lib/tags';
 import { tagNameKey, validateTag, validateTagIds, validateTagPatch } from './tags';
 import { validateInstruction, validateInstructionPatch, validateInstructionSnapshots } from './instructions';
@@ -299,6 +300,9 @@ export class Store {
       )`);
       this.db.query('INSERT OR IGNORE INTO autopilot (singleton,enabled,updated_at) VALUES (1,0,?)').run(Date.now());
     }).immediate();
+    this.db.exec(`CREATE TABLE IF NOT EXISTS autopilot_settings (
+      singleton INTEGER PRIMARY KEY CHECK(singleton=1), integration_checks TEXT
+    ); INSERT OR IGNORE INTO autopilot_settings (singleton,integration_checks) VALUES (1,NULL)`);
     // The explicit marker makes even an intentionally empty catalog persistent.
     // Creation, seeding and the marker commit together, including concurrent opens.
     this.db.transaction(() => {
@@ -365,6 +369,18 @@ export class Store {
     }).immediate();
   }
   close() { this.db.close(); }
+  getIntegrationChecks(): string[][] | null {
+    const row = this.db.query('SELECT integration_checks FROM autopilot_settings WHERE singleton=1').get() as { integration_checks: string | null };
+    if (row.integration_checks === null) return null;
+    try { return validateIntegrationChecks(JSON.parse(row.integration_checks)); }
+    catch { throw new AppError('Повреждена настройка BRIGD_INTEGRATION_CHECKS. Сохраните команды в настройках → Автопилот.', 409); }
+  }
+  setIntegrationChecks(checks: string[][] | null): void {
+    let validated: string[][] | null;
+    try { validated = checks === null ? null : validateIntegrationChecks(checks); }
+    catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректный BRIGD_INTEGRATION_CHECKS'); }
+    this.db.query('UPDATE autopilot_settings SET integration_checks=? WHERE singleton=1').run(validated === null ? null : JSON.stringify(validated));
+  }
   acquireLease(pid = process.pid): string {
     return this.db.transaction(() => {
       const existing = this.db.query('SELECT pid, identity FROM service_lease WHERE singleton=1').get() as { pid: number; identity: string | null } | null;

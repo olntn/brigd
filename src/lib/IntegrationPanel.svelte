@@ -1,9 +1,10 @@
 <script lang="ts">
   import type { Integration, IntegrationStatus } from './types';
   import Icon from './Icon.svelte';
-  let { integration, busy = false, historical = false, onaction }: {
+  let { integration, busy = false, launchBlocked = false, historical = false, onaction }: {
     integration: Integration;
     busy?: boolean;
+    launchBlocked?: boolean;
     historical?: boolean;
     onaction?: (action: 'integrate' | 'cancel-integration' | 'reconcile', acknowledgement: boolean) => void;
   } = $props();
@@ -32,8 +33,8 @@
   {#if !historical && onaction && integration.status !== 'merged'}
     {#if interrupted}<p>После перезапуска процесс проверки мог остаться запущенным. Остановите его перед повтором или отменой.</p><label class="interruption-confirm"><input type="checkbox" bind:checked={acknowledged} disabled={busy} /><span>Я проверил(а), что предыдущие процессы проверки и слияния остановлены</span></label>{/if}
     <div class="integration-actions">
-      {#if integration.status === 'conflict'}<button class="button primary" disabled={busy} title="Встроенный Интегратор объединит целевую ветку с результатом в worktree задачи, разрешит конфликты и повторит проверку." onclick={() => onaction?.('reconcile', acknowledged)}>Поручить интегратору</button>{/if}
-      {#if !active}<button class="button {integration.status === 'conflict' ? 'secondary' : 'primary'}" disabled={busy || (interrupted && !acknowledged)} onclick={() => onaction?.('integrate', acknowledged)}>Повторить проверку и слияние</button>{/if}
+      {#if integration.status === 'conflict'}<button class="button primary" disabled={busy || launchBlocked} title="Встроенный Интегратор объединит целевую ветку с результатом в worktree задачи, разрешит конфликты и повторит проверку." onclick={() => onaction?.('reconcile', acknowledged)}>Поручить интегратору</button>{/if}
+      {#if !active}<button class="button {integration.status === 'conflict' ? 'secondary' : 'primary'}" disabled={busy || launchBlocked || (interrupted && !acknowledged)} onclick={() => onaction?.('integrate', acknowledged)}>Повторить проверку и слияние</button>{/if}
       {#if active || interrupted}<button class="button secondary" disabled={busy || integration.status === 'cancelling' || (interrupted && !acknowledged)} onclick={() => onaction?.('cancel-integration', acknowledged)}>{integration.status === 'cancelling' ? 'Останавливаем…' : 'Отменить слияние'}</button>{/if}
     </div>
   {/if}

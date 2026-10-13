@@ -8,10 +8,11 @@ import { GitWorkspaces } from '../server/workspaces';
 import { controlledAgent, git, outcome, repository, taskInput, until } from './repository-helpers';
 
 let folder: string, root: string, store: Store, engine: Engine, agent: ReturnType<typeof controlledAgent>;
+const checks = [[process.execPath, '-e', 'process.exit(0)']];
 beforeEach(() => {
   folder = mkdtempSync(join(tmpdir(), 'brigd-queue-')); root = repository(folder);
   store = new Store(join(folder, 'data.sqlite')); agent = controlledAgent();
-  engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces')), maxParallel: 2 });
+  engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces')), integrationChecks: checks, maxParallel: 2 });
 });
 afterEach(async () => {
   for (const call of agent.calls) { call.ignoreCancel = false; call.reject(new Error('cleanup')); }
@@ -84,7 +85,7 @@ test('restart preserves queued work and requires acknowledgement before releasin
   const queued = engine.start(store.createTask(taskInput(root)).id);
   await engine.shutdown(); store.close();
   store = new Store(join(folder, 'data.sqlite'));
-  agent = controlledAgent(); engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces')) });
+  agent = controlledAgent(); engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces')), integrationChecks: checks });
   engine.startScheduler(); await Bun.sleep(40);
   expect(agent.calls).toHaveLength(0);
   expect(store.getRun(queued.id).status).toBe('queued');
@@ -135,7 +136,7 @@ test('two database connections cannot reserve the same repository or exceed the 
 
 test('legacy exact sessions remain exclusive even when independent worktree concurrency is enabled', async () => {
   await engine.shutdown();
-  engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces')), maxParallel: 2, maxPerRepository: 2 });
+  engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces')), integrationChecks: checks, maxParallel: 2, maxPerRepository: 2 });
   const legacy = store.startManual(store.createTask(taskInput(root)).id, false);
   store.setSession(legacy.id, 'legacy-exact'); store.finish(legacy.id, 'waiting_input', 'Question', null);
   engine.resume(legacy.id, 'Continue', false); await until(() => agent.calls.length === 1);
@@ -149,13 +150,13 @@ test('legacy exact sessions remain exclusive even when independent worktree conc
   expect(agent.calls[1]!.input.cwd).not.toBe(root);
 });
 
-test('default integration commands are chosen from committed project scripts rather than dirty files', async () => {
+test('lower-level workspace fallback chooses commands from committed project scripts rather than dirty files', () => {
   writeFileSync(join(root, 'package.json'), JSON.stringify({ packageManager: 'npm@11.0.0', scripts: { verify: 'npm test', test: 'test command', build: 'build command' } }));
   git(root, 'add', '.'); git(root, 'commit', '-m', 'project checks');
   writeFileSync(join(root, 'package.json'), JSON.stringify({ packageManager: 'pnpm@10.0.0', scripts: { test: 'dirty script' } }));
-  const run = engine.start(store.createTask(taskInput(root)).id);
-  await until(() => agent.calls.length === 1);
-  expect(store.getRun(run.id).workspace!.checkCommands).toEqual([['npm', 'install'], ['npm', 'run', 'verify']]);
+  const run = store.startManual(store.createTask(taskInput(root)).id, false);
+  const provider = new GitWorkspaces(join(folder, 'workspaces'));
+  expect(provider.plan(run, provider.locate(run)).checkCommands).toEqual([['npm', 'install'], ['npm', 'run', 'verify']]);
   expect(readFileSync(join(root, 'package.json'), 'utf8')).toContain('dirty script');
 });
 

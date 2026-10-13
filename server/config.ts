@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
+import { parseIntegrationChecks } from '../src/lib/integration-checks';
 
 type Environment = Record<string, string | undefined>;
 
@@ -34,11 +35,7 @@ export function readConfig(root: string, env: Environment = process.env) {
   if (!Number.isInteger(maxPerRepository) || maxPerRepository < 1 || maxPerRepository > 32) throw new Error('BRIGD_MAX_PER_REPOSITORY / TRACKT_MAX_PER_REPOSITORY должен быть 1–32');
   let integrationChecks: string[][] | undefined;
   if (setting('INTEGRATION_CHECKS') !== undefined) {
-    try { integrationChecks = JSON.parse(setting('INTEGRATION_CHECKS')!); } catch { throw new Error('BRIGD_INTEGRATION_CHECKS должен быть JSON-массивом массивов аргументов'); }
-    if (!Array.isArray(integrationChecks) || !integrationChecks.length || integrationChecks.length > 10 || JSON.stringify(integrationChecks).length > 32_000 ||
-        integrationChecks.some(argv => !Array.isArray(argv) || !argv.length || argv.length > 30 || argv.some(arg => typeof arg !== 'string' || !arg.length || arg.length > 4096 || arg.includes('\0')))) {
-      throw new Error('BRIGD_INTEGRATION_CHECKS: укажите 1–10 непустых команд массивами аргументов');
-    }
+    integrationChecks = parseIntegrationChecks(setting('INTEGRATION_CHECKS')!);
   }
   // Where the CLI setup buttons look for ~/.claude and ~/.codex; tests point it at a scratch folder.
   const cliHome = resolve(root, setting('CLI_HOME') ?? homedir());

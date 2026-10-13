@@ -49,6 +49,8 @@ async function fixtureApi(page: Page, mode: AppInfo['mode'] = 'mock', populated:
       await route.fulfill({ json: info });
     } else if (path === '/api/workers' || path === '/api/models') {
       await route.fulfill({ json: [] });
+    } else if (path === '/api/settings/autopilot') {
+      await route.fulfill({ json: { integrationChecks: [['bun', 'run', 'verify']], source: 'settings' } });
     } else if (path === '/api/tasks') {
       await route.fulfill({ json: Array.isArray(populated) ? populated : populated ? [task] : [] });
     } else if (path === `/api/tasks/${taskId}`) {
@@ -283,10 +285,12 @@ test('settings sections use side navigation that stacks on narrow screens', asyn
   const appearance = sections.getByRole('tab', { name: 'Внешний вид', exact: true });
   const models = sections.getByRole('tab', { name: 'Модели', exact: true });
   const permissions = sections.getByRole('tab', { name: 'Разрешения', exact: true });
+  const autopilot = sections.getByRole('tab', { name: 'Автопилот', exact: true });
   const appearancePanel = dialog.getByRole('tabpanel', { name: 'Внешний вид', exact: true });
   const modelsPanel = dialog.getByRole('tabpanel', { name: 'Модели', exact: true });
   const permissionsPanel = dialog.getByRole('tabpanel', { name: 'Разрешения', exact: true });
-  await expect(sections.getByRole('tab')).toHaveCount(3);
+  const autopilotPanel = dialog.getByRole('tabpanel', { name: 'Автопилот', exact: true });
+  await expect(sections.getByRole('tab')).toHaveCount(4);
   await expect(appearance).toHaveAttribute('aria-selected', 'true');
   await expect(appearancePanel.getByRole('group', { name: 'Цветовая схема', exact: true })).toBeVisible();
   await expect(appearancePanel.getByRole('heading', { name: 'Светлые', exact: true })).toBeVisible();
@@ -303,6 +307,10 @@ test('settings sections use side navigation that stacks on narrow screens', asyn
   await expect(appearance).toBeFocused();
   await expect(appearance).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('End');
+  await expect(autopilot).toBeFocused();
+  await expect(autopilot).toHaveAttribute('aria-selected', 'true');
+  await expect(autopilotPanel.getByRole('heading', { name: 'Автопилот', exact: true })).toBeVisible();
+  await page.keyboard.press('ArrowUp');
   await expect(permissions).toBeFocused();
   await expect(permissions).toHaveAttribute('aria-selected', 'true');
   await expect(permissionsPanel.getByRole('heading', { name: 'Разрешения', exact: true })).toBeVisible();

@@ -8,7 +8,7 @@
       deny: ['Read(./.env)', 'Read(./.env.*)'],
     },
   }, null, 2);
-  const envExample = `BRIGD_INTEGRATION_CHECKS='[["python","-m","pytest"]]'`;
+  const checksExample = `[["python","-m","pytest"]]`;
   const containerEdit = "docker compose exec trackt sh -c 'mkdir -p ~/.claude && ${EDITOR:-vi} ~/.claude/settings.json'";
   let copied = $state<string | null>(null);
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -94,9 +94,9 @@
   <h2 id="guide-night-title">Остальная подготовка к ночи</h2>
   <ul>
     <li><strong>Целевая ветка.</strong> В папке проекта выполните <code>git status --short</code>: вывод должен быть пустым. Незавершённое закоммитьте или спрячьте в <code>git stash</code>, переключитесь на ветку, в которую должны попадать результаты. Перенос делается fast-forward и требует чистого состояния.</li>
-    <li><strong>Команды проверки.</strong> По умолчанию берутся из <code>package.json</code> проекта: <code>verify</code>, иначе <code>check</code>, <code>test</code>, <code>build</code>. Для других стеков задайте переменную в файле <code>.env</code> рядом с brigd, Bun читает его автоматически. Переменная одна на весь сервис, после изменения перезапустите brigd.</li>
+    <li><strong>Команды проверки.</strong> В «Настройки → Автопилот» сохраните значение <code>BRIGD_INTEGRATION_CHECKS</code>: JSON-массив команд с аргументами. Настройка одна на весь сервис и применяется без перезапуска. Без неё реальные запуски, продолжения и проверка слияния заблокированы. Сохранённое значение имеет приоритет над одноимённой переменной окружения, которую можно задать в <code>.env</code> рядом с brigd.</li>
   </ul>
-  {@render codeBlock('env', envExample, 'Пример переменной с командами проверки')}
+  {@render codeBlock('checks', checksExample, 'Пример значения BRIGD_INTEGRATION_CHECKS')}
   <ul>
     <li><strong>Компьютер и сервер.</strong> Планировщик работает, пока запущен <code>bun run start</code>. Отключите сон компьютера; в WSL2 сон Windows останавливает и brigd. Терминал удобно держать в <code>tmux</code>.</li>
     <li><strong>Автопилот.</strong> Включите его на вкладке «Автопилот» с временем остановки. Там же памятка «Перед тем как уйти» и итоги сессии.</li>

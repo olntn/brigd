@@ -7,6 +7,7 @@ const unique = (label: string) => `${label} ${crypto.randomUUID().slice(0, 8)}`;
 test.beforeEach(async ({ page, request }) => {
   const info = await (await request.get('/api/info')).json();
   expect(info.mode).toBe('mock'); // Never launch a real model or edit a real workspace.
+  expect((await request.patch('/api/settings/autopilot', { headers: origin, data: { integrationChecks: null } })).ok()).toBe(true);
   expect((await request.patch('/api/autopilot', { headers: origin, data: { enabled: false, until: null } })).ok()).toBe(true);
   // Leftover pool tasks from earlier runs stay out of this session's queue.
   const tasks = await (await request.get('/api/tasks')).json() as Task[];

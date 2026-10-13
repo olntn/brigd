@@ -1,4 +1,5 @@
-import type { AutopilotInput, AutopilotOverview, FollowupInput, Integration, Run } from '../src/lib/types';
+import type { AutopilotInput, AutopilotOverview, AutopilotSettings, FollowupInput, Integration, Run } from '../src/lib/types';
+import { validateIntegrationChecks } from '../src/lib/integration-checks';
 import { startAgent, buildPrompt, type AgentHandle, type AgentInput, type AgentCallbacks } from './adapter';
 import { AppError, Store, runFence, type RunFence } from './store';
 import { validateEnvelope, validateSessionId } from './protocol';
@@ -24,17 +25,48 @@ export class Engine {
   private readonly maxPerRepository: number;
   private readonly integrator: Integrator;
   private readonly autoReconcile: boolean;
+  private readonly environmentChecks?: string[][];
+  private readonly requiresIntegrationChecks: boolean;
   private integrationHandles = new Map<string, { abort: AbortController; settled: Promise<void> }>();
   /** Repository identity per task folder, so a busy pool does not spawn Git every second. */
   private locations = new Map<string, { location: RepositoryLocation; at: number }>();
   constructor(readonly store: Store, readonly mock = false, private factory: AgentFactory = startAgent, private bridgeFactory?: TaskBridgeFactory, options: EngineOptions = {}) {
-    this.workspaces = options.workspaces ?? (mock || factory !== startAgent ? new DirectWorkspaces() : new GitWorkspaces(join(dirname(resolve(store.db.filename)), 'workspaces')));
+    this.environmentChecks = options.integrationChecks === undefined ? undefined : validateIntegrationChecks(options.integrationChecks);
+    this.workspaces = options.workspaces ?? (mock || factory !== startAgent ? new DirectWorkspaces() : new GitWorkspaces(join(dirname(resolve(store.db.filename)), 'workspaces'), () => this.integrationChecks()));
+    this.requiresIntegrationChecks = !mock && this.workspaces instanceof GitWorkspaces;
     this.maxParallel = options.maxParallel ?? 4;
     this.maxPerRepository = options.maxPerRepository ?? 1;
-    this.integrator = options.integrator ?? new GitIntegrator(options.integrationChecks);
+    this.integrator = options.integrator ?? new GitIntegrator(() => this.integrationChecks());
     this.autoReconcile = options.autoReconcile ?? true;
     if (!Number.isInteger(this.maxParallel) || this.maxParallel < 1 || this.maxParallel > 32) throw new Error('Лимит процессов должен быть 1–32');
     if (!Number.isInteger(this.maxPerRepository) || this.maxPerRepository < 1 || this.maxPerRepository > 32) throw new Error('Лимит агентов на репозиторий должен быть 1–32');
+  }
+  private integrationChecks(): string[][] | undefined {
+    return this.store.getIntegrationChecks() ?? this.environmentChecks;
+  }
+  getAutopilotSettings(): AutopilotSettings {
+    const saved = this.store.getIntegrationChecks();
+    return { integrationChecks: saved ?? this.environmentChecks ?? null, source: saved ? 'settings' : this.environmentChecks ? 'environment' : null };
+  }
+  setAutopilotSettings(input: { integrationChecks: string[][] | null }): AutopilotSettings {
+    if (this.closing) throw new AppError('Сервис останавливается', 503);
+    if (input.integrationChecks !== null) {
+      try { validateIntegrationChecks(input.integrationChecks); }
+      catch (error) { throw new AppError(error instanceof Error ? error.message : 'Проверьте команды BRIGD_INTEGRATION_CHECKS'); }
+    }
+    if (input.integrationChecks === null && !this.environmentChecks && this.requiresIntegrationChecks &&
+        (this.store.getAutopilot().enabled || this.handles.size > 0 || this.integrationHandles.size > 0 ||
+          this.store.db.query("SELECT id FROM runs WHERE mock=0 AND status IN ('queued','preparing','running','waiting_input','cancelling') LIMIT 1").get() ||
+          this.store.db.query("SELECT id FROM integrations WHERE state IN ('queued','checking','merging','cancelling') LIMIT 1").get())) {
+      throw new AppError('Сначала выключите автопилот и завершите или отмените активные запуски и слияния, затем очистите BRIGD_INTEGRATION_CHECKS.', 409);
+    }
+    this.store.setIntegrationChecks(input.integrationChecks);
+    return this.getAutopilotSettings();
+  }
+  private assertIntegrationChecks(run?: Run) {
+    if (!this.mock && (this.requiresIntegrationChecks || run?.workspace?.mode === 'worktree') && !this.integrationChecks()?.length) {
+      throw new AppError('Перед запуском настройте BRIGD_INTEGRATION_CHECKS в настройках, раздел «Автопилот».', 409);
+    }
   }
   startScheduler() {
     if (this.timer || this.closing) return;
@@ -44,6 +76,8 @@ export class Engine {
   }
   tick(now = Date.now()) {
     if (this.closing) return;
+    // Missing checks must not consume scheduled occurrences or create failed attempts.
+    if (this.requiresIntegrationChecks && !this.integrationChecks()?.length) return;
     const settling = [...this.handles.values()].map(launch => launch.taskId);
     this.store.db.transaction(() => {
       for (const run of this.store.claimDue(this.mock, now, settling)) this.enqueue(run);
@@ -84,6 +118,7 @@ export class Engine {
     return location;
   }
   setAutopilot(input: AutopilotInput, now = Date.now()): AutopilotOverview {
+    if (input.enabled) this.assertIntegrationChecks();
     const state = this.store.setAutopilot(input, now);
     // Claim right away instead of waiting for the next second's tick.
     if (state.enabled) this.tick(now);
@@ -94,6 +129,7 @@ export class Engine {
   }
   start(taskId: string): Run {
     if (this.closing) throw new AppError('Сервис останавливается', 503);
+    this.assertIntegrationChecks();
     this.assertTaskSettled(taskId);
     const run = this.store.db.transaction(() => this.enqueue(this.store.startManual(taskId, this.mock))).immediate();
     this.drain();
@@ -105,6 +141,7 @@ export class Engine {
     const prior = this.store.getFollowupRequest(taskId, input);
     if (prior) return prior;
     if (this.closing) throw new AppError('Сервис останавливается', 503);
+    this.assertIntegrationChecks(this.store.getRun(input.sourceRunId));
     this.assertTaskSettled(taskId);
     const { run, created } = this.store.db.transaction(() => {
       const result = this.store.startFollowup(taskId, input);
@@ -115,6 +152,7 @@ export class Engine {
   }
   resume(runId: string, answer: string, acknowledgement: boolean, attachmentIds: string[] = []): Run {
     if (this.closing) throw new AppError('Сервис останавливается', 503);
+    this.assertIntegrationChecks(this.store.getRun(runId));
     if (this.handles.has(runId)) throw new AppError('Предыдущий CLI-процесс ещё завершается', 409);
     const run = this.store.db.transaction(() => this.enqueue(this.store.resume(runId, answer, acknowledgement, Date.now(), attachmentIds), answer)).immediate();
     this.drain();
@@ -122,6 +160,7 @@ export class Engine {
   }
   retry(runId: string, acknowledgement = false): Run {
     if (this.closing) throw new AppError('Сервис останавливается', 503);
+    this.assertIntegrationChecks(this.store.getRun(runId));
     if (this.handles.has(runId)) throw new AppError('Предыдущий CLI-процесс ещё завершается', 409);
     const run = this.store.db.transaction(() => this.enqueue(this.store.retry(runId, acknowledgement))).immediate();
     this.drain();
@@ -130,6 +169,7 @@ export class Engine {
   /** Starts the built-in integrator for a conflicted result; the merge itself happens when the run is prepared. */
   reconcile(sourceRunId: string): Run {
     if (this.closing) throw new AppError('Сервис останавливается', 503);
+    this.assertIntegrationChecks(this.store.getRun(sourceRunId));
     this.assertTaskSettled(this.store.getRun(sourceRunId).taskId);
     if (this.integrationHandles.has(sourceRunId)) throw new AppError('Предыдущие процессы слияния ещё завершаются', 409);
     const run = this.store.db.transaction(() => this.enqueue(this.store.startReconcile(sourceRunId))).immediate();
@@ -158,6 +198,7 @@ export class Engine {
   }
   private drain() {
     if (this.closing || this.draining) return;
+    if (this.requiresIntegrationChecks && !this.integrationChecks()?.length) return;
     this.draining = true;
     try {
       for (const job of this.store.claimIntegrations(this.maxParallel)) this.integrateJob(job);
@@ -180,7 +221,10 @@ export class Engine {
           this.release(run, launch);
         };
         try {
-          const workspace = this.workspaces.plan(run, request.location);
+          const planned = this.workspaces.plan(run, request.location);
+          const checks = this.integrationChecks();
+          const workspace = !run.workspace && planned.mode === 'worktree' && checks
+            ? { ...planned, checkCommands: checks } : planned;
           this.store.attachWorkspace(run.id, launch.fence, workspace);
           const preparation = this.workspaces.prepare(workspace);
           if (preparation instanceof Promise) launch.settled = preparation.then(ready).catch(failed);
@@ -191,6 +235,7 @@ export class Engine {
   }
   integrate(runId: string, acknowledgement = false): Integration {
     if (this.closing) throw new AppError('Сервис останавливается', 503);
+    this.assertIntegrationChecks(this.store.getRun(runId));
     if (this.integrationHandles.has(runId)) throw new AppError('Предыдущие процессы слияния ещё завершаются', 409);
     const job = this.store.queueIntegration(runId, true, acknowledgement);
     if (!job) throw new AppError('Для слияния нужен завершённый запуск в отдельном worktree', 409);
@@ -277,7 +322,7 @@ export class Engine {
         sessionId: run.sessionId ?? undefined, answer, mock: run.mock, ...(workflow ? { workflow } : {}),
         ...(run.followup ? { followup: { sourceRunId: run.followup.sourceRunId, sourceStepIndex: run.followup.sourceStepIndex, request: run.followup.request } } : {}),
         ...(run.reconcile ? { reconcile: { targetBranch: run.reconcile.targetBranch, targetCommit: run.reconcile.targetCommit, conflicts: run.reconcile.conflicts,
-          checkCommands: run.workspace?.checkCommands ?? [], resultSummary: this.store.getRun(run.reconcile.sourceRunId).summary ?? '' } } : {}) };
+          checkCommands: this.integrationChecks() ?? run.workspace?.checkCommands ?? [], resultSummary: this.store.getRun(run.reconcile.sourceRunId).summary ?? '' } } : {}) };
       buildPrompt(input); // Enforce the complete UTF-8 bound before even a custom factory.
       if (!isCurrent() || launch.cancelRequested || this.closing) {
         this.store.completeCancellation(run.id, Date.now(), fence);

@@ -3,6 +3,7 @@
   import Icon from './lib/Icon.svelte';
   import Workers from './lib/Workers.svelte';
   import ModelSettings from './lib/ModelSettings.svelte';
+  import AutopilotSettings from './lib/AutopilotSettings.svelte';
   import Instructions from './lib/Instructions.svelte';
   import Autopilot from './lib/Autopilot.svelte';
   import CliSetup from './lib/CliSetup.svelte';
@@ -23,7 +24,7 @@
   import { tagColorStyle } from './lib/tags';
   import { followupTargets, followupFingerprint, followupStage, runWorkflowSteps, taskHasCompletedRun, resolveFollowupTarget, followupSessionKey, type FollowupTarget } from './lib/followups';
   import { applyTheme, readTheme, saveTheme, themes, themeStorageKey, type Theme } from './lib/theme';
-  import type { AppInfo, Attachment, Comment, FollowupInput, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
+  import type { AppInfo, Attachment, AutopilotSettings as AutopilotSettingsValue, Comment, FollowupInput, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
 
   type Scope = 'all' | 'scheduled' | 'autopilot' | 'attention' | 'completed';
   type View = 'board' | 'list';
@@ -52,6 +53,15 @@
   let modelSequence = 0;
   let modelReadSequence: number | null = null;
   let modelMutationPending = $state(false);
+  let autopilotSettings = $state<AutopilotSettingsValue | null>(null);
+  let autopilotSettingsLoading = $state(true);
+  let autopilotSettingsError = $state('');
+  let autopilotSettingsSequence = 0;
+  let autopilotSettingsReadSequence: number | null = null;
+  let autopilotSettingsMutationPending = $state(false);
+  let settingsMutationPending = $derived(modelMutationPending || autopilotSettingsMutationPending);
+  let integrationChecksMissing = $derived(info?.mode === 'cli' && !autopilotSettings?.integrationChecks?.length);
+  const integrationChecksRequired = 'Сначала задайте BRIGD_INTEGRATION_CHECKS в Настройки → Автопилот.';
   let loading = $state(true);
   let connectionError = $state('');
   let search = $state('');
@@ -85,6 +95,7 @@
     { id: 'appearance', label: 'Внешний вид', icon: 'palette' },
     { id: 'models', label: 'Модели', icon: 'spark' },
     { id: 'permissions', label: 'Разрешения', icon: 'lock' },
+    { id: 'autopilot', label: 'Автопилот', icon: 'moon' },
   ] as const;
   let settingsSection = $state<(typeof settingsSections)[number]['id']>('appearance');
   const themeGroups = [{ scheme: 'light', label: 'Светлые' }, { scheme: 'dark', label: 'Тёмные' }] as const;
@@ -167,7 +178,8 @@
   let followupDraftSignature = $derived(followupTarget ? followupFingerprint({ sourceRunId: followupTarget.sourceRunId,
     sourceStepIndex: followupTarget.sourceStepIndex, body: comment.trim(), attachmentIds: commentAttachmentIds }) : '');
   let retryingFollowup = $derived(!!followupAttempt && followupAttempt.taskId === selectedId && followupAttempt.signature === followupDraftSignature);
-  let followupBlocked = $derived(!followupTarget ? followupTargetKey ? 'Выбранная сессия больше не найдена. Выберите получателя заново.' : 'После завершения запуска здесь можно отправить агенту дополнительный запрос.'
+  let followupBlocked = $derived(integrationChecksMissing ? integrationChecksRequired
+    : !followupTarget ? followupTargetKey ? 'Выбранная сессия больше не найдена. Выберите получателя заново.' : 'После завершения запуска здесь можно отправить агенту дополнительный запрос.'
     : !followupTarget.sessionId ? 'Идентификатор сессии не сохранён. Продолжить её нельзя. Для работы в новой сессии создайте отдельную задачу.'
     : selectedTask && taskIsOccupied(selectedTask) && !retryingFollowup ? 'Задача занята. Завершите текущий запуск или ответьте агенту в блоке выше.' : '');
   let inputRunKey = $state('');
@@ -324,6 +336,36 @@
     modelsLoading = false;
   }
 
+  async function loadAutopilotSettings() {
+    if (autopilotSettingsMutationPending || autopilotSettingsReadSequence !== null) return;
+    const sequence = ++autopilotSettingsSequence;
+    autopilotSettingsReadSequence = sequence;
+    try {
+      const result = await api<AutopilotSettingsValue>('/api/settings/autopilot');
+      if (sequence !== autopilotSettingsSequence) return;
+      autopilotSettings = result;
+      autopilotSettingsError = '';
+    } catch (error) {
+      if (sequence === autopilotSettingsSequence) autopilotSettingsError = error instanceof Error ? error.message : 'Не удалось загрузить настройки автопилота';
+    } finally {
+      if (autopilotSettingsReadSequence === sequence) autopilotSettingsReadSequence = null;
+      if (sequence === autopilotSettingsSequence) autopilotSettingsLoading = false;
+    }
+  }
+
+  function autopilotSettingsChanged(value: AutopilotSettingsValue) {
+    autopilotSettingsSequence++;
+    autopilotSettingsReadSequence = null;
+    autopilotSettings = value;
+    autopilotSettingsError = '';
+    autopilotSettingsLoading = false;
+  }
+
+  function autopilotSettingsMutationStarted() {
+    autopilotSettingsSequence++;
+    autopilotSettingsReadSequence = null;
+  }
+
   function workerChanged(worker: Worker) {
     workerSequence++;
     workers = workers.some(item => item.id === worker.id) ? workers.map(item => item.id === worker.id ? worker : item) : [worker, ...workers];
@@ -350,7 +392,7 @@
   }
 
   async function refresh() {
-    await Promise.all([loadTasks(), loadWorkers(), loadModels(), loadTags(), selectedId ? loadDetail() : Promise.resolve()]);
+    await Promise.all([loadTasks(), loadWorkers(), loadModels(), loadTags(), loadAutopilotSettings(), selectedId ? loadDetail() : Promise.resolve()]);
   }
 
   async function loadInfo() {
@@ -382,10 +424,11 @@
     settingsOpen = true;
     settings.showModal();
     void loadModels();
+    void loadAutopilotSettings();
   }
 
   function closeSettings() {
-    if (modelMutationPending) return;
+    if (settingsMutationPending) return;
     settings.close();
     settingsOpen = false;
   }
@@ -564,6 +607,7 @@
 
   async function act(task: Task, action: 'run' | 'pause' | 'resume' | 'cancel' | 'retry' | 'archive' | 'restore', response?: string) {
     if (pending.includes(task.id)) return;
+    if (integrationChecksMissing && ['run', 'resume', 'retry'].includes(action)) { notify(integrationChecksRequired, 'error'); return; }
     if (action === 'run' && !canStartManual(task)) return;
     if (action === 'archive' && (task.archivedAt !== null || taskIsOccupied(task))) return;
     if (action === 'restore' && task.archivedAt === null) return;
@@ -602,6 +646,7 @@
     const task = selectedTask;
     const context = drawerContext;
     if (!task || pending.includes(task.id)) return;
+    if (integrationChecksMissing && action !== 'cancel-integration') { notify(integrationChecksRequired, 'error'); return; }
     pending = [...pending, task.id];
     try {
       await api(`/api/runs/${encodeURIComponent(runId)}/${action}`, { method: 'POST', body: JSON.stringify({ acknowledgeInterruption: acknowledgement }) });
@@ -633,6 +678,7 @@
     const target = followupTarget;
     const body = comment.trim();
     const context = drawerContext;
+    if (integrationChecksMissing) { followupError = integrationChecksRequired; return; }
     if (!task || !target || !target.sessionId || (!body && !commentAttachmentCount) || taskBusy || followupSending || commentUploading || commentAttachmentInvalid) return;
     let attachments: ReturnType<AttachmentComposer['prepareSubmission']> | undefined;
     try { attachments = commentComposer?.prepareSubmission(); }
@@ -819,7 +865,7 @@
     <div class="card-footer">
       <span class="card-schedule" class:is-paused={task.paused}><Icon name={scheduleIcon(task)} size={12} />{scheduleLabel(task)}</span>
       {#if canStartManual(task)}
-        <button class="card-run icon-button" disabled={pending.includes(task.id)} onclick={() => act(task, 'run')} aria-label={(workflowSteps(task).length && task.runCount ? 'Начать заново: ' : 'Запустить: ') + task.title} title={workflowSteps(task).length && task.runCount ? 'Начать всю последовательность заново' : 'Запустить задачу'}><Icon name={pending.includes(task.id) ? 'refresh' : 'play'} size={14} class={pending.includes(task.id) ? 'spin' : ''} /></button>
+        <button class="card-run icon-button" disabled={pending.includes(task.id) || integrationChecksMissing} onclick={() => act(task, 'run')} aria-label={(workflowSteps(task).length && task.runCount ? 'Начать заново: ' : 'Запустить: ') + task.title} title={integrationChecksMissing ? integrationChecksRequired : workflowSteps(task).length && task.runCount ? 'Начать всю последовательность заново' : 'Запустить задачу'}><Icon name={pending.includes(task.id) ? 'refresh' : 'play'} size={14} class={pending.includes(task.id) ? 'spin' : ''} /></button>
       {:else}<span class="card-run-count" title="Количество запусков"><Icon name="history" size={12} />{task.runCount}</span>{/if}
     </div>
   </article>
@@ -846,7 +892,7 @@
       {#if page === 'instructions'}
         <Instructions {notify} />
       {:else if page === 'autopilot'}
-        <Autopilot {tasks} {notify} onopen={openTask} onchanged={taskChanged} onsettings={() => openSettings('permissions')} />
+        <Autopilot {tasks} {notify} settings={autopilotSettings} checksRequired={info?.mode !== 'mock'} onopen={openTask} onchanged={taskChanged} onsettings={openSettings} />
       {:else if page === 'tags'}
         <Tags {tags} loading={tagsLoading} error={tagsError} onreload={loadTags} onchanged={tagChanged} ondeleted={tagDeleted} onmutation={tagMutation} {notify} />
       {:else if page === 'archive'}
@@ -868,6 +914,7 @@
       {#if info?.mode === 'mock'}
         <div class="mode-banner"><span class="mode-icon"><Icon name="spark" size={17} /></span><div><strong>Демонстрационный режим</strong><span>Запуски симулируются. Codex и Claude CLI не вызываются, файлы не изменяются.</span></div><span class="demo-badge">MOCK</span></div>
       {/if}
+      {#if integrationChecksMissing}<div class="connection-error" role="status"><Icon name="alert" size={17} /><span>Запуски недоступны: задайте BRIGD_INTEGRATION_CHECKS.</span><button onclick={() => openSettings('autopilot')}>Настройки автопилота</button></div>{/if}
       {#if connectionError}<div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{connectionError}</span><button onclick={() => { void loadInfo(); void refresh(); }}>Повторить</button></div>{/if}
 
       <div class="toolbar">
@@ -930,7 +977,7 @@
             <button class="button primary" disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'restore')}><Icon name={taskBusy ? 'refresh' : 'restore'} size={15} class={taskBusy ? 'spin' : ''} />Восстановить</button>
           {:else}
           {#if canStartManual(selectedTask)}
-            <button class="button primary" disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'run')}><Icon name={taskBusy ? 'refresh' : 'play'} size={15} class={taskBusy ? 'spin' : ''} />{selectedTask.runCount ? selectedTask.steps?.length ? 'Начать всю задачу заново' : 'Повторить запуск' : 'Запустить'}</button>
+            <button class="button primary" disabled={taskBusy || integrationChecksMissing} onclick={() => selectedTask && act(selectedTask, 'run')}><Icon name={taskBusy ? 'refresh' : 'play'} size={15} class={taskBusy ? 'spin' : ''} />{selectedTask.runCount ? selectedTask.steps?.length ? 'Начать всю задачу заново' : 'Повторить запуск' : 'Запустить'}</button>
           {:else if selectedTask.status === 'cancelling'}<button class="button secondary" disabled><Icon name="refresh" class="spin" size={15} />Останавливаем…</button>
           {:else if currentRun && currentRun.status !== 'completed' && taskIsOccupied(selectedTask)}<button class="button secondary danger-hover" disabled={taskBusy || (currentRun.status === 'interrupted' && !acknowledgeInterruption)} title={currentRun.status === 'interrupted' ? 'Сначала подтвердите ниже, что предыдущий процесс CLI остановлен' : undefined} onclick={() => selectedTask && act(selectedTask, 'cancel')}><Icon name="stop" size={14} />Отменить запуск</button>{/if}
           <button class="button secondary" disabled={taskBusy} onclick={() => selectedTask && openEditor(selectedTask)}><Icon name="edit" size={15} />Изменить</button>
@@ -938,6 +985,7 @@
           {#if selectedTask.schedule !== 'manual'}{@const pauseLabel = selectedTask.schedule === 'auto' ? (selectedTask.paused ? 'Вернуть в очередь автопилота' : 'Отложить в автопилоте') : selectedTask.paused ? 'Возобновить расписание' : 'Приостановить расписание'}<button class="icon-button schedule-pause" title={pauseLabel} aria-label={pauseLabel} disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'pause')}><Icon name={selectedTask.paused ? 'play' : 'pause'} size={17} /></button>{/if}
           {/if}
         </div>
+        {#if integrationChecksMissing}<p class="field-warning" role="status"><Icon name="alert" size={15} /><span>Чтобы запустить или продолжить процесс, задайте BRIGD_INTEGRATION_CHECKS в <button class="inline-link" onclick={() => openSettings('autopilot')}>настройках автопилота</button>.</span></p>{/if}
         {#if selectedTask.archivedAt !== null}<p class="archived-task-note"><Icon name="archive" size={16} /><span>В архиве с {dateTime(selectedTask.archivedAt)}. Задача не показывается на доске и не запускается по расписанию. Восстановите её, чтобы продолжить работу.</span></p>
         {:else if taskHasCompletedRun(selectedTask)}<p class="completed-task-help workflow-help">В этой карточке уже есть завершённый запуск. Дополнительные запросы отправляются агенту из обсуждения.{#if selectedTask.schedule === 'interval'} {selectedTask.paused ? 'Расписание остаётся на паузе.' : 'Автоматические запуски по расписанию продолжаются.'}{/if}</p>{/if}
         {#if selectedTask.archivedAt === null && selectedTask.steps?.length && selectedTask.runCount && canStartManual(selectedTask)}<p class="workflow-help">Новый запуск выполнит все этапы с начала по сохранённому плану. История предыдущих запусков останется.</p>{/if}
@@ -979,8 +1027,8 @@
         <details class="workflow-template" open={!currentRun}><summary>{currentRun && selectedTask.schedule === 'interval' ? 'План следующего запуска по расписанию' : 'План задачи'}</summary><p class="workflow-help">Все работники используют общую рабочую папку, цель задачи и общие инструкции. Этапы идут по порядку.</p><ol>{#each selectedTask.steps as step}{@const worker = workers.find(worker => worker.id === step.workerId)}<li><strong>{step.title}</strong><div class="workflow-template-worker">{#if worker}<WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={36} /><span>{worker.name}{#if worker.description?.trim()}<small class="worker-description">{worker.description}</small>{/if}</span>{:else}<span>Работник недоступен</span>{/if}</div><p>{step.instruction}</p></li>{/each}</ol></details>
       {/if}
       {#if currentRun}<div class="current-run-instructions">{@render instructionSnapshot(currentRun)}</div>{/if}
-      {#if currentRun?.integration}<IntegrationPanel integration={currentRun.integration} busy={taskBusy} historical={selectedTask.archivedAt !== null} onaction={(action, acknowledgement) => integrationAction(currentRun!.id, action, acknowledgement)} />
-      {:else if currentRun?.reconcile && !activeStatuses.includes(currentRun.status) && sourceIntegration}<IntegrationPanel integration={sourceIntegration} busy={taskBusy} historical={selectedTask.archivedAt !== null} onaction={(action, acknowledgement) => integrationAction(currentRun!.reconcile!.sourceRunId, action, acknowledgement)} />{/if}
+      {#if currentRun?.integration}<IntegrationPanel integration={currentRun.integration} busy={taskBusy} launchBlocked={integrationChecksMissing} historical={selectedTask.archivedAt !== null} onaction={(action, acknowledgement) => integrationAction(currentRun!.id, action, acknowledgement)} />
+      {:else if currentRun?.reconcile && !activeStatuses.includes(currentRun.status) && sourceIntegration}<IntegrationPanel integration={sourceIntegration} busy={taskBusy} launchBlocked={integrationChecksMissing} historical={selectedTask.archivedAt !== null} onaction={(action, acknowledgement) => integrationAction(currentRun!.reconcile!.sourceRunId, action, acknowledgement)} />{/if}
       {#if currentRun?.error}<div class="run-error"><Icon name="alert" size={17} /><div><strong>{labels[currentRun.status]}</strong><p>{currentRun.error}</p></div></div>{/if}
       {#if currentRun?.status === 'interrupted' && !currentRun.sessionId && !currentRun.steps?.length}<div class="resume-warning">Идентификатор сессии не сохранён. {taskHasCompletedRun(selectedTask) ? 'Продолжение недоступно. Для работы в новой сессии создайте отдельную задачу.' : 'Продолжение недоступно; отмените запуск, чтобы начать заново.'}</div><label class="interruption-confirm"><input type="checkbox" bind:checked={acknowledgeInterruption} disabled={taskBusy} /><span>Я проверил(а), что предыдущий процесс CLI остановлен</span></label>{/if}
       {#if currentRun?.status === 'interrupted' && currentRun.steps?.slice((currentRun.currentStepIndex ?? -1) + 1).some(step => step.status === 'cancelled')}<div class="cancelling-note" role="status"><Icon name="alert" size={16} /><span>Отмена уже запрошена. Продолжение касается только текущего этапа; остальные этапы отменены.</span></div>{/if}
@@ -993,7 +1041,7 @@
           {#if currentRun?.status === 'blocked'}<p>Устраните причину блокировки перед повтором. Эта кнопка не предоставляет агенту дополнительных разрешений.</p>{/if}
           {#if !taskHasCompletedRun(selectedTask)}<p>Чтобы начать всю последовательность с первого этапа, сначала отмените этот запуск.</p>{/if}
           {#if interruptedWithoutSession}<label class="interruption-confirm"><input type="checkbox" bind:checked={acknowledgeInterruption} disabled={taskBusy} /><span>Я проверил(а), что предыдущий процесс CLI остановлен</span></label>{/if}
-          <button class="button primary" disabled={taskBusy || (interruptedWithoutSession && !acknowledgeInterruption)} onclick={() => selectedTask && act(selectedTask, 'retry')}><Icon name="refresh" size={15} />{taskBusy ? 'Запускаем…' : 'Повторить текущий этап'}</button>
+          <button class="button primary" disabled={taskBusy || integrationChecksMissing || (interruptedWithoutSession && !acknowledgeInterruption)} onclick={() => selectedTask && act(selectedTask, 'retry')}><Icon name="refresh" size={15} />{taskBusy ? 'Запускаем…' : 'Повторить текущий этап'}</button>
         </section>
       {/if}
       </section>
@@ -1019,7 +1067,7 @@
           {#if !currentRun?.sessionId && (!currentRun?.mock || currentRun?.followup)}<div class="resume-warning">Идентификатор сессии не сохранён. {taskHasCompletedRun(selectedTask) ? 'Продолжение недоступно. Для работы в новой сессии создайте отдельную задачу.' : 'Продолжение недоступно; отмените запуск, чтобы начать заново.'}</div>
           {:else}<label class="sr-only" for="resume-answer">Ответ агенту</label><textarea id="resume-answer" bind:value={answer} maxlength="8000" rows="3" placeholder={currentRun?.status === 'interrupted' ? 'Что учесть при продолжении? (необязательно)' : 'Напишите ответ или уточнение…'} required={currentRun?.status === 'waiting_input' && !answerAttachmentCount} disabled={taskBusy}></textarea>
             {#key `${drawerContext}:${inputRunKey}`}<AttachmentComposer bind:this={answerComposer} label="Файлы ответа" disabled={taskBusy} bind:count={answerAttachmentCount} bind:uploading={answerUploading} bind:invalid={answerAttachmentInvalid} />{/key}
-            <button class="button primary" type="submit" disabled={taskBusy || answerUploading || answerAttachmentInvalid || (currentRun?.status === 'waiting_input' && !answer.trim() && !answerAttachmentCount) || (currentRun?.status === 'interrupted' && !acknowledgeInterruption)}><Icon name="arrow" size={15} />{taskBusy ? 'Отправляем…' : 'Продолжить работу'}</button>
+            <button class="button primary" type="submit" disabled={taskBusy || integrationChecksMissing || answerUploading || answerAttachmentInvalid || (currentRun?.status === 'waiting_input' && !answer.trim() && !answerAttachmentCount) || (currentRun?.status === 'interrupted' && !acknowledgeInterruption)}><Icon name="arrow" size={15} />{taskBusy ? 'Отправляем…' : 'Продолжить работу'}</button>
           {/if}
         </form>
       {/if}
@@ -1062,14 +1110,14 @@
 
 <dialog class="settings-dialog" bind:this={settings} aria-labelledby="settings-title" oncancel={(event) => { event.preventDefault(); closeSettings(); }} onclick={(event) => backdropClick(event, settings, closeSettings)}>
   <div class="settings-frame">
-    <header class="settings-header"><h2 id="settings-title">Настройки</h2><button class="icon-button" aria-label="Закрыть настройки" disabled={modelMutationPending} onclick={closeSettings}><Icon name="close" size={21} /></button></header>
+    <header class="settings-header"><h2 id="settings-title">Настройки</h2><button class="icon-button" aria-label="Закрыть настройки" disabled={settingsMutationPending} onclick={closeSettings}><Icon name="close" size={21} /></button></header>
     <div class="settings-layout">
       <div class="settings-nav" role="tablist" aria-label="Разделы настроек" aria-orientation="vertical">
         {#each settingsSections as section (section.id)}
           <button id="settings-{section.id}-tab" role="tab" tabindex={settingsSection === section.id ? 0 : -1} onkeydown={settingsTabKey} aria-selected={settingsSection === section.id} aria-controls="settings-{section.id}-panel" class:active={settingsSection === section.id} onclick={() => settingsSection = section.id}><Icon name={section.icon} size={17} /><span>{section.label}</span></button>
         {/each}
       </div>
-      <!-- Inactive panels stay mounted so an unsaved model draft survives switching sections. -->
+      <!-- Inactive panels stay mounted so unsaved drafts survive switching sections. -->
       <div id="settings-appearance-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-appearance-tab" hidden={settingsSection !== 'appearance'}>
         <fieldset class="theme-settings">
           <legend>Цветовая схема</legend>
@@ -1094,6 +1142,9 @@
       </div>
       <div id="settings-permissions-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-permissions-tab" hidden={settingsSection !== 'permissions'}>
         {#if settingsOpen}<CliSetup />{/if}
+      </div>
+      <div id="settings-autopilot-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-autopilot-tab" hidden={settingsSection !== 'autopilot'}>
+        {#if settingsOpen}<AutopilotSettings settings={autopilotSettings} loading={autopilotSettingsLoading} error={autopilotSettingsError} retry={() => { void loadAutopilotSettings(); }} onchange={autopilotSettingsChanged} onmutation={autopilotSettingsMutationStarted} bind:busy={autopilotSettingsMutationPending} />{/if}
       </div>
     </div>
   </div>

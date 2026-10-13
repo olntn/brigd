@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from '../server/engine';
-import { Store } from '../server/store';
+import { Store, runFence } from '../server/store';
 import { GitWorkspaces } from '../server/workspaces';
 import { createHandler } from '../server/http';
 import type { Run } from '../src/lib/types';
@@ -15,7 +15,7 @@ const checks = [command('process.exit(0)')];
 beforeEach(() => {
   folder = mkdtempSync(join(tmpdir(), 'brigd-integration-')); root = repository(folder);
   store = new Store(join(folder, 'data.sqlite')); agent = controlledAgent();
-  engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces'), checks), maxParallel: 2 });
+  engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces'), checks), integrationChecks: checks, maxParallel: 2 });
 });
 afterEach(async () => {
   for (const call of agent.calls) call.reject(new Error('cleanup'));
@@ -23,7 +23,7 @@ afterEach(async () => {
 });
 async function configure(argv: string[][], maxPerRepository = 1, autoReconcile = true) {
   await engine.shutdown();
-  engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces'), argv), maxParallel: 2, maxPerRepository, autoReconcile });
+  engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces'), argv), integrationChecks: argv, maxParallel: 2, maxPerRepository, autoReconcile });
 }
 function conflictingTarget(content: string) {
   writeFileSync(join(root, 'src/value.txt'), content); git(root, 'add', '.'); git(root, 'commit', '-m', 'target edit');
@@ -219,7 +219,7 @@ test('interrupted integration keeps its reservation across restart and requires 
   const run = await start(); complete(run); await until(() => existsSync(entered));
   const next = engine.start(store.createTask(taskInput(root)).id);
   await engine.shutdown(); store.close(); store = new Store(join(folder, 'data.sqlite'));
-  agent = controlledAgent(); engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces'), checks) });
+  agent = controlledAgent(); engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces'), checks), integrationChecks: checks });
   engine.startScheduler();
   expect(store.integrationForRun(run.id)!.status).toBe('interrupted'); expect(store.getTask(run.taskId).status).toBe('merge_interrupted');
   expect(store.getRun(next.id).status).toBe('queued'); expect(() => engine.integrate(run.id)).toThrow('подтвердите');
@@ -286,12 +286,21 @@ test('integration HTTP actions preserve origin controls and completed idempotenc
   expect(store.updateIntegration(current.id, current.attempt - 1, { status: 'failed' }, true)!.status).toBe('merged');
 });
 
-test('explicit operator checks can repair a saved run that originally had no detectable checks', async () => {
-  await configure([]);
-  const run = await start(), original = git(root, 'rev-parse', 'HEAD'); complete(run);
-  expect((await settled(run)).status).toBe('blocked'); expect(git(root, 'rev-parse', 'HEAD')).toBe(original);
-  await engine.shutdown();
-  engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces')), integrationChecks: checks });
+test('saved settings repair a legacy run without detectable checks without restarting', async () => {
+  // A pre-settings worktree remains recoverable, but new Engine launches require configured checks.
+  const task = store.createTask(taskInput(root));
+  const run = store.startManual(task.id, false), original = git(root, 'rev-parse', 'HEAD');
+  const provider = new GitWorkspaces(join(folder, 'workspaces'));
+  store.enqueueExecution(run, provider.locate(run));
+  const preparing = store.claimExecution(store.pendingExecutions()[0]!, 1)!;
+  const workspace = provider.plan(preparing, provider.locate(preparing));
+  store.attachWorkspace(run.id, runFence(preparing), workspace);
+  await provider.prepare(workspace); store.beginExecution(run.id, runFence(preparing));
+  writeFileSync(join(workspace.path, 'src/value.txt'), 'legacy result\n');
+  store.finish(run.id, 'completed', 'Legacy result', null); store.settleExecution(run.id, run.turn);
+  expect(store.getRun(run.id).workspace!.checkCommands).toEqual([]);
+  expect(git(root, 'rev-parse', 'HEAD')).toBe(original);
+  engine.setAutopilotSettings({ integrationChecks: checks });
   engine.integrate(run.id);
   expect((await settled(run)).status).toBe('merged');
 });

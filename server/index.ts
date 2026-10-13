@@ -13,7 +13,7 @@ mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
 const store = new Store(dbPath);
 if (process.platform !== 'win32') chmodSync(dbPath, 0o600);
 const lease = store.acquireLease();
-const engine = new Engine(store, mode === 'mock', undefined, undefined, { maxParallel, maxPerRepository, integrationChecks, autoReconcile, ...(mode === 'cli' ? { workspaces: new GitWorkspaces(workspacesDir, integrationChecks) } : {}) });
+const engine = new Engine(store, mode === 'mock', undefined, undefined, { maxParallel, maxPerRepository, integrationChecks, autoReconcile, ...(mode === 'cli' ? { workspaces: new GitWorkspaces(workspacesDir, () => store.getIntegrationChecks() ?? integrationChecks) } : {}) });
 const server = Bun.serve({
   hostname, port, maxRequestBodySize: ATTACHMENT_MAX_BYTES,
   fetch: createHandler(engine, { port, root, dev, allowedHosts, allowedOrigins, defaultCwd, cliHome })
