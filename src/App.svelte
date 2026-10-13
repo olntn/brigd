@@ -916,9 +916,14 @@
     </button>
     <div class="card-footer">
       <span class="card-schedule" class:is-paused={task.paused}><Icon name={scheduleIcon(task)} size={12} />{scheduleLabel(task)}</span>
-      {#if canStartManual(task)}
-        <button class="card-run icon-button" disabled={pending.includes(task.id) || integrationChecksMissing} onclick={() => act(task, 'run')} aria-label={(workflowSteps(task).length && task.runCount ? 'Начать заново: ' : 'Запустить: ') + task.title} title={integrationChecksMissing ? integrationChecksRequired : workflowSteps(task).length && task.runCount ? 'Начать всю последовательность заново' : 'Запустить задачу'}><Icon name={pending.includes(task.id) ? 'refresh' : 'play'} size={14} class={pending.includes(task.id) ? 'spin' : ''} /></button>
-      {:else}<span class="card-run-count" title="Количество запусков"><Icon name="history" size={12} />{task.runCount}</span>{/if}
+      <div class="card-actions">
+        {#if !taskIsOccupied(task)}
+          <button class="icon-button" disabled={pending.includes(task.id)} onclick={() => act(task, 'archive')} aria-label={'В архив: ' + task.title} title="В архив"><Icon name={pending.includes(task.id) ? 'refresh' : 'archive'} size={14} class={pending.includes(task.id) ? 'spin' : ''} /></button>
+        {/if}
+        {#if canStartManual(task)}
+          <button class="card-run icon-button" disabled={pending.includes(task.id) || integrationChecksMissing} onclick={() => act(task, 'run')} aria-label={(workflowSteps(task).length && task.runCount ? 'Начать заново: ' : 'Запустить: ') + task.title} title={integrationChecksMissing ? integrationChecksRequired : workflowSteps(task).length && task.runCount ? 'Начать всю последовательность заново' : 'Запустить задачу'}><Icon name={pending.includes(task.id) ? 'refresh' : 'play'} size={14} class={pending.includes(task.id) ? 'spin' : ''} /></button>
+        {:else}<span class="card-run-count" title="Количество запусков"><Icon name="history" size={12} />{task.runCount}</span>{/if}
+      </div>
     </div>
   </article>
 {/snippet}
@@ -952,7 +957,7 @@
         {#if loading}
           <div class="list-empty" aria-busy="true"><Icon name="refresh" size={19} class="spin" /><span>Загружаем архив…</span></div>
         {:else if archivedTasks.length === 0}
-          <div class="no-results"><span class="empty-icon"><Icon name="archive" size={28} /></span><h2>Архив пуст</h2><p>Откройте задачу, которая больше не нужна на доске, и нажмите «В архив».</p></div>
+          <div class="no-results"><span class="empty-icon"><Icon name="archive" size={28} /></span><h2>Архив пуст</h2><p>Нажмите значок архива на доске или кнопку «В архив» в открытой задаче.</p></div>
         {:else}
           <div class="toolbar"><label class="search-box"><Icon name="search" size={16} /><input bind:value={archiveSearch} type="search" placeholder="Найти в архиве…" aria-label="Поиск в архиве" /></label><label class="provider-filter tag-filter"><Icon name="tag" size={15} /><select bind:value={archiveTagFilter} aria-label="Фильтр по тегу" disabled={tagsLoading}><option value="all">Все теги</option><option value="untagged">Без тегов</option>{#each tags as tag (tag.id)}<option value={tag.id}>{tag.name}</option>{/each}</select><Icon name="down" size={13} /></label></div>
           {#if tagsError}<div class="connection-error" role="alert"><span>{tagsError}</span><button onclick={() => { void loadTags(); }}>Повторить загрузку тегов</button></div>{/if}

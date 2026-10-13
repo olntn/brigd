@@ -514,6 +514,7 @@ input[type='checkbox'], input[type='radio'] { flex-shrink: 0; }
 .card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); min-height: 39px; }
 .card-schedule { font-size: .77rem; display: flex; align-items: center; gap: 5px; color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
 .card-schedule.is-paused { color: var(--warning); }
+.card-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .card-run { color: var(--accent-text); background: var(--soft); }
 .card-run-count { display: flex; gap: 5px; align-items: center; font-size: .77rem; color: var(--muted); }
 .card-signal, .card-cancelling { display: flex; align-items: center; gap: 6px; font-size: .77rem; color: var(--warning); margin-top: 11px; }
