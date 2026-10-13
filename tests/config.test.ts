@@ -18,6 +18,13 @@ describe('brigd configuration compatibility', () => {
     expect(config.defaultCwd).toBeUndefined();
     expect(readConfig(root, { BRIGD_MODE: 'mock' }).dbPath).toBe(resolve(root, 'data/demo.sqlite'));
     expect(readConfig(root, { TRACKT_MODE: 'mock' }).dbPath).toBe(resolve(root, 'data/demo.sqlite'));
+    expect(config.updateBackupDir).toBe(resolve(root, '.brigd-updates/backup'));
+  });
+
+  test('updater backup storage resolves against the installation and accepts the managed child path', () => {
+    const original = '/original/brigd/.brigd-updates/backup';
+    expect(readConfig('/original/brigd/.brigd-updates/releases/version', { BRIGD_UPDATE_BACKUP_DIR: original }).updateBackupDir).toBe(original);
+    expect(readConfig(root, { TRACKT_UPDATE_BACKUP_DIR: 'old', BRIGD_UPDATE_BACKUP_DIR: 'new' }).updateBackupDir).toBe(resolve(root, 'new'));
   });
 
   test('CLI access supports both prefixes and validates the explicit new value', () => {

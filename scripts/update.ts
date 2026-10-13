@@ -215,6 +215,7 @@ export async function startBrigd(installRoot: string, options: StartOptions = {}
     assertDatabaseIdle(config.dbPath);
     const childEnv: Environment = { ...env, BRIGD_DB: config.dbPath, BRIGD_WORKSPACES_DIR: config.workspacesDir,
       BRIGD_CLI_HOME: config.cliHome, BRIGD_DEFAULT_CWD: resolve(root, config.defaultCwd ?? root),
+      BRIGD_UPDATE_BACKUP_DIR: join(cacheDir, 'backup'),
       BRIGD_STARTUP_TOKEN: lock.token, BRIGD_MANAGED_START: '1' };
     let state = readState(statePath, cacheDir);
     if (state.pending) {

@@ -14,10 +14,14 @@ import { validateFollowup } from './followups';
 import { validateTag, validateTagPatch, validateTaskTags } from './tags';
 import { claudeStatus, codexStatus, configureClaude, configureCodex } from './cli-config';
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
+import { BackupManager, BACKUP_MAX_BYTES } from './backups';
 
 export interface HttpOptions { port: number; dev?: boolean; root?: string; startedAt?: number; allowedHosts?: string[]; allowedOrigins?: string[]; defaultCwd?: string;
   /** Home folder whose ~/.claude and ~/.codex the CLI setup buttons check and edit. */
-  cliHome?: string; }
+  cliHome?: string;
+  updateBackupDir?: string;
+  restoreBackup?: (backups: BackupManager, id: string) => Promise<void>;
+}
 const JSON_LIMIT = 32_768;
 const securityHeaders = {
   'X-Content-Type-Options': 'nosniff',
@@ -61,6 +65,10 @@ export function createHandler(engine: Engine, options: HttpOptions) {
     defaultSchedule: engine.store.getDefaultSchedule(),
   });
   let uploading = 0;
+  let backupUploading = false;
+  let backups: BackupManager | undefined;
+  const backupManager = () => backups ??= new BackupManager({ dbPath: engine.store.db.filename,
+    updateBackupDir: options.updateBackupDir ?? resolve(options.root ?? process.cwd(), '.brigd-updates/backup') });
   return async (req: Request): Promise<Response> => {
     try {
       const url = new URL(req.url);
@@ -71,6 +79,52 @@ export function createHandler(engine: Engine, options: HttpOptions) {
       if (!['GET', 'HEAD'].includes(req.method) && (!origin || !origins.has(origin))) throw new AppError('Изменения разрешены только из локального интерфейса (Origin обязателен)', 403);
       const path = url.pathname;
       const method = req.method;
+      if (path === '/api/backups' && method === 'GET') return json(backupManager().list());
+      if (path === '/api/backups' && method === 'POST') {
+        const value = await body(req);
+        if (Object.keys(value).length) throw new AppError('Ожидается пустой JSON-объект');
+        return json(backupManager().create(), 201);
+      }
+      if (path === '/api/backups/upload' && method === 'POST') {
+        if (req.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/octet-stream') {
+          throw new AppError('Нужен Content-Type: application/octet-stream', 415);
+        }
+        if (backupUploading) throw new AppError('Дождитесь завершения загрузки бэкапа.', 429);
+        let name: string;
+        try { name = decodeURIComponent(req.headers.get('x-backup-name') ?? ''); }
+        catch { throw new AppError('Некорректное имя бэкапа'); }
+        backupUploading = true;
+        try { return json(backupManager().upload(await readBody(req, BACKUP_MAX_BYTES), name), 201); }
+        finally { backupUploading = false; }
+      }
+      const backupMatch = path.match(/^\/api\/backups\/([^/]+)(?:\/(select|download))?$/);
+      if (backupMatch) {
+        const action = backupMatch[2];
+        let id: string;
+        try { id = decodeURIComponent(backupMatch[1]!); }
+        catch { throw new AppError('Бэкап не найден', 404); }
+        const manager = backupManager();
+        if (action === 'download' && (method === 'GET' || method === 'HEAD')) {
+          const backup = manager.download(id!);
+          const file = Bun.file(backup.path);
+          return new Response(method === 'HEAD' ? null : file, { headers: { ...securityHeaders,
+            'Content-Type': 'application/vnd.sqlite3', 'Content-Length': String(file.size),
+            'Content-Disposition': attachmentDisposition(backup.name), 'Cross-Origin-Resource-Policy': 'same-origin',
+          } });
+        }
+        if (action === 'select' && method === 'POST') {
+          const value = await body(req);
+          if (Object.keys(value).length) throw new AppError('Ожидается пустой JSON-объект');
+          if (!options.restoreBackup) throw new AppError('Восстановление недоступно для этого запуска сервера.', 503);
+          await options.restoreBackup(manager, id!);
+          return json(manager.list().backups.find(backup => backup.id === id));
+        }
+        if (!action && method === 'DELETE') {
+          await body(req);
+          manager.delete(id!);
+          return json({ ok: true });
+        }
+      }
       if (path === '/api/info' && method === 'GET') {
         const info: AppInfo = { mode: engine.mock ? 'mock' : 'cli', cwd: generalSettings().defaultCwd, scheduler: 'running', startedAt,
           providers: [{ id: 'codex', available: engine.mock || !!Bun.which('codex'), label: 'Codex' }, { id: 'claude', available: engine.mock || !!Bun.which('claude'), label: 'Claude Code' }] };

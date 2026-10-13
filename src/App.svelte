@@ -5,6 +5,7 @@
   import ModelSettings from './lib/ModelSettings.svelte';
   import GeneralSettings from './lib/GeneralSettings.svelte';
   import AutopilotSettings from './lib/AutopilotSettings.svelte';
+  import Backups from './lib/Backups.svelte';
   import Instructions from './lib/Instructions.svelte';
   import Autopilot from './lib/Autopilot.svelte';
   import CliSetup from './lib/CliSetup.svelte';
@@ -69,7 +70,8 @@
   let autopilotSettingsSequence = 0;
   let autopilotSettingsReadSequence: number | null = null;
   let autopilotSettingsMutationPending = $state(false);
-  let settingsMutationPending = $derived(modelMutationPending || generalSettingsMutationPending || autopilotSettingsMutationPending);
+  let backupsMutationPending = $state(false);
+  let settingsMutationPending = $derived(modelMutationPending || generalSettingsMutationPending || autopilotSettingsMutationPending || backupsMutationPending);
   let integrationChecksMissing = $derived(info?.mode === 'cli' && !autopilotSettings?.integrationChecks?.length);
   const integrationChecksRequired = 'Сначала задайте BRIGD_INTEGRATION_CHECKS в Настройки → Автопилот.';
   let loading = $state(true);
@@ -107,6 +109,7 @@
     { id: 'models', label: 'Модели', icon: 'spark' },
     { id: 'permissions', label: 'Разрешения', icon: 'lock' },
     { id: 'autopilot', label: 'Автопилот', icon: 'moon' },
+    { id: 'backups', label: 'Бэкапы', icon: 'archive' },
   ] as const;
   let settingsSection = $state<(typeof settingsSections)[number]['id']>('general');
   const themeGroups = [{ scheme: 'light', label: 'Светлые' }, { scheme: 'dark', label: 'Тёмные' }] as const;
@@ -1210,6 +1213,9 @@
       </div>
       <div id="settings-autopilot-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-autopilot-tab" hidden={settingsSection !== 'autopilot'}>
         {#if settingsOpen}<AutopilotSettings settings={autopilotSettings} loading={autopilotSettingsLoading} error={autopilotSettingsError} retry={() => { void loadAutopilotSettings(); }} onchange={autopilotSettingsChanged} onmutation={autopilotSettingsMutationStarted} bind:busy={autopilotSettingsMutationPending} />{/if}
+      </div>
+      <div id="settings-backups-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-backups-tab" hidden={settingsSection !== 'backups'}>
+        {#if settingsOpen}<Backups active={settingsSection === 'backups'} bind:busy={backupsMutationPending} />{/if}
       </div>
     </div>
   </div>

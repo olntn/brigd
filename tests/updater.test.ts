@@ -14,6 +14,7 @@ interface Observation {
   workspacesDir: string;
   cliHome: string;
   defaultCwd: string;
+  updateBackupDir: string;
   mode: string;
   persistent: string;
   workspace: string;
@@ -69,7 +70,7 @@ await activated;
 appendFileSync(process.env.UPDATER_FIXTURE_OBSERVATIONS!, JSON.stringify({
   version: ${JSON.stringify(version)}, root, cwd: process.cwd(), databaseExistedBeforeOpen,
   dbPath: config.dbPath, workspacesDir: config.workspacesDir,
-  cliHome: config.cliHome, defaultCwd: config.defaultCwd, mode: config.mode,
+  cliHome: config.cliHome, defaultCwd: config.defaultCwd, updateBackupDir: config.updateBackupDir, mode: config.mode,
   persistent: (db.query('SELECT value FROM persistent WHERE key=?').get('user') as any).value,
   workspace: readFileSync(resolve(config.workspacesDir, 'retained-worktree.txt'), 'utf8'),
   cli: readFileSync(resolve(config.cliHome, '.claude/session.txt'), 'utf8'),
@@ -174,6 +175,7 @@ describe('native startup updater', () => {
     expect(f.observations()[0]).toMatchObject({
       version: '0.2.0', cwd: f.root, dbPath: f.dbPath,
       workspacesDir: f.workspacesDir, cliHome: f.cliHome, defaultCwd: f.project,
+      updateBackupDir: join(f.root, '.brigd-updates', 'backup'),
       mode: 'mock', persistent: 'existing user data', workspace: 'worktree state', cli: 'existing CLI session',
     });
     expect(f.observations()[0]!.root).toStartWith(join(f.root, '.brigd-updates', 'releases'));

@@ -42,7 +42,8 @@ export function readConfig(root: string, env: Environment = process.env) {
   }
   // Where the CLI setup buttons look for ~/.claude and ~/.codex; tests point it at a scratch folder.
   const cliHome = resolve(root, setting('CLI_HOME') ?? homedir());
+  const updateBackupDir = resolve(root, setting('UPDATE_BACKUP_DIR') ?? '.brigd-updates/backup');
   const integrator = setting('INTEGRATOR') ?? 'auto';
   if (!['auto', 'manual'].includes(integrator)) throw new Error('BRIGD_INTEGRATOR должен быть auto или manual');
-  return { mode, cliAccess: cliAccess as CliAccessMode, port, hostname, allowedHosts, allowedOrigins, dbPath, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile: integrator === 'auto', dev: setting('DEV') === '1', defaultCwd: setting('DEFAULT_CWD'), cliHome };
+  return { mode, cliAccess: cliAccess as CliAccessMode, port, hostname, allowedHosts, allowedOrigins, dbPath, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile: integrator === 'auto', dev: setting('DEV') === '1', defaultCwd: setting('DEFAULT_CWD'), cliHome, updateBackupDir };
 }

@@ -70,6 +70,16 @@ export interface GeneralSettings {
   defaultSchedule: TaskInput['schedule'];
 }
 
+export interface BackupEntry {
+  id: string;
+  name: string;
+  source: 'manual' | 'upload' | 'update';
+  createdAt: number;
+  size: number;
+  selected: boolean;
+}
+export interface BackupOverview { backups: BackupEntry[]; selectedId: string | null; }
+
 export interface AutopilotSettings {
   integrationChecks: string[][] | null;
   source: 'settings' | 'environment' | null;
