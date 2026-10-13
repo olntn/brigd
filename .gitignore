@@ -8,6 +8,7 @@ data/
 .claude.json
 projects/
 backup/
+.brigd-updates/
 *.log
 playwright-report/
 test-results/

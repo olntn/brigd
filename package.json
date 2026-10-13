@@ -1,6 +1,7 @@
 {
   "name": "brigd",
   "version": "0.1.0",
+  "brigdUpdaterProtocol": 1,
   "private": true,
   "type": "module",
   "engines": {
@@ -10,7 +11,8 @@
     "dev": "bun scripts/dev.ts",
     "dev:demo": "BRIGD_MODE=mock bun scripts/dev.ts",
     "build": "vite build && bun build server/task-mcp-stdio.ts --target=bun --outfile=dist/task-mcp-stdio.js",
-    "start": "bun server/index.ts",
+    "start": "bun scripts/start.ts",
+    "start:local": "bun server/index.ts",
     "demo": "BRIGD_MODE=mock BRIGD_DB=data/demo.sqlite bun server/index.ts",
     "check": "svelte-check --tsconfig ./tsconfig.json && tsc --noEmit -p tsconfig.server.json",
     "test": "bun test ./tests",

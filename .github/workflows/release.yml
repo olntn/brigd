@@ -1,0 +1,52 @@
+name: Release brigd
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: brigd-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - name: Validate stable tag and updater protocol
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          bun -e '
+            const manifest = await Bun.file("package.json").json();
+            const tag = process.env.RELEASE_TAG;
+            if (!/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag ?? "")) {
+              throw new Error("Release tag must be a stable vX.Y.Z version");
+            }
+            if (tag !== `v${manifest.version}`) {
+              throw new Error("Release tag must match package.json version");
+            }
+            if (manifest.brigdUpdaterProtocol !== 1) {
+              throw new Error("Release must support brigdUpdaterProtocol 1");
+            }
+          '
+      - run: bun install --frozen-lockfile
+      - run: bun run verify
+      - run: bun run test:smoke
+      - run: bun run test:attachments-runtime
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish stable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" --repo "$GH_REPO" --verify-tag --generate-notes
