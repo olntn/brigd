@@ -267,9 +267,10 @@ export interface TaskLog {
   kind: string;
   summary: string;
   details: string[];
+  error?: string;
   createdAt: number;
 }
-export type TaskLogInput = Pick<TaskLog, 'kind' | 'summary' | 'details'>;
+export type TaskLogInput = Pick<TaskLog, 'kind' | 'summary' | 'details' | 'error'>;
 export interface TaskDetail { task: Task; runs: Run[]; comments: Comment[]; logs?: TaskLog[]; attachments?: Attachment[]; }
 export interface AppInfo {
   mode: 'mock' | 'cli';

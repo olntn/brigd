@@ -13,6 +13,7 @@ import { validateInstruction, validateInstructionPatch, validateInstructionSnaps
 import { AppError } from './errors';
 import { validateWorkflowSteps } from './workflows';
 import { validateSessionId } from './protocol';
+import { sanitizeLogError } from './log-errors';
 import { effortOptions, INTEGRATOR_WORKER_ID, integratorSnapshot, isBuiltinWorker, MODEL_CATALOG_PROVIDER_LIMIT, modelPresets, normalizeModel, normalizeWorkerDescription } from '../src/lib/workers';
 import { validateModel, validateModelPatch } from './models';
 import { followupRequestText, validateFollowup } from './followups';
@@ -283,6 +284,7 @@ export class Store {
         ['runs', 'workspace_id', 'TEXT'],
         ['runs', 'reconcile_snapshot', 'TEXT'],
         ['comments', 'step_index', 'INTEGER'],
+        ['task_logs', 'error', 'TEXT'],
         ['tasks', 'archived_at', 'INTEGER'],
       ]) {
         if (!(this.db.query(`PRAGMA table_info(${table})`).all() as Row[]).some(row => row.name === column)) {
@@ -1050,7 +1052,7 @@ export class Store {
     return { task: this.getTask(id), attachments: this.listTaskAttachments(id), runs: (this.db.query('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC').all(id) as Row[]).map(r => this.mapRun(r)),
       logs: (this.db.query('SELECT * FROM task_logs WHERE task_id = ? ORDER BY seq').all(id) as Row[]).map(row => ({
         id: row.id, taskId: row.task_id, runId: row.run_id, stepIndex: row.step_index, kind: row.kind,
-        summary: row.summary, details: JSON.parse(row.details), createdAt: row.created_at,
+        summary: row.summary, details: JSON.parse(row.details), ...(row.error ? { error: row.error } : {}), createdAt: row.created_at,
       })),
       comments: (this.db.query('SELECT * FROM comments WHERE task_id = ? ORDER BY seq').all(id) as Row[]).map(r => this.mapComment(r)) };
   }
@@ -1130,10 +1132,11 @@ export class Store {
     this.getTask(taskId);
     const run = runId ? this.getRun(runId) : null;
     if (run && run.taskId !== taskId) throw new AppError('Запуск относится к другой задаче', 409);
+    const error = sanitizeLogError(entry.error);
     const log: TaskLog = { id: crypto.randomUUID(), taskId, runId, stepIndex: stepIndex === undefined && run ? run.currentStepIndex : stepIndex ?? null,
-      kind: entry.kind.slice(0, 40), summary: entry.summary.slice(0, 500), details: entry.details.slice(0, 40).map(line => line.slice(0, 1000)), createdAt: now };
-    this.db.query('INSERT INTO task_logs(id,task_id,run_id,step_index,kind,summary,details,created_at) VALUES (?,?,?,?,?,?,?,?)')
-      .run(log.id, taskId, runId, log.stepIndex, log.kind, log.summary, JSON.stringify(log.details), now);
+      kind: entry.kind.slice(0, 40), summary: entry.summary.slice(0, 500), details: entry.details.slice(0, 40).map(line => line.slice(0, 1000)), ...(error ? { error } : {}), createdAt: now };
+    this.db.query('INSERT INTO task_logs(id,task_id,run_id,step_index,kind,summary,details,error,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(log.id, taskId, runId, log.stepIndex, log.kind, log.summary, JSON.stringify(log.details), error ?? null, now);
     return log;
   }
   private insertRun(task: Task, trigger: Run['trigger'], scheduledFor: number | null, mock: boolean, now: number): Run {

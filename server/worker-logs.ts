@@ -1,4 +1,5 @@
 import type { TaskLogInput } from '../src/lib/types';
+import { sanitizeLogError } from './log-errors';
 
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const safeName = (value: unknown): string | undefined => typeof value === 'string' && /^[a-zA-Z0-9_.:/-]{1,120}$/.test(value) ? value : undefined;
@@ -6,7 +7,7 @@ const safePath = (value: unknown): string | undefined => typeof value === 'strin
 const executableNames = new Set(['bun', 'npm', 'npx', 'pnpm', 'yarn', 'node', 'python', 'python3', 'pytest', 'git', 'rg', 'grep', 'cat', 'sed', 'ls', 'find', 'head', 'tail', 'wc', 'pwd', 'cd', 'tsc', 'cargo', 'go', 'make', 'docker', 'curl', 'wget', 'mkdir', 'cp', 'mv', 'rm', 'touch', 'chmod', 'apply_patch']);
 const subcommands = new Set(['test', 'run', 'build', 'check', 'lint', 'format', 'install', 'status', 'diff', 'show', 'log', 'ls-files', 'rev-parse', 'fetch', 'pull', 'push', 'commit', 'add', 'checkout', 'switch', 'restore', 'reset', 'branch', 'merge', 'rebase', '--files', '--version']);
 
-/** Project operation metadata only: no shell source, arbitrary arguments, output, or reasoning. */
+/** Operation metadata excludes shell source, arbitrary arguments and successful output. */
 export function commandMetadata(command: unknown): { label: string; details: string[] } {
   if (typeof command !== 'string') return { label: 'локальная команда', details: [] };
   let source = command.trim();
@@ -48,12 +49,14 @@ export function codexActionLog(item: Record<string, unknown>, completed: boolean
   const failed = item.status === 'failed' || (typeof item.exit_code === 'number' && item.exit_code !== 0) || item.error != null;
   const state = completed ? failed ? 'завершено с ошибкой' : 'завершено' : 'выполняется';
   const details = [`Состояние: ${state}.`];
+  const error = completed && failed ? sanitizeLogError(item.error) : undefined;
   if (item.type === 'command_execution') {
     const command = commandMetadata(item.command);
     details.push(...command.details);
     if (typeof item.exit_code === 'number') details.push(`Код завершения: ${item.exit_code}.`);
     if (typeof item.aggregated_output === 'string') details.push(`Объём вывода: ${new TextEncoder().encode(item.aggregated_output).byteLength} байт.`);
-    return { kind: 'command', summary: `${completed ? failed ? 'Ошибка команды' : 'Команда завершена' : 'Выполняет команду'}: ${command.label}`, details };
+    return { kind: 'command', summary: `${completed ? failed ? 'Ошибка команды' : 'Команда завершена' : 'Выполняет команду'}: ${command.label}`, details,
+      error: completed && failed ? sanitizeLogError(item.aggregated_output) ?? error : undefined };
   }
   if (item.type === 'file_change') {
     const changes = Array.isArray(item.changes) ? item.changes.filter(record) : [];
@@ -63,7 +66,7 @@ export function codexActionLog(item: Record<string, unknown>, completed: boolean
       if (path) details.push(`${action}: ${path}`);
     }
     details.push(`Файлов в операции: ${changes.length}.`);
-    return { kind: 'file', summary: `${completed ? failed ? 'Ошибка изменения файлов' : 'Изменения файлов сохранены' : 'Изменяет файлы'}${changes.length ? ` (${changes.length})` : ''}`, details };
+    return { kind: 'file', summary: `${completed ? failed ? 'Ошибка изменения файлов' : 'Изменения файлов сохранены' : 'Изменяет файлы'}${changes.length ? ` (${changes.length})` : ''}`, details, error };
   }
   if (item.type === 'mcp_tool_call') {
     const tool = safeName(item.tool) ?? 'MCP';
@@ -71,12 +74,12 @@ export function codexActionLog(item: Record<string, unknown>, completed: boolean
     if (server) details.push(`Сервер: ${server}.`);
     details.push(`Инструмент: ${tool}.`, ...toolMetadata(item.arguments));
     if (record(item.result) && Array.isArray(item.result.content)) details.push(`Блоков результата: ${item.result.content.length}.`);
-    return { kind: 'tool', summary: `${completed ? failed ? 'Ошибка инструмента' : 'Инструмент завершён' : 'Вызывает инструмент'}: ${tool}`, details };
+    return { kind: 'tool', summary: `${completed ? failed ? 'Ошибка инструмента' : 'Инструмент завершён' : 'Вызывает инструмент'}: ${tool}`, details, error };
   }
   if (item.type === 'web_search') {
     details.push('Операция: поиск во внешних источниках.');
     if (record(item.action)) details.push(...toolMetadata(item.action));
-    return { kind: 'search', summary: completed ? 'Поиск во внешних источниках завершён' : 'Ищет информацию во внешних источниках', details };
+    return { kind: 'search', summary: completed ? failed ? 'Ошибка поиска во внешних источниках' : 'Поиск во внешних источниках завершён' : 'Ищет информацию во внешних источниках', details, error };
   }
   return null;
 }

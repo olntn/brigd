@@ -108,11 +108,37 @@ describe('provider protocol', () => {
     const result = parse('claude', [claude()[0], { ...claude()[1], permission_denials: [{ tool_name: 'Bash' }] }]);
     expect(result.outcome.envelope.status).toBe('blocked');
     expect(result.outcome.envelope.questions).toEqual([]);
+    expect(result.outcome.envelope.summary).toContain('Инструменты: Bash.');
+    expect(result.outcome.envelope.summary).toContain('Настройки → Разрешения');
+    expect(result.outcome.envelope.summary).toContain(`claude --resume ${sid}`);
+    expect(result.outcome.envelope.summary).toContain('Отправить агенту');
+  });
+  test('Claude denial diagnostics keep safe operation metadata, without raw inputs or errors', () => {
+    const result = parse('claude', [claude()[0], { ...claude()[1], permission_denials: [
+      { tool_name: 'Bash', tool_input: { command: 'bun run build --token PRIVATE_TOKEN', token: 'PRIVATE_SECRET' } },
+      { tool_name: 'Bash', tool_input: { command: 'bun run build --token PRIVATE_TOKEN', token: 'PRIVATE_SECRET' } },
+      { tool_name: 'WebFetch', tool_input: { url: 'https://example.com/docs?token=PRIVATE_SECRET' } },
+      { tool_name: 'Edit\nPRIVATE_NAME', tool_input: { content: 'PRIVATE_CONTENT' } },
+    ] }]);
+    expect(result.outcome.envelope.summary).toContain('Инструменты: Bash, WebFetch.');
+    const denials = result.callbacks.logs.filter(log => log.summary.startsWith('CLI отклонил инструмент:'));
+    expect(denials).toHaveLength(3);
+    expect(denials[0]?.details).toContain('Программа: bun run build.');
+    expect(denials[1]?.details).toContain('Источник: example.com');
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_');
   });
   test('pending native control requests block without pretending to ask a task question', () => {
     const result = parse('claude', [claude()[0], { type: 'control_request', request: { subtype: 'can_use_tool' } }], 143);
     expect(result.outcome.envelope.status).toBe('blocked');
-    expect(result.outcome.envelope.summary).toContain('cannot grant tool permissions');
+    expect(result.outcome.envelope.summary).toContain('Комментарий в задаче не выдаёт разрешений CLI');
+  });
+  test('native Claude control requests identify the denied tool and safe operation', () => {
+    const result = parse('claude', [claude()[0], { type: 'control_request', request: {
+      subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'npm test --token PRIVATE_TOKEN' },
+    } }], 143);
+    expect(result.outcome.envelope.summary).toContain('Инструменты: Bash.');
+    expect(result.callbacks.logs[0]?.details).toContain('Программа: npm test.');
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_');
   });
   test('intentional native approval stop ignores a truncated subsequent event', () => {
     const parser = new AgentProtocol('claude', capture());
@@ -129,6 +155,55 @@ describe('provider protocol', () => {
   test('Claude tool permission error is blocked', () => {
     const denied = { type: 'user', message: { content: [{ type: 'tool_result', is_error: true, content: 'Permission was denied.' }] } };
     expect(parse('claude', [...claude(), denied]).outcome.envelope.status).toBe('blocked');
+  });
+  test('an ambiguous tool access error does not claim that native permission approval will fix it', () => {
+    const result = parse('claude', [claude()[0],
+      { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'bash-access', name: 'Bash', input: { command: './check.sh --token PRIVATE_TOKEN' } }] } },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'bash-access', is_error: true, content: '/bin/sh: ./check.sh: Permission denied\ntoken=PRIVATE_OUTPUT' }] } },
+    ]);
+    expect(result.outcome.envelope.status).toBe('blocked');
+    expect(result.outcome.envelope.summary).toContain('отказе доступа или ограничении среды');
+    expect(result.outcome.envelope.summary).toContain('Инструменты: Bash.');
+    expect(result.outcome.envelope.summary).not.toContain('Настроить разрешения Claude Code');
+    expect(result.callbacks.logs.at(-1)?.summary).toBe('Ошибка доступа при вызове инструмента: Bash');
+    expect(result.callbacks.logs.find(log => log.summary === 'Ошибка инструмента: Bash')?.error).toContain('/bin/sh: ./check.sh: Permission denied');
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_');
+  });
+  test('Claude failed tool text blocks remain copyable diagnostics while successful content stays private', () => {
+    const result = parse('claude', [claude()[0],
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'failure', is_error: true, content: [
+        { type: 'text', text: 'Check failed at line 12.' },
+        { type: 'text', text: 'Authorization: Bearer PRIVATE_TOKEN' },
+        { type: 'image', data: 'PRIVATE_IMAGE' },
+      ] }] } },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'success', content: 'PRIVATE_SOURCE' }] } },
+      claude()[1],
+    ]);
+    expect(result.callbacks.logs[0]?.error).toContain('Check failed at line 12.\nAuthorization:');
+    expect(result.callbacks.logs[1]?.error).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_');
+  });
+  test('Codex failed command output and CLI errors become copyable diagnostics', () => {
+    const result = parse('codex', [...codex(), { type: 'item.completed', item: {
+      id: 'cmd-failed', type: 'command_execution', command: 'bun test', status: 'failed', exit_code: 1,
+      aggregated_output: 'Assertion failed\n--password PRIVATE_PASSWORD',
+    } }]);
+    expect(result.callbacks.logs[0]?.error).toContain('Assertion failed');
+    expect(result.callbacks.logs[0]?.error).not.toContain('PRIVATE_PASSWORD');
+    const callbacks = capture(), parser = new AgentProtocol('claude', callbacks);
+    parser.accept(claude()[0]);
+    parser.accept({ type: 'error', message: 'Provider unavailable\napi_key=PRIVATE_KEY' });
+    expect(() => parser.finish(1)).toThrow('failed turn');
+    expect(callbacks.logs[0]?.error).toContain('Provider unavailable');
+    expect(JSON.stringify(callbacks.logs)).not.toContain('PRIVATE_KEY');
+  });
+  test.each(['file_change', 'mcp_tool_call', 'web_search'])('Codex failed %s retains its filtered error', type => {
+    const result = parse('codex', [...codex(), { type: 'item.completed', item: {
+      id: 'failed-operation', type, status: 'failed', error: { message: 'Service unavailable\ntoken=PRIVATE_TOKEN' },
+    } }]);
+    expect(result.callbacks.logs[0]?.error).toBe('Service unavailable\ntoken=[скрыто]');
+    expect(result.callbacks.logs[0]?.summary).toStartWith('Ошибка');
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_TOKEN');
   });
   test('duplicate tool actions become logs and never leak arbitrary commands, tool output, or reasoning into conversation', () => {
     const events = Array(25).fill({ type: 'item.started', item: { type: 'command_execution', command: 'SECRET', aggregated_output: 'SECRET' } });

@@ -40,6 +40,25 @@ test('worker logs survive reopening in insertion order and cannot refer to anoth
   expect(store.detail(another.id).logs).toEqual([]);
 });
 
+test('error logs migrate an older database and preserve redacted multiline diagnostics after reopening', () => {
+  const task = store.createTask(input(), BASE);
+  const run = store.startManual(task.id, true, BASE);
+  const legacy = store.log(task.id, run.id, { kind: 'tool', summary: 'Ошибка инструмента: Bash', details: [] }, BASE + 1);
+  store.db.exec('ALTER TABLE task_logs DROP COLUMN error');
+  store.close();
+  store = new Store(join(folder, 'trackt.sqlite'));
+  expect(store.detail(task.id).logs).toEqual([legacy]);
+  const error = store.log(task.id, run.id, {
+    kind: 'tool', summary: 'Ошибка инструмента: Bash', details: [],
+    error: '\u001b[31mPermission denied\u001b[0m\napi_key=private-value\nTry /permissions.',
+  }, BASE + 2);
+  expect(error.error).toBe('Permission denied\napi_key=[скрыто]\nTry /permissions.');
+  store.close();
+  store = new Store(join(folder, 'trackt.sqlite'));
+  expect(store.detail(task.id).logs).toEqual([legacy, error]);
+  expect(store.detail(task.id).comments.some(comment => comment.body.includes('private-value'))).toBe(false);
+});
+
 describe('recurrence and durable scheduling', () => {
   test.each([
     [BASE, 5, BASE, BASE, BASE + 5 * MINUTE],

@@ -578,6 +578,15 @@ dialog::backdrop { background: var(--overlay); }
 .log-details p { margin: 0 0 8px; font-size: .85rem; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--secondary); }
 .log-details p:last-child { margin-bottom: 0; }
 .log-details .log-run-reference { font-size: .77rem; color: var(--muted); }
+.task-log.has-error { border-color: var(--error-line); }
+.task-log.has-error .log-icon { color: var(--error); background: var(--error-bg); }
+.log-error { margin-top: 12px; padding: 12px; border: 1px solid var(--error-line); border-radius: var(--radius-md); background: var(--error-bg); color: var(--error); min-width: 0; }
+.log-error-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.log-error-heading strong { font-size: .85rem; font-weight: 500; }
+.log-error-heading .button { padding: 7px 9px; font-size: .77rem; }
+.log-error-text { margin: 0; font-size: .85rem; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.log-details .log-error p { color: var(--error); }
+.log-details .log-copy-error { margin-top: 8px; }
 .drawer-topbar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px 24px; padding: 15px 24px; border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0; z-index: 2; }.drawer-task-ref { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; font-size: .85rem; color: var(--muted); }.drawer-task-ref > svg { flex-shrink: 0; }.drawer-topbar > .icon-button { grid-column: 3; grid-row: 1; align-self: start; }.detail-ref { font-size: .69rem; letter-spacing: .7px; }
 .drawer-heading { padding: 25px 26px 22px; }.drawer-badges { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; }.drawer-heading h2 { font-size: 1.85rem; font-weight: 550; line-height: 1.5; letter-spacing: -.5px; margin: 0; overflow-wrap: anywhere; }.detail-created { font-size: .77rem; color: var(--muted); margin: 10px 0 19px; }.detail-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }.detail-actions .button { padding: 9px 11px; }.schedule-pause { border: 1px solid var(--line); border-radius: var(--radius-md); margin-left: auto; }
 .detail-next-run { display: flex; align-items: flex-start; gap: 7px; margin: -9px 0 19px; color: var(--muted); font-size: .77rem; line-height: 1.6; overflow-wrap: anywhere; }.detail-next-run svg { flex-shrink: 0; margin-top: 1px; }

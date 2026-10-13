@@ -383,6 +383,7 @@ export class Engine {
             ...(run.currentStepIndex !== null ? [`Этап: ${run.currentStepIndex + 1} из ${run.steps.length}.`] : []),
             ...(envelope.questions.length ? [`Вопросов пользователю: ${envelope.questions.length}.`] : []),
             result.status === 'running' ? 'Результат сохранён. Начинается следующий этап.' : 'Ответ работника сохранён в комментариях.'],
+          ...(status === 'blocked' ? { error: envelope.summary } : {}),
         }, Date.now(), run.currentStepIndex);
         this.store.recordAgentSummary(run.taskId, run.id, status === 'completed' ? 'result' : 'agent', envelope.summary, commentCursor, Date.now(), run.currentStepIndex);
         for (const question of envelope.questions) this.store.comment(run.taskId, run.id, 'question', question, Date.now(), run.currentStepIndex);
@@ -403,6 +404,7 @@ export class Engine {
     this.store.db.transaction(() => {
       if (!this.store.isCurrent(run.id, fence)) return;
       this.store.finish(run.id, 'failed', null, message.slice(0, 16_000), Date.now(), fence);
+      this.store.log(run.taskId, run.id, { kind: 'lifecycle', summary: 'Ошибка запуска работника', details: [], error: message }, Date.now(), run.currentStepIndex);
       this.store.comment(run.taskId, run.id, 'system', message.slice(0, 16_000), Date.now(), run.currentStepIndex);
     }).immediate();
   }

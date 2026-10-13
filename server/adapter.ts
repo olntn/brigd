@@ -481,7 +481,8 @@ export function startAgent(input: AgentInput, callbacks: AgentCallbacks): AgentH
           protocol.push(chunk);
           if (protocol.permissionBlocked) throw nativeApprovalStop;
         },
-        // Never persist stderr, raw tool output, reasoning, credentials, or full process arguments.
+        // Stderr is not collected. The protocol retains filtered failed-tool diagnostics,
+        // never successful tool output, reasoning, or full process arguments.
       });
       try { return protocol.finish(exitCode); }
       catch (error) {

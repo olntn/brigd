@@ -1,5 +1,6 @@
 import type { Envelope, Provider, TaskLogInput } from '../src/lib/types';
 import { claudeToolLog, codexActionLog } from './worker-logs';
+import { sanitizeLogError } from './log-errors';
 
 export const MAX_JSONL_LINE_BYTES = 1024 * 1024;
 export const MAX_PROTOCOL_EVENTS = 50000;
@@ -74,6 +75,8 @@ export class AgentProtocol {
   private failure = false;
   private finalResponse: unknown;
   private nativeBlock = false;
+  private nativePermissionRequest = false;
+  private blockedTools = new Set<string>();
   private seenLogs = new Set<string>();
   private pendingTools = new Map<string, TaskLogInput>();
   private pending = '';
@@ -133,6 +136,33 @@ export class AgentProtocol {
     this.callbacks.onLog?.(entry);
   }
 
+  private blockClaudeTool(tool: unknown, input: unknown): void {
+    // Reuse the operation metadata filter; never persist the raw denied input or error.
+    const log = claudeToolLog(tool, input);
+    this.recordBlockedTool(log);
+  }
+
+  private recordBlockedTool(log: TaskLogInput, explicit = true): void {
+    const name = log.details[0]?.match(/^Инструмент: (.+)\.$/)?.[1];
+    if (name && name !== 'локальный инструмент' && this.blockedTools.size < 20) this.blockedTools.add(name);
+    const details = log.details.filter(line => !line.startsWith('Состояние:'));
+    details.push(explicit ? 'Состояние: доступ отклонён CLI.' : 'Состояние: ошибка доступа.');
+    const summary = `${explicit ? 'CLI отклонил инструмент' : 'Ошибка доступа при вызове инструмента'}: ${name ?? 'локальный инструмент'}`;
+    this.log(`permission:${JSON.stringify(details)}`, { kind: 'tool', summary, details });
+  }
+
+  private blockedSummary(): string {
+    if (this.provider !== 'claude') return 'The CLI requires native permission approval. brigd cannot grant tool permissions from task comments. Review the session in the provider’s terminal.';
+    const reason = this.nativePermissionRequest
+      ? 'Claude Code не разрешил использование инструмента.'
+      : 'Claude Code сообщил об отказе доступа или ограничении среды.';
+    const tools = this.blockedTools.size ? ` Инструменты: ${[...this.blockedTools].join(', ')}.` : '';
+    const next = this.nativePermissionRequest
+      ? 'Откройте Настройки → Разрешения → Настроить разрешения Claude Code. Если базовые правила уже добавлены, проверьте отклонённую операцию в логах и правила ask/deny через /permissions в терминале Claude Code: они имеют приоритет над allow.'
+      : 'Проверьте отклонённую операцию в логах и права доступа в рабочей папке; добавление allow-правила не устраняет ограничения файловой системы или песочницы.';
+    return `${reason}${tools} ${next} Сессию можно открыть из рабочей папки запуска: claude --resume ${this.sessionId}. Комментарий в задаче не выдаёт разрешений CLI. После устранения причины отправьте «Продолжи задачу» через «Отправить агенту»; для этапа сложной задачи используйте повтор этапа.`;
+  }
+
   accept(event: unknown): void {
     if (!record(event) || typeof event.type !== 'string') throw new ProtocolError('The CLI emitted an invalid event.');
     if (++this.eventCount > MAX_PROTOCOL_EVENTS) throw new ProtocolError('CLI output exceeded the event limit.');
@@ -145,10 +175,21 @@ export class AgentProtocol {
         ['approval_request', 'permission_request', 'approval.required', 'permission.denied'].includes(event.type) ||
         (event.type === 'control_request' && record(event.request) && event.request.subtype === 'can_use_tool')) {
       this.nativeBlock = true;
+      this.nativePermissionRequest = true;
+      if (this.provider === 'claude') {
+        if (Array.isArray(event.permission_denials)) {
+          for (const denial of event.permission_denials.slice(0, 20)) {
+            if (record(denial)) this.blockClaudeTool(denial.tool_name, denial.tool_input);
+          }
+        }
+        if (event.type === 'control_request' && record(event.request)) this.blockClaudeTool(event.request.tool_name, event.request.input);
+      }
     }
 
     if (event.type === 'error' || event.type === 'turn.failed') {
-      if (isPermissionDenial(errorText(event.error) || errorText(event.message))) this.nativeBlock = true;
+      const text = errorText(event.error) || errorText(event.message);
+      this.log(`error:${this.eventCount}`, { kind: 'lifecycle', summary: `Ошибка ${this.provider === 'claude' ? 'Claude Code' : 'Codex'}`, details: [], error: sanitizeLogError(text) });
+      if (isPermissionDenial(text)) this.nativeBlock = true;
       else this.failure = true;
     }
 
@@ -165,6 +206,7 @@ export class AgentProtocol {
               isPermissionDenial(errorText(item.aggregated_output) || errorText(item.error))) this.nativeBlock = true;
         }
         if (item.type === 'error') {
+          this.log(`error:${typeof item.id === 'string' ? item.id : this.eventCount}`, { kind: 'lifecycle', summary: 'Ошибка Codex', details: [], error: sanitizeLogError(errorText(item.message)) });
           if (isPermissionDenial(errorText(item.message))) this.nativeBlock = true;
           else this.failure = true;
         }
@@ -183,6 +225,9 @@ export class AgentProtocol {
           if (record(content) && content.type === 'tool_result') {
             const prior = typeof content.tool_use_id === 'string' ? this.pendingTools.get(content.tool_use_id) : undefined;
             const log = claudeToolLog(undefined, undefined, true, content.is_error === true);
+            const text = typeof content.content === 'string' ? content.content :
+              Array.isArray(content.content) ? content.content.filter(record).map(c => errorText(c.text)).filter(Boolean).join('\n') : '';
+            if (content.is_error === true) log.error = sanitizeLogError(text);
             if (prior) {
               log.summary = prior.summary.replace('Вызывает инструмент', content.is_error === true ? 'Ошибка инструмента' : 'Инструмент завершён');
               log.details.push(...prior.details.filter(line => !line.startsWith('Состояние:') && !line.startsWith('Инструмент:')));
@@ -191,12 +236,13 @@ export class AgentProtocol {
             if (typeof content.content === 'string') log.details.push(`Объём результата: ${new TextEncoder().encode(content.content).byteLength} байт.`);
             else if (Array.isArray(content.content)) log.details.push(`Блоков результата: ${content.content.length}.`);
             this.log(`completed:${typeof content.tool_use_id === 'string' ? content.tool_use_id : JSON.stringify(log)}`, log);
+            if (content.is_error === true) {
+              if (isPermissionDenial(text)) {
+                this.nativeBlock = true;
+                if (prior) this.recordBlockedTool(prior, false);
+              }
+            }
             if (typeof content.tool_use_id === 'string') this.pendingTools.delete(content.tool_use_id);
-          }
-          if (record(content) && content.type === 'tool_result' && content.is_error === true) {
-            const text = typeof content.content === 'string' ? content.content :
-              Array.isArray(content.content) ? content.content.filter(record).map(c => errorText(c.text)).join('\n') : '';
-            if (isPermissionDenial(text)) this.nativeBlock = true;
           }
         }
       }
@@ -204,6 +250,7 @@ export class AgentProtocol {
         this.terminal = true;
         if (event.subtype !== 'success' || event.is_error === true) {
           const details = [errorText(event.result), ...(Array.isArray(event.errors) ? event.errors.map(errorText) : [])].join('\n');
+          this.log(`result-error:${this.eventCount}`, { kind: 'lifecycle', summary: 'Ошибка Claude Code', details: [], error: sanitizeLogError(details) });
           if (isPermissionDenial(details)) this.nativeBlock = true;
           else this.failure = true;
         }
@@ -219,7 +266,7 @@ export class AgentProtocol {
     if (this.failure) throw new ProtocolError('The CLI reported a failed turn. No successful result was accepted.');
     if (this.nativeBlock) return {
       sessionId: this.sessionId,
-      envelope: { status: 'blocked', summary: 'The CLI requires native permission approval. brigd cannot grant tool permissions from task comments. Review the session in the provider’s terminal.', questions: [] },
+      envelope: { status: 'blocked', summary: this.blockedSummary(), questions: [] },
     };
     if (exitCode !== 0) throw new ProtocolError(`The CLI exited with code ${exitCode}. No successful result was accepted.`);
     if (!this.terminal) throw new ProtocolError('The CLI exited without a completed turn event.');

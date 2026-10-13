@@ -155,6 +155,68 @@ test('comments contain conversation while worker actions have separate expandabl
   await page.screenshot({ path: testInfo.outputPath('task-detail-desktop-logs.png') });
 });
 
+test('tool errors preserve multiline text, escape HTML and copy the exact saved error', async ({ page }) => {
+  const error = 'Bash: Permission denied.\n<script>window.logErrorExecuted = true</script>\n<img src=x onerror="window.logErrorExecuted = true">\n  Инструмент: Bash.\n';
+  const fixture = fixtureDetail();
+  fixture.logs![0].summary = 'Ошибка инструмента: Bash';
+  fixture.logs![0].error = error;
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+      writeText: async (value: string) => { (window as typeof window & { copiedLogError?: string }).copiedLogError = value; },
+    } });
+  });
+  const dialog = await openTask(page, fixture);
+  await dialog.getByRole('tab', { name: /Логи/ }).click();
+  const log = dialog.locator('.task-log').filter({ hasText: fixture.logs![0].summary });
+  const text = log.getByLabel('Текст ошибки', { exact: true });
+  await expect(text).not.toBeVisible();
+  await log.locator('summary').click();
+  await expect(text).toBeVisible();
+  expect(await text.textContent()).toBe(error);
+  await expect(text.locator('script, img')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as typeof window & { logErrorExecuted?: boolean }).logErrorExecuted)).toBeUndefined();
+  await log.getByRole('button', { name: 'Копировать ошибку', exact: true }).click();
+  await expect(log.getByRole('button', { name: 'Скопировано', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => (window as typeof window & { copiedLogError?: string }).copiedLogError)).toBe(error);
+});
+
+test('clipboard failure leaves the error available for manual copying', async ({ page }) => {
+  const fixture = fixtureDetail();
+  fixture.logs![0].error = 'Не удалось запустить инструмент.\nПовторите действие после настройки разрешений.';
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+      writeText: async () => { throw new Error('Clipboard is unavailable'); },
+    } });
+  });
+  const dialog = await openTask(page, fixture);
+  await dialog.getByRole('tab', { name: /Логи/ }).click();
+  const log = dialog.locator('.task-log').filter({ hasText: fixture.logs![0].summary });
+  await log.locator('summary').click();
+  await log.getByRole('button', { name: 'Копировать ошибку', exact: true }).click();
+  await expect(log.getByRole('status')).toHaveText('Не удалось скопировать. Выделите текст ошибки и скопируйте вручную.');
+  await expect(log.getByLabel('Текст ошибки', { exact: true })).toBeVisible();
+  await expect(log.getByRole('button', { name: 'Копировать ошибку', exact: true })).toBeEnabled();
+});
+
+test('older failed tool logs explain when their error text was not saved', async ({ page }) => {
+  const fixture = fixtureDetail();
+  fixture.runs[0].error = 'Ошибка всего запуска не является текстом ошибки инструмента.';
+  fixture.logs![0].summary = 'Ошибка инструмента: Bash';
+  fixture.logs![1].details = ['Состояние: завершено с ошибкой.'];
+  const dialog = await openTask(page, fixture);
+  await dialog.getByRole('tab', { name: /Логи/ }).click();
+  const logs = dialog.getByRole('tabpanel', { name: /Логи/ });
+  const failedLogs = logs.locator('.task-log.has-error');
+  await expect(failedLogs).toHaveCount(2);
+  for (const log of await failedLogs.all()) {
+    await log.locator('summary').click();
+    await expect(log.getByText('Текст ошибки не был сохранён. Для новых запусков он появится здесь.', { exact: true })).toBeVisible();
+    await expect(log.getByRole('button', { name: 'Копировать ошибку', exact: true })).toHaveCount(0);
+    await expect(log.getByLabel('Текст ошибки', { exact: true })).toHaveCount(0);
+  }
+  await expect(logs.getByText(fixture.runs[0].error, { exact: true })).toHaveCount(0);
+});
+
 test('a saved agent answer and its matching result appear as one final comment after reload', async ({ page }) => {
   const fixture = fixtureDetail();
   const answer = 'Привет! Я Codex, ИИ-помощник. Помогаю писать код и решать задачи.';
@@ -212,6 +274,7 @@ for (const theme of ['light', 'dark'] as const) {
     const longText = 'ПодробностиБезПробелов'.repeat(40);
     fixture.logs![0].summary = `Работник проверяет ${longText}`;
     fixture.logs![0].details.push(longText);
+    fixture.logs![0].error = `Ошибка инструмента.\n${longText}`;
     await page.setViewportSize({ width: 320, height: 640 });
     await page.addInitScript(value => localStorage.setItem('brigd.theme', value), theme);
     const dialog = await openTask(page, fixture);
@@ -232,6 +295,8 @@ for (const theme of ['light', 'dark'] as const) {
     const detail = log.getByText(longText, { exact: true });
     await detail.scrollIntoViewIfNeeded();
     await expect(detail).toBeInViewport();
+    await expect(log.getByLabel('Текст ошибки', { exact: true })).toBeVisible();
+    await expect(log.getByRole('button', { name: 'Копировать ошибку', exact: true })).toBeVisible();
     await expectNoHorizontalOverflow(page, dialog);
     const widths = await log.evaluate(node => ({ width: node.clientWidth, content: node.scrollWidth }));
     expect(widths.content, 'expanded log details wrap within their column').toBeLessThanOrEqual(widths.width + 1);
