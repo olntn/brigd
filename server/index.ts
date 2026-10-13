@@ -9,7 +9,7 @@ import { GitWorkspaces } from './workspaces';
 import { acquireServerStartupLock, assertDatabaseIdle } from './startup-lock';
 
 const root = resolve(import.meta.dir, '..');
-const { mode, port, hostname, allowedHosts, allowedOrigins, dbPath, dev, defaultCwd, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile, cliHome } = readConfig(root);
+const { mode, cliAccess, port, hostname, allowedHosts, allowedOrigins, dbPath, dev, defaultCwd, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile, cliHome } = readConfig(root);
 mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
 const managed = process.env.BRIGD_MANAGED_START === '1';
 if (managed && (!process.send || !process.env.BRIGD_STARTUP_TOKEN)) throw new Error('Управляемый запуск brigd требует скрипта запуска и IPC.');
@@ -18,7 +18,7 @@ assertDatabaseIdle(dbPath);
 const store = new Store(dbPath);
 if (process.platform !== 'win32') chmodSync(dbPath, 0o600);
 const lease = store.acquireLease();
-const engine = new Engine(store, mode === 'mock', undefined, undefined, { maxParallel, maxPerRepository, integrationChecks, autoReconcile, ...(mode === 'cli' ? { workspaces: new GitWorkspaces(workspacesDir, () => store.getIntegrationChecks() ?? integrationChecks) } : {}) });
+const engine = new Engine(store, mode === 'mock', undefined, undefined, { cliAccess, maxParallel, maxPerRepository, integrationChecks, autoReconcile, ...(mode === 'cli' ? { workspaces: new GitWorkspaces(workspacesDir, () => store.getIntegrationChecks() ?? integrationChecks) } : {}) });
 let active = false;
 const handler = createHandler(engine, { port, root, dev, allowedHosts, allowedOrigins, defaultCwd, cliHome });
 const server = Bun.serve({

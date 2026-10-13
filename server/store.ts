@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
+import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CliAccessMode, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { AUTOPILOT_FAILURE_LIMIT } from '../src/lib/autopilot';
@@ -336,6 +336,9 @@ export class Store {
     this.db.exec(`CREATE TABLE IF NOT EXISTS autopilot_settings (
       singleton INTEGER PRIMARY KEY CHECK(singleton=1), integration_checks TEXT
     ); INSERT OR IGNORE INTO autopilot_settings (singleton,integration_checks) VALUES (1,NULL)`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS cli_access_settings (
+      singleton INTEGER PRIMARY KEY CHECK(singleton=1), mode TEXT CHECK(mode IN ('standard','full'))
+    ); INSERT OR IGNORE INTO cli_access_settings (singleton,mode) VALUES (1,NULL)`);
     this.db.transaction(() => {
       this.db.exec(`CREATE TABLE IF NOT EXISTS general_settings (
         singleton INTEGER PRIMARY KEY CHECK(singleton=1), default_cwd TEXT,
@@ -412,6 +415,14 @@ export class Store {
     }).immediate();
   }
   close() { this.db.close(); }
+  getCliAccessMode(): CliAccessMode | undefined {
+    const row = this.db.query('SELECT mode FROM cli_access_settings WHERE singleton=1').get() as { mode: CliAccessMode | null };
+    return row.mode ?? undefined;
+  }
+  setCliAccessMode(value: unknown): void {
+    if (value !== 'standard' && value !== 'full') throw new AppError('Режим доступа должен быть standard или full');
+    this.db.query('UPDATE cli_access_settings SET mode=? WHERE singleton=1').run(value);
+  }
   getDefaultCwd(): string | null {
     const row = this.db.query('SELECT default_cwd FROM general_settings WHERE singleton=1').get() as { default_cwd: string | null };
     return row.default_cwd;

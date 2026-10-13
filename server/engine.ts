@@ -1,4 +1,4 @@
-import type { AutopilotInput, AutopilotOverview, AutopilotSettings, FollowupInput, Integration, Run } from '../src/lib/types';
+import type { AutopilotInput, AutopilotOverview, AutopilotSettings, CliAccessMode, CliAccessSettings, FollowupInput, Integration, Run } from '../src/lib/types';
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
 import { startAgent, buildPrompt, type AgentHandle, type AgentInput, type AgentCallbacks } from './adapter';
 import { AppError, Store, runFence, type RunFence } from './store';
@@ -12,7 +12,7 @@ import { RunCodeDiffs } from './code-diff';
 
 export type AgentFactory = (input: AgentInput, callbacks: AgentCallbacks) => AgentHandle;
 export type TaskBridgeFactory = (store: Store, run: Run, fence: RunFence) => ReturnType<typeof createTaskBridge>;
-export interface EngineOptions { workspaces?: WorkspaceProvider; maxParallel?: number; maxPerRepository?: number; integrator?: Integrator; integrationChecks?: string[][];
+export interface EngineOptions { workspaces?: WorkspaceProvider; maxParallel?: number; maxPerRepository?: number; integrator?: Integrator; integrationChecks?: string[][]; cliAccess?: CliAccessMode;
   /** Hand every merge conflict to the built-in integrator without waiting for a click. */
   autoReconcile?: boolean; }
 interface Launch { taskId: string; handle: AgentHandle | null; fence: RunFence; cancelRequested: boolean; bridge?: ReturnType<typeof createTaskBridge>; settled?: Promise<void>; }
@@ -28,6 +28,7 @@ export class Engine {
   private readonly integrator: Integrator;
   private readonly autoReconcile: boolean;
   private readonly environmentChecks?: string[][];
+  private readonly configuredCliAccess: CliAccessMode;
   private readonly requiresIntegrationChecks: boolean;
   private integrationHandles = new Map<string, { abort: AbortController; settled: Promise<void> }>();
   /** Repository identity per task folder, so a busy pool does not spawn Git every second. */
@@ -35,6 +36,7 @@ export class Engine {
   constructor(readonly store: Store, readonly mock = false, private factory: AgentFactory = startAgent, private bridgeFactory?: TaskBridgeFactory, options: EngineOptions = {}) {
     this.codeDiffs = new RunCodeDiffs(store);
     this.environmentChecks = options.integrationChecks === undefined ? undefined : validateIntegrationChecks(options.integrationChecks);
+    this.configuredCliAccess = options.cliAccess ?? 'standard';
     this.workspaces = options.workspaces ?? (mock || factory !== startAgent ? new DirectWorkspaces() : new GitWorkspaces(join(dirname(resolve(store.db.filename)), 'workspaces'), () => this.integrationChecks()));
     this.requiresIntegrationChecks = !mock && this.workspaces instanceof GitWorkspaces;
     this.maxParallel = options.maxParallel ?? 4;
@@ -46,6 +48,14 @@ export class Engine {
   }
   private integrationChecks(): string[][] | undefined {
     return this.store.getIntegrationChecks() ?? this.environmentChecks;
+  }
+  getCliAccessSettings(): CliAccessSettings {
+    return { mode: this.store.getCliAccessMode() ?? this.configuredCliAccess };
+  }
+  setCliAccessSettings(input: { mode: unknown }): CliAccessSettings {
+    if (this.closing) throw new AppError('Сервис останавливается', 503);
+    this.store.setCliAccessMode(input.mode);
+    return this.getCliAccessSettings();
   }
   getAutopilotSettings(): AutopilotSettings {
     const saved = this.store.getIntegrationChecks();
@@ -322,6 +332,7 @@ export class Engine {
         launch.bridge = (this.bridgeFactory ?? createTaskBridge)(this.store, { ...run, cwd: run.workspace?.cwd ?? run.cwd }, fence);
       }
       const input: AgentInput = { provider: run.provider, cwd: run.workspace?.cwd ?? run.cwd, instruction: run.instruction, instructions: run.instructions,
+        ...(this.getCliAccessSettings().mode === 'full' ? { cliAccess: 'full' as const } : {}),
         ...(run.workspace?.mode === 'worktree' ? { workspace: run.workspace } : {}),
         ...(run.inputAttachments?.length ? { attachments: run.inputAttachments } : {}), ...(launch.bridge ? { taskBridge: launch.bridge.agentConfig } : {}),
         model: run.worker?.model ?? null, effort: run.worker?.effort ?? 'default', communicationStyle: run.worker?.communicationStyle ?? '',

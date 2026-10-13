@@ -1045,6 +1045,12 @@ button.autopilot-task:hover strong { color: var(--accent-text); }
 .cli-setup-heading p { margin: 5px 0 0; font-size: .85rem; line-height: 1.7; color: var(--muted); overflow-wrap: anywhere; }
 .cli-setup-top { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 18px; }
 .cli-setup > .connection-error { margin-bottom: 14px; }
+.cli-access-card { padding: 16px 20px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
+.cli-access-switch { gap: 10px; font-size: .92rem; font-weight: 600; text-align: left; }
+.cli-access-card p, .cli-standard-description { margin: 8px 0 0; font-size: .85rem; line-height: 1.7; color: var(--secondary); overflow-wrap: anywhere; }
+.cli-access-card .cli-access-timing { color: var(--muted); }
+.cli-standard-title { margin: 24px 0 0; font-size: 1rem; font-weight: 600; }
+.cli-standard-description { margin-bottom: 14px; }
 .cli-guide-dialog { width: 62rem; }
 .cli-guide-body { padding: 24px 27px; min-width: 0; }
 .cli-guide-body .help-section:last-child { margin-bottom: 0; }

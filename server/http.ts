@@ -142,6 +142,12 @@ export function createHandler(engine: Engine, options: HttpOptions) {
       if (path === '/api/cli-config' && method === 'GET') return json({ claude: claudeStatus(cliHome), codex: codexStatus(cliHome) });
       const cliMatch = path.match(/^\/api\/cli-config\/(claude|codex)$/);
       if (cliMatch && method === 'POST') { await body(req); return json(cliMatch[1] === 'claude' ? configureClaude(cliHome) : configureCodex(cliHome)); }
+      if (path === '/api/settings/permissions' && method === 'GET') return json(engine.getCliAccessSettings());
+      if (path === '/api/settings/permissions' && method === 'PATCH') {
+        const value = await body(req);
+        if (Object.keys(value).length !== 1 || !Object.hasOwn(value, 'mode')) throw new AppError('Укажите только поле mode');
+        return json(engine.setCliAccessSettings({ mode: value.mode }));
+      }
       if (path === '/api/settings/general' && method === 'GET') return json(generalSettings());
       if (path === '/api/settings/general' && method === 'PATCH') {
         const value = await body(req);

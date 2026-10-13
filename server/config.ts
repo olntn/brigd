@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { parseIntegrationChecks } from '../src/lib/integration-checks';
+import type { CliAccessMode } from '../src/lib/types';
 
 type Environment = Record<string, string | undefined>;
 
@@ -11,6 +12,8 @@ export function readConfig(root: string, env: Environment = process.env) {
   const setting = (name: string) => env[`BRIGD_${name}`] ?? env[`TRACKT_${name}`];
   const mode = setting('MODE') ?? 'cli';
   if (!['cli', 'mock'].includes(mode)) throw new Error('BRIGD_MODE / TRACKT_MODE должен быть cli или mock');
+  const cliAccess = setting('CLI_ACCESS') ?? 'full';
+  if (cliAccess !== 'standard' && cliAccess !== 'full') throw new Error('BRIGD_CLI_ACCESS / TRACKT_CLI_ACCESS должен быть standard или full');
   const port = Number(env.PORT ?? 4310);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('PORT должен быть 1024–65535');
   const hostname = setting('HOST') ?? '127.0.0.1';
@@ -41,5 +44,5 @@ export function readConfig(root: string, env: Environment = process.env) {
   const cliHome = resolve(root, setting('CLI_HOME') ?? homedir());
   const integrator = setting('INTEGRATOR') ?? 'auto';
   if (!['auto', 'manual'].includes(integrator)) throw new Error('BRIGD_INTEGRATOR должен быть auto или manual');
-  return { mode, port, hostname, allowedHosts, allowedOrigins, dbPath, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile: integrator === 'auto', dev: setting('DEV') === '1', defaultCwd: setting('DEFAULT_CWD'), cliHome };
+  return { mode, cliAccess: cliAccess as CliAccessMode, port, hostname, allowedHosts, allowedOrigins, dbPath, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile: integrator === 'auto', dev: setting('DEV') === '1', defaultCwd: setting('DEFAULT_CWD'), cliHome };
 }

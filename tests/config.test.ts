@@ -14,10 +14,19 @@ const prefixed = (prefix: string, values = settings) => Object.fromEntries(Objec
 describe('brigd configuration compatibility', () => {
   test('defaults preserve existing database path and port', () => {
     const config = readConfig(root, {});
-    expect(config).toMatchObject({ mode: 'cli', port: 4310, hostname: '127.0.0.1', dbPath: resolve(root, 'data/trackt.sqlite'), dev: false });
+    expect(config).toMatchObject({ mode: 'cli', cliAccess: 'full', port: 4310, hostname: '127.0.0.1', dbPath: resolve(root, 'data/trackt.sqlite'), dev: false });
     expect(config.defaultCwd).toBeUndefined();
     expect(readConfig(root, { BRIGD_MODE: 'mock' }).dbPath).toBe(resolve(root, 'data/demo.sqlite'));
     expect(readConfig(root, { TRACKT_MODE: 'mock' }).dbPath).toBe(resolve(root, 'data/demo.sqlite'));
+  });
+
+  test('CLI access supports both prefixes and validates the explicit new value', () => {
+    for (const prefix of ['BRIGD', 'TRACKT']) {
+      for (const mode of ['standard', 'full'] as const) expect(readConfig(root, { [`${prefix}_CLI_ACCESS`]: mode }).cliAccess).toBe(mode);
+      for (const value of ['', 'unsafe', 'FULL', ' full ']) expect(() => readConfig(root, { [`${prefix}_CLI_ACCESS`]: value })).toThrow('CLI_ACCESS');
+    }
+    expect(readConfig(root, { TRACKT_CLI_ACCESS: 'standard', BRIGD_CLI_ACCESS: 'full' }).cliAccess).toBe('full');
+    expect(() => readConfig(root, { TRACKT_CLI_ACCESS: 'full', BRIGD_CLI_ACCESS: '' })).toThrow('CLI_ACCESS');
   });
 
   test('old launch commands and new aliases produce identical configuration', () => {

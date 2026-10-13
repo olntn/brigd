@@ -21,6 +21,7 @@ for (const provider of ['codex', 'claude'] as Provider[]) {
     console.log(`✓ ${provider}: CLI найден, нужные флаги поддерживаются${capabilities.schema ? ', JSON Schema доступна' : ''}`);
     console.log(`  Effort: ${capabilities.efforts?.length ? capabilities.efforts.join(', ') : 'только по умолчанию; обновите CLI для выбора effort'}`);
     console.log(`  Ultra: ${capabilities.ultracode ? 'поддерживается CLI' : 'обновите CLI для включения режима ultra'}`);
+    console.log(`  Полный доступ: ${capabilities.fullAccess ? 'поддерживается CLI' : 'обновите CLI или выберите ограниченный режим в настройках'}`);
     available++;
   } catch (error) { console.log(`! ${provider}: ${error instanceof Error ? error.message : error}`); }
 }

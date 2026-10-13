@@ -1,4 +1,4 @@
-import type { Envelope, Provider, TaskLogInput } from '../src/lib/types';
+import type { CliAccessMode, Envelope, Provider, TaskLogInput } from '../src/lib/types';
 import { claudeToolLog, codexActionLog } from './worker-logs';
 import { sanitizeLogError } from './log-errors';
 
@@ -53,13 +53,17 @@ export function validateEnvelope(value: unknown): Envelope {
 
 // Only inspect error/permission fields, never ordinary prose or reasoning.
 export function isPermissionDenial(value: unknown): boolean {
-  return typeof value === 'string' && /(?:permission|approval) (?:was |is )?(?:denied|required|rejected)|not (?:allowed|permitted) (?:to|by)|operation not permitted|sandbox (?:restriction|denied)|denied by (?:the )?sandbox|requires? (?:user |human )?approval|cannot request (?:user )?approval|approval policy[^\n]*(?:reject|never|denied)/i.test(value);
+  return typeof value === 'string' && /permission for this tool use was denied|(?:permission|approval) (?:was |is )?(?:denied|required|rejected)|not (?:allowed|permitted) (?:to|by)|operation not permitted|sandbox (?:restriction|denied)|denied by (?:the )?sandbox|requires? (?:user |human )?approval|cannot request (?:user )?approval|approval policy[^\n]*(?:reject|never|denied)/i.test(value);
 }
 
 function errorText(value: unknown): string {
   if (typeof value === 'string') return value;
   if (record(value) && typeof value.message === 'string') return value.message;
   return '';
+}
+
+function isNativeApprovalRequired(text: string): boolean {
+  return /permission for this tool use was denied|requires? (?:user |human )?approval|no approval surface|(?:approval|permission) (?:was |is )?(?:required|rejected)|cannot request (?:user )?approval/i.test(text);
 }
 
 export interface ProtocolCallbacks {
@@ -87,6 +91,7 @@ export class AgentProtocol {
     readonly provider: Provider,
     private callbacks: ProtocolCallbacks,
     private expectedSessionId?: string,
+    private cliAccess: CliAccessMode = 'standard',
   ) {
     if (expectedSessionId) validateSessionId(expectedSessionId);
   }
@@ -152,6 +157,9 @@ export class AgentProtocol {
   }
 
   private blockedSummary(): string {
+    if (this.cliAccess === 'full') {
+      return `${this.provider === 'claude' ? 'Claude Code' : 'Codex'} сообщил об отказе доступа. Полный доступ уже выбран: подтверждения и песочница CLI отключены. Проверьте текст ошибки в логах, права пользователя сервиса и ограничения ОС, контейнера или провайдера. Изменение allow-правил ограниченного режима здесь не требуется.`;
+    }
     if (this.provider !== 'claude') return 'The CLI requires native permission approval. brigd cannot grant tool permissions from task comments. Review the session in the provider’s terminal.';
     const reason = this.nativePermissionRequest
       ? 'Claude Code не разрешил использование инструмента.'
@@ -189,7 +197,10 @@ export class AgentProtocol {
     if (event.type === 'error' || event.type === 'turn.failed') {
       const text = errorText(event.error) || errorText(event.message);
       this.log(`error:${this.eventCount}`, { kind: 'lifecycle', summary: `Ошибка ${this.provider === 'claude' ? 'Claude Code' : 'Codex'}`, details: [], error: sanitizeLogError(text) });
-      if (isPermissionDenial(text)) this.nativeBlock = true;
+      if (isPermissionDenial(text)) {
+        this.nativeBlock = true;
+        if (isNativeApprovalRequired(text)) this.nativePermissionRequest = true;
+      }
       else this.failure = true;
     }
 
@@ -239,7 +250,9 @@ export class AgentProtocol {
             if (content.is_error === true) {
               if (isPermissionDenial(text)) {
                 this.nativeBlock = true;
-                if (prior) this.recordBlockedTool(prior, false);
+                const explicit = isNativeApprovalRequired(text);
+                if (explicit) this.nativePermissionRequest = true;
+                if (prior) this.recordBlockedTool(prior, explicit);
               }
             }
             if (typeof content.tool_use_id === 'string') this.pendingTools.delete(content.tool_use_id);
@@ -251,7 +264,10 @@ export class AgentProtocol {
         if (event.subtype !== 'success' || event.is_error === true) {
           const details = [errorText(event.result), ...(Array.isArray(event.errors) ? event.errors.map(errorText) : [])].join('\n');
           this.log(`result-error:${this.eventCount}`, { kind: 'lifecycle', summary: 'Ошибка Claude Code', details: [], error: sanitizeLogError(details) });
-          if (isPermissionDenial(details)) this.nativeBlock = true;
+          if (isPermissionDenial(details)) {
+            this.nativeBlock = true;
+            if (isNativeApprovalRequired(details)) this.nativePermissionRequest = true;
+          }
           else this.failure = true;
         }
         this.finalResponse = event.structured_output ?? event.result;

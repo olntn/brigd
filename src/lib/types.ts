@@ -301,6 +301,8 @@ export interface CliConfigStatus {
 }
 export interface CliConfigReport { status: CliConfigStatus; added: string[]; backup: string | null; }
 export interface CliConfigOverview { claude: CliConfigStatus; codex: CliConfigStatus; }
+export type CliAccessMode = 'standard' | 'full';
+export interface CliAccessSettings { mode: CliAccessMode; }
 export type AutopilotStopReason = 'manual' | 'until' | 'failures' | 'restart';
 export interface AutopilotInput {
   enabled: boolean;

@@ -2,8 +2,12 @@
   import { onMount, tick } from 'svelte';
   import Icon from './Icon.svelte';
   import CliGuide from './CliGuide.svelte';
-  import type { CliConfigOverview, CliConfigReport, CliConfigStatus, Provider } from './types';
+  import type { CliAccessSettings, CliConfigOverview, CliConfigReport, CliConfigStatus, Provider } from './types';
 
+  let access = $state<CliAccessSettings | null>(null);
+  let accessLoading = $state(true);
+  let accessSaving = $state(false);
+  let accessError = $state('');
   let overview = $state<CliConfigOverview | null>(null);
   let loading = $state(true);
   let error = $state('');
@@ -35,10 +39,34 @@
     } catch (failure) { if (alive) error = message(failure); }
     finally { if (alive) loading = false; }
   }
-  onMount(() => { void load(); return () => { alive = false; }; });
+  async function loadAccess() {
+    accessLoading = true;
+    try {
+      const result = await request<CliAccessSettings>('/api/settings/permissions');
+      if (!alive) return;
+      access = result;
+      accessError = '';
+    } catch (failure) { if (alive) accessError = message(failure); }
+    finally { if (alive) accessLoading = false; }
+  }
+  onMount(() => { void loadAccess(); void load(); return () => { alive = false; }; });
+
+  async function toggleAccess() {
+    if (!access || accessSaving || pending) return;
+    const previous = access;
+    access = { mode: previous.mode === 'full' ? 'standard' : 'full' };
+    accessSaving = true;
+    accessError = '';
+    try {
+      const result = await request<CliAccessSettings>('/api/settings/permissions', { method: 'PATCH', body: JSON.stringify(access) });
+      if (alive) access = result;
+    } catch (failure) {
+      if (alive) { access = previous; accessError = message(failure); }
+    } finally { if (alive) accessSaving = false; }
+  }
 
   async function configure(provider: Provider) {
-    if (pending) return;
+    if (pending || accessSaving) return;
     pending = provider;
     error = '';
     try {
@@ -71,13 +99,26 @@
 
 <section class="cli-setup" aria-labelledby="permissions-title">
   <div class="cli-setup-top">
-    <div class="cli-setup-heading"><Icon name="lock" size={22} /><div><h3 id="permissions-title">Разрешения</h3><p>Доступ работников к файлам и командам без подтверждений.</p></div></div>
+    <div class="cli-setup-heading"><Icon name="lock" size={22} /><div><h3 id="permissions-title">Разрешения</h3><p>Общий режим доступа для обоих CLI.</p></div></div>
     <button type="button" class="button secondary" aria-haspopup="dialog" onclick={openGuide}><Icon name="list" size={15} />Инструкция</button>
   </div>
-  {#if error}<div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{error}</span><button onclick={() => { void load(); }}>Повторить</button></div>{/if}
-  {#if loading && !overview}
-    <div class="detail-loading" role="status"><Icon name="refresh" class="spin" />Проверяем файлы CLI…</div>
-  {:else if overview}
+  {#if accessError}<div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{accessError}</span><button disabled={accessSaving || accessLoading} onclick={() => { void loadAccess(); }}>Повторить</button></div>{/if}
+  {#if accessLoading && !access}
+    <div class="detail-loading" role="status"><Icon name="refresh" class="spin" />Загружаем режим доступа…</div>
+  {:else if access}
+    <div class="cli-access-card" aria-busy={accessSaving}>
+      <button type="button" role="switch" aria-checked={access.mode === 'full'} aria-describedby="cli-access-description cli-access-timing" class="instruction-switch cli-access-switch" disabled={accessSaving || accessLoading || !!pending} onclick={toggleAccess}><span class="switch-track" aria-hidden="true"><span></span></span><span>Полный доступ Codex и Claude Code</span></button>
+      <p id="cli-access-description">{access.mode === 'full' ? 'Команды и запись файлов без подтверждений и песочниц CLI, с правами пользователя сервиса.' : 'Codex работает в песочнице рабочей папки. Claude Code использует правила разрешений; действия с запросом подтверждения блокируются.'} Права ОС, границы контейнера, вход в аккаунты, лимиты и политики провайдеров сохраняются.</p>
+      <p id="cli-access-timing" class="cli-access-timing" role="status">{accessSaving ? 'Сохраняем режим…' : 'Применяется к новым запускам и продолжениям сессий. Уже запущенные процессы сохраняют прежний режим.'}</p>
+    </div>
+  {/if}
+  {#if access?.mode === 'standard'}
+    <h4 class="cli-standard-title">Настройки ограниченного режима</h4>
+    <p class="cli-standard-description">Эти кнопки дополняют пользовательские файлы CLI. Для полного доступа они не нужны.</p>
+    {#if error}<div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{error}</span><button onclick={() => { void load(); }}>Повторить</button></div>{/if}
+    {#if loading && !overview}
+      <div class="detail-loading" role="status"><Icon name="refresh" class="spin" />Проверяем файлы CLI…</div>
+    {:else if overview}
     <div class="cli-setup-grid">
       {#each providers as provider (provider)}
         {@const status = overview[provider]}
@@ -88,11 +129,12 @@
           <p class="cli-setup-state" class:is-ready={status.ready && !status.error}><Icon name={status.error ? 'alert' : status.ready ? 'circlecheck' : 'clock'} size={15} /><span>{stateLabel(status)}</span></p>
           {#if status.error}<p class="cli-setup-error">{status.error}</p>{/if}
           {#if status.login === false}<p class="cli-setup-error">Нет входа в Codex: выполните <code>codex login</code> в терминале.</p>{/if}
-          <button type="button" class="button primary" disabled={!!pending} onclick={() => configure(provider)}><Icon name={pending === provider ? 'refresh' : 'check'} size={15} class={pending === provider ? 'spin' : ''} />Настроить разрешения {name(provider)}</button>
+          <button type="button" class="button primary" disabled={!!pending || accessSaving} onclick={() => configure(provider)}><Icon name={pending === provider ? 'refresh' : 'check'} size={15} class={pending === provider ? 'spin' : ''} />Настроить разрешения {name(provider)}</button>
           {#if report}<p class="cli-setup-result" role="status">{resultLabel(report)}</p>{/if}
         </article>
       {/each}
     </div>
+    {/if}
   {/if}
 </section>
 

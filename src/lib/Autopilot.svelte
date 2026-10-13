@@ -231,7 +231,7 @@
   <section class="autopilot-section" aria-label="Перед ночной сессией">
     <h2>Перед тем как уйти</h2>
     <ul class="autopilot-checklist">
-      <li><strong>Разрешения CLI.</strong> Claude Code работает в режиме разрешений default: неразрешённый инструмент завершает запуск блокировкой. Заранее разрешите в настройках проекта редактирование файлов и проверенные команды. У Codex есть своя песочница. Включаются кнопкой в <button type="button" class="inline-link" aria-label="Открыть раздел Разрешения" onclick={() => onsettings('permissions')}>настройках, раздел «Разрешения»</button>, там же инструкция.</li>
+      <li><strong>Разрешения CLI.</strong> Полный доступ Codex и Claude Code включён по умолчанию: подтверждения и песочницы CLI отключены. Если выбрали ограниченный режим, заранее настройте правила Claude Code и учтите песочницу Codex. Общий переключатель и инструкция — в <button type="button" class="inline-link" aria-label="Открыть раздел Разрешения" onclick={() => onsettings('permissions')}>настройках, раздел «Разрешения»</button>.</li>
       <li><strong>Чистая целевая ветка.</strong> Если ветка открыта в рабочей папке, перенос результата требует чистого состояния Git. Закоммитьте или уберите незакоммиченные правки.</li>
       <li><strong>Команды проверки.</strong> Задайте BRIGD_INTEGRATION_CHECKS в <button type="button" class="inline-link" onclick={() => onsettings('autopilot')}>настройках автопилота</button>. В рабочем режиме без этой настройки автопилот и зависимые процессы недоступны.</li>
       <li><strong>Компьютер не должен уснуть.</strong> Очередь разбирается, только пока запущен сервер brigd.</li>
