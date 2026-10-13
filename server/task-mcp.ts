@@ -124,6 +124,7 @@ export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence
   if (!store.isCurrent(runId, fence)) throw new AppError('Task invocation is no longer current.', 409);
   const inputs = store.listRunAttachments(runId, fence).map(context);
   const allowed = new Set(inputs.map(a => a.id));
+  const commentSequence = store.commentCursor(taskId);
   const output = new TaskOutputDirectory(run.cwd);
   let inputDirectory: TaskOutputDirectory | undefined;
 
@@ -150,6 +151,24 @@ export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence
   };
   const execute = async (request: TaskBrokerRequest): Promise<TaskToolResult> => {
     switch (request.tool) {
+      case 'list_comments': {
+        const args = object(request.arguments, ['offset', 'limit']);
+        const offset = integer(args.offset, 0, Number.MAX_SAFE_INTEGER), limit = integer(args.limit, 20, 20, 1);
+        const rows = store.listTaskComments(taskId, { offset, limit: limit + 1, throughSequence: commentSequence });
+        const comments = [];
+        for (const comment of rows.slice(0, limit)) {
+          const item = { ...comment, attachments: (comment.attachments ?? []).map(a => ({ ...context(a), available: allowed.has(a.id) })) };
+          // The text result is JSON-encoded again by MCP. Measure that actual wire
+          // representation so long Markdown/Unicode discussions stay readable.
+          const candidate = text({ comments: [...comments, item], next_offset: Number.MAX_SAFE_INTEGER });
+          if (Buffer.byteLength(JSON.stringify(candidate)) + 1 > MAX_TASK_RESULT_BYTES) {
+            if (!comments.length) throw new AppError('This comment exceeds the task tool response size limit.');
+            break;
+          }
+          comments.push(item);
+        }
+        return text({ comments, next_offset: rows.length > comments.length ? offset + comments.length : null });
+      }
       case 'list_attachments': {
         const args = object(request.arguments, ['offset', 'limit']);
         const attachments = store.listRunAttachments(runId, fence).filter(a => allowed.has(a.id)).map(context);

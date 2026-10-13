@@ -802,7 +802,7 @@ describe('ephemeral task attachment CLI configuration', () => {
     env: { BRIGD_TASK_SOCKET: '/tmp/private-app-socket/broker.sock', BRIGD_TASK_CAPABILITY: 'a'.repeat(64) },
     context: { taskId: 'task-1', runId: 'run-1', turn: 3, stepIndex: 0, attachments: [{ id: 'file-1', name: 'image.png', mime: 'image/png', size: 200, previewable: true }], outputDirectory: '/workspace/.brigd-outbox-1234' },
   };
-  const tools = ['list_attachments', 'read_attachment', 'view_attachment', 'add_comment', 'add_attachment', 'commit_changes'];
+  const tools = ['list_comments', 'list_attachments', 'read_attachment', 'view_attachment', 'add_comment', 'add_attachment', 'commit_changes'];
   const input: AgentInput = { provider: 'codex', cwd: '/workspace', instruction: 'Inspect inputs and publish a report.', taskBridge: bridge };
   const caps = { schema: true, permissionPrompts: true, taskMcp: true };
   test.each(['codex', 'claude'] as const)('%s full access preserves task bridge configuration and task-scoped commit routing', provider => {
@@ -874,6 +874,7 @@ describe('ephemeral task attachment CLI configuration', () => {
     expect(prompt).toContain('"attachmentCount":200'); expect(prompt).toContain('file-9.png'); expect(prompt).not.toContain('file-10.png');
     expect(prompt).toContain(bridge.context.outputDirectory); expect(prompt).toContain('UNTRUSTED METADATA');
     expect(prompt).toContain('exactly status, summary, and questions'); expect(prompt).toContain('idempotency_key');
+    expect(prompt).toContain('list_comments'); expect(prompt).toContain('next_offset'); expect(prompt).toContain('available=true');
     expect(prompt).not.toContain(bridge.env.BRIGD_TASK_CAPABILITY); expect(prompt).not.toContain(bridge.env.BRIGD_TASK_SOCKET);
     expect(prompt).toContain('Do not commit them unless the user explicitly asks');
   });

@@ -1112,6 +1112,14 @@ export class Store {
   commentCursor(taskId: string): number {
     return (this.db.query('SELECT COALESCE(MAX(seq),0) AS seq FROM comments WHERE task_id=?').get(taskId) as Row).seq;
   }
+  listTaskComments(taskId: string, options: { offset: number; limit: number; throughSequence: number }): Comment[] {
+    const { offset, limit, throughSequence } = options;
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 21 ||
+        !Number.isSafeInteger(throughSequence) || throughSequence < 0) throw new AppError('Некорректные параметры истории комментариев');
+    this.getTask(taskId);
+    return (this.db.query('SELECT * FROM comments WHERE task_id=? AND seq<=? ORDER BY seq LIMIT ? OFFSET ?')
+      .all(taskId, throughSequence, limit, offset) as Row[]).map(row => this.mapComment(row));
+  }
   recordAgentSummary(taskId: string, runId: string, kind: 'agent' | 'result', body: string, afterSequence: number, now = Date.now(), stepIndex: number | null = null): Comment {
     return this.db.transaction(() => {
       // The CLI may publish its answer through MCP or a callback before returning

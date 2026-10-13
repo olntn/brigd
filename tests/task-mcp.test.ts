@@ -135,7 +135,7 @@ describe('authoritative current-task MCP broker', () => {
 });
 
 describe('real official SDK stdio transport', () => {
-  test('initializes and exposes exactly the six task tools without database access', async () => {
+  test('initializes and exposes exactly the task tools without database access', async () => {
     const client = new Client({ name: 'brigd-test', version: '1.0.0' });
     const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('server/task-mcp-stdio.ts')], stderr: 'pipe',
       env: { BRIGD_TASK_SOCKET: join(directory, 'absent.sock'), BRIGD_TASK_CAPABILITY: '1'.repeat(64) } });
@@ -158,7 +158,7 @@ describe('real official SDK stdio transport', () => {
     const transport = new StdioClientTransport({ command: bridge.agentConfig.command, args: bridge.agentConfig.args, env: bridge.agentConfig.env, stderr: 'pipe' });
     try {
       await client.connect(transport);
-      expect((await client.listTools()).tools).toHaveLength(6);
+      expect((await client.listTools()).tools).toHaveLength(TASK_MCP_TOOLS.length);
       const result = await client.callTool({ name: 'view_attachment', arguments: { attachment_id: a.id } });
       expect(result.isError).not.toBe(true); expect((result.content as any[]).some(x => x.type === 'image')).toBe(true);
       writeFileSync(join(bridge.agentConfig.context.outputDirectory, 'result.txt'), 'SDK publication');

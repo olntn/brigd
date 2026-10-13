@@ -26,6 +26,8 @@ try {
   const image = store.stageAttachment(await prepareAttachment(original, 'image/png', 'runtime-screen.png'));
   const task = store.createTask({ title: 'Packaged attachment smoke', instruction: 'Synthetic MCP checks only.', provider: 'codex', cwd: folder,
     schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false, attachmentIds: [image.id] });
+  const noteFile = store.stageAttachment(await prepareAttachment(Buffer.from('Discussion attachment'), 'text/plain', 'note.txt'));
+  const note = store.comment(task.id, null, 'user', 'Inspect the attached note and screenshot.', Date.now(), null, [noteFile.id]);
   const run = store.startManual(task.id, false);
   bridge = createTaskBridge(store, run, runFence(run));
   assert(bridge.agentConfig.args[0]?.endsWith('/dist/task-mcp-stdio.js') && existsSync(bridge.agentConfig.args[0]), 'Build and use the packaged MCP helper');
@@ -36,7 +38,11 @@ try {
   const tools = await client.listTools();
   assert(JSON.stringify(tools.tools.map(tool => tool.name).sort()) === JSON.stringify([...TASK_MCP_TOOLS].sort()), 'Expected exactly the bounded task tools');
   const listed = text(await client.callTool({ name: 'list_attachments', arguments: {} }));
-  assert(listed.attachments.length === 1 && listed.attachments[0].id === image.id, 'Frozen input not visible over stdio');
+  assert(JSON.stringify(listed.attachments.map((file: any) => file.id).sort()) === JSON.stringify([image.id, noteFile.id].sort()), 'Frozen inputs not visible over stdio');
+  const discussion = text(await client.callTool({ name: 'list_comments', arguments: {} }));
+  const visibleNote = discussion.comments.find((comment: any) => comment.id === note.id);
+  assert(visibleNote?.body === note.body && visibleNote.attachments.some((file: any) => file.id === noteFile.id && file.available), 'Comment and readable attachment metadata missing over stdio');
+  assert(text(await client.callTool({ name: 'read_attachment', arguments: { attachment_id: noteFile.id } })).data === 'Discussion attachment', 'Comment attachment bytes missing over stdio');
   const viewed = await client.callTool({ name: 'view_attachment', arguments: { attachment_id: image.id } });
   assert(!viewed.isError, 'Image tool failed');
   const imageBlock = (viewed.content as any[]).find(item => item.type === 'image');
@@ -71,7 +77,10 @@ try {
   await client.connect(new StdioClientTransport({ command: bridge.agentConfig.command, args: bridge.agentConfig.args,
     env: { PATH: process.env.PATH ?? '', ...bridge.agentConfig.env }, stderr: 'pipe' }));
   const followupInputs = text(await client.callTool({ name: 'list_attachments', arguments: {} })).attachments;
-  assert(JSON.stringify(followupInputs.map((file: any) => file.id).sort()) === JSON.stringify([image.id, published.attachment.id, extra.id].sort()), 'Follow-up stdio input scope must preserve source files and exclude unrelated notes');
+  assert(JSON.stringify(followupInputs.map((file: any) => file.id).sort()) === JSON.stringify([image.id, noteFile.id, published.attachment.id, extra.id].sort()), 'Follow-up stdio input scope must preserve source files and exclude unrelated notes');
+  const followupDiscussion = text(await client.callTool({ name: 'list_comments', arguments: {} }));
+  assert(followupDiscussion.comments.some((comment: any) => comment.body === 'Verified files attached.' && comment.attachments.some((file: any) => file.id === published.attachment.id && file.available)), 'Follow-up cannot read previous results and attached files');
+  assert(followupDiscussion.comments.some((comment: any) => comment.attachments.some((file: any) => file.id === unrelated.id && file.available === false)), 'History must identify files outside follow-up inputs as unavailable');
   assert(text(await client.callTool({ name: 'read_attachment', arguments: { attachment_id: extra.id } })), 'Follow-up attachment read failed');
   assert((await client.callTool({ name: 'read_attachment', arguments: { attachment_id: unrelated.id } })).isError, 'Follow-up read unrelated note attachment');
   const followupBytes = Buffer.from('Additional request verified');
@@ -95,7 +104,7 @@ try {
   assert(store.getRun(followup.id).sessionId === 'runtime-original-session' && store.getRun(followup.id).followup?.sourceRunId === run.id, 'Follow-up lineage did not persist');
   assert(store.startFollowup(task.id, intent).run.id === followup.id, 'Follow-up retry after database reopen duplicated a run');
   assert(JSON.stringify(store.getRun(run.id)) === originalRun, 'Database reopen changed original result history');
-  console.log('PASS: packaged sharp, initialized SDK client ↔ bundled stdio ↔ private task broker, native image, agent file/comment, idempotency, revocation, exact-session follow-up scoped inputs/output attribution and immutable history persistence. No model calls.');
+  console.log('PASS: packaged sharp, initialized SDK client ↔ bundled stdio ↔ private task broker, discussion history and comment files, native image, agent file/comment, idempotency, revocation, exact-session follow-up scoped inputs/output attribution and immutable history persistence. No model calls.');
 } finally {
   await client?.close();
   bridge?.close();
