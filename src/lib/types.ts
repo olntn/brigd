@@ -77,6 +77,8 @@ export interface BackupEntry {
   createdAt: number;
   size: number;
   selected: boolean;
+  autoUpdate: boolean;
+  updatedAt: number;
 }
 export interface BackupOverview { backups: BackupEntry[]; selectedId: string | null; }
 

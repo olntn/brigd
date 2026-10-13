@@ -14,8 +14,8 @@ function task(title: string): Task {
 // Backup files and restore state are isolated from the shared demo database.
 // Server tests exercise real SQLite snapshots, restore, upload validation and deletion protection.
 async function fixtureApi(page: Page, initial: BackupEntry[] = [
-  { id: 'current', name: 'Текущий.sqlite', source: 'manual', createdAt: date, size: 8192, selected: true },
-  { id: 'update', name: 'before-update.sqlite', source: 'update', createdAt: date - 60_000, size: 16384, selected: false },
+  { id: 'current', name: 'Текущий.sqlite', source: 'manual', createdAt: date, updatedAt: date, size: 8192, selected: true, autoUpdate: false },
+  { id: 'update', name: 'before-update.sqlite', source: 'update', createdAt: date - 60_000, updatedAt: date - 60_000, size: 16384, selected: false, autoUpdate: false },
 ]) {
   const state = {
     backups: initial.map(entry => ({ ...entry })),
@@ -23,6 +23,7 @@ async function fixtureApi(page: Page, initial: BackupEntry[] = [
     readError: '', mutationError: '', pendingMutation: null as Promise<void> | null,
     tasks: [task('Задача после бэкапа')],
     uploads: [] as { name: string; contentType: string; body: Buffer }[],
+    autoUpdateChanges: [] as { id: string; autoUpdate: boolean }[],
     deleted: [] as string[], restored: [] as string[], reads: 0, sequence: 0,
   };
   const info: AppInfo = {
@@ -43,7 +44,7 @@ async function fixtureApi(page: Page, initial: BackupEntry[] = [
       if (state.mutationError) { await route.fulfill({ status: 409, json: { error: state.mutationError } }); return; }
       if (path === '/api/backups' && method === 'POST') {
         const sequence = ++state.sequence;
-        const entry: BackupEntry = { id: `manual-${sequence}`, name: `manual-${sequence}.sqlite`, source: 'manual', createdAt: date + sequence, size: 12288, selected: false };
+        const entry: BackupEntry = { id: `manual-${sequence}`, name: `manual-${sequence}.sqlite`, source: 'manual', createdAt: date + sequence, updatedAt: date + sequence, size: 12288, selected: false, autoUpdate: false };
         state.backups.unshift(entry);
         await route.fulfill({ status: 201, json: entry });
       } else if (path === '/api/backups/upload' && method === 'POST') {
@@ -51,17 +52,26 @@ async function fixtureApi(page: Page, initial: BackupEntry[] = [
         const body = request.postDataBuffer()!;
         state.uploads.push({ name, contentType: request.headers()['content-type'], body });
         const sequence = ++state.sequence;
-        const entry: BackupEntry = { id: `upload-${sequence}`, name, source: 'upload', createdAt: date + sequence, size: body.byteLength, selected: false };
+        const entry: BackupEntry = { id: `upload-${sequence}`, name, source: 'upload', createdAt: date + sequence, updatedAt: date + sequence, size: body.byteLength, selected: false, autoUpdate: false };
         state.backups.unshift(entry);
         await route.fulfill({ status: 201, json: entry });
       } else {
-        const [, id, operation] = /^\/api\/backups\/([^/]+)(?:\/(select))?$/.exec(path) ?? [];
+        const [, encodedId, operation] = /^\/api\/backups\/([^/]+)(?:\/(select))?$/.exec(path) ?? [];
+        const id = decodeURIComponent(encodedId ?? '');
         const entry = state.backups.find(entry => entry.id === id);
         if (!entry) { await route.fulfill({ status: 404, json: { error: 'Бэкап не найден' } }); return; }
         if (operation === 'select' && method === 'POST') {
+          if (id !== state.selectedId) for (const backup of state.backups) backup.autoUpdate = false;
           state.selectedId = id;
           state.restored.push(id);
           state.tasks = [task('Задача из бэкапа')];
+          await route.fulfill({ json: { ...entry, selected: true } });
+        } else if (method === 'PATCH') {
+          if (id !== state.selectedId) { await route.fulfill({ status: 409, json: { error: 'Выберите бэкап для автообновления' } }); return; }
+          const { autoUpdate } = request.postDataJSON();
+          entry.autoUpdate = autoUpdate;
+          if (autoUpdate) entry.updatedAt = Math.max(entry.updatedAt + 1, date + 5_000 + ++state.sequence);
+          state.autoUpdateChanges.push({ id, autoUpdate });
           await route.fulfill({ json: { ...entry, selected: true } });
         } else if (method === 'DELETE') {
           if (id === state.selectedId) { await route.fulfill({ status: 409, json: { error: 'Текущий выбранный бэкап нельзя удалить' } }); return; }
@@ -215,6 +225,8 @@ test('the selected backup can be restored again and stays protected from deletio
   await page.goto('/');
   let { panel } = await openBackups(page);
   const selected = panel.getByRole('listitem', { name: 'Текущий.sqlite', exact: true });
+  await selected.getByRole('checkbox', { name: 'Автообновление бэкапа', exact: true }).check();
+  await expect(panel.getByRole('status')).toContainText('Автообновление включено');
   const restore = selected.getByRole('button', { name: 'Восстановить бэкап: Текущий.sqlite', exact: true });
   await expect(restore).toHaveText('Восстановить снова');
   await restore.click();
@@ -229,10 +241,93 @@ test('the selected backup can be restored again and stays protected from deletio
   await expect(restored.getByText('Выбран', { exact: true })).toBeVisible();
   await expect(restored.getByRole('button', { name: 'Восстановить бэкап: Текущий.sqlite', exact: true })).toBeEnabled();
   await expect(restored.getByRole('button', { name: 'Удалить бэкап: Текущий.sqlite', exact: true })).toBeDisabled();
+  await expect(restored.getByRole('checkbox', { name: 'Автообновление бэкапа', exact: true })).toBeChecked();
+});
+
+test('auto update is offered for the selected backup, persists after reload and resets when choosing a different backup', async ({ page }) => {
+  const state = await fixtureApi(page);
+  await page.goto('/');
+  let { panel } = await openBackups(page);
+  const current = panel.getByRole('listitem', { name: 'Текущий.sqlite', exact: true });
+  const checkbox = current.getByRole('checkbox', { name: 'Автообновление бэкапа', exact: true });
+  await expect(panel.getByRole('checkbox')).toHaveCount(1);
+  await expect(checkbox).not.toBeChecked();
+  await expect(current.getByText('Обновлён:', { exact: false })).toHaveCount(0);
+  await expect(checkbox).toHaveAccessibleDescription('Обновлять этот бэкап при изменении данных приложения. Копия будет перезаписываться.');
+  await checkbox.check();
+  await expect(panel.getByRole('status')).toContainText('Автообновление включено. Бэкап обновлён.');
+  await expect(current.getByText('Обновлён:', { exact: false })).toBeVisible();
+  expect(state.autoUpdateChanges).toEqual([{ id: 'current', autoUpdate: true }]);
+  const updatedAt = state.backups.find(entry => entry.id === 'current')!.updatedAt;
+  expect(updatedAt).toBeGreaterThan(date);
+
+  await page.reload();
+  ({ panel } = await openBackups(page));
+  await expect(checkbox).toBeChecked();
+  state.backups.find(entry => entry.id === 'current')!.updatedAt = date + 65_000;
+  await panel.getByRole('button', { name: 'Обновить список бэкапов', exact: true }).click();
+  await expect(current.locator('time').last()).toHaveAttribute('datetime', new Date(date + 65_000).toISOString());
+  await checkbox.uncheck();
+  await expect(panel.getByRole('status')).toContainText('Автообновление выключено');
+  expect(state.backups.find(entry => entry.id === 'current')!.updatedAt).toBe(date + 65_000);
+  await page.reload();
+  ({ panel } = await openBackups(page));
+  await expect(checkbox).not.toBeChecked();
+  await checkbox.check();
+  await expect(panel.getByRole('status')).toContainText('Автообновление включено');
+
+  const update = panel.getByRole('listitem', { name: 'before-update.sqlite', exact: true });
+  await update.getByRole('button', { name: 'Выбрать бэкап: before-update.sqlite', exact: true }).click();
+  await Promise.all([page.waitForEvent('load'), update.getByRole('button', { name: 'Восстановить данные', exact: true }).click()]);
+  ({ panel } = await openBackups(page));
+  await expect(panel.getByRole('checkbox')).toHaveCount(1);
+  await expect(update.getByRole('checkbox', { name: 'Автообновление бэкапа', exact: true })).not.toBeChecked();
+  await expect(current.getByRole('checkbox')).toHaveCount(0);
+  expect(state.backups.every(entry => !entry.autoUpdate)).toBe(true);
+});
+
+test('auto update errors restore the checkbox and pending changes prevent closing settings', async ({ page }) => {
+  const state = await fixtureApi(page);
+  await page.goto('/');
+  const { dialog, panel } = await openBackups(page);
+  const checkbox = panel.getByRole('checkbox', { name: 'Автообновление бэкапа', exact: true });
+  state.mutationError = 'Не удалось обновить файл бэкапа';
+  await checkbox.click();
+  await expect(panel.getByRole('alert')).toContainText(state.mutationError);
+  await expect(checkbox).not.toBeChecked();
+  expect(state.autoUpdateChanges).toEqual([]);
+  state.mutationError = '';
+  await checkbox.check();
+  await expect(panel.getByRole('status')).toContainText('Автообновление включено');
+  state.mutationError = 'Не удалось сохранить настройку';
+  await checkbox.click();
+  await expect(panel.getByRole('alert')).toContainText(state.mutationError);
+  await expect(checkbox).toBeChecked();
+  state.mutationError = '';
+  let release!: () => void;
+  state.pendingMutation = new Promise<void>(resolve => { release = resolve; });
+  await checkbox.uncheck();
+  try {
+    await expect(panel.getByRole('status')).toContainText('Выключаем автообновление');
+    await expect(checkbox).toBeDisabled();
+    await expect(panel.getByRole('button', { name: 'Создать бэкап', exact: true })).toBeDisabled();
+    await expect(dialog.getByRole('button', { name: 'Закрыть настройки', exact: true })).toBeDisabled();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('tab', { name: 'Общие', exact: true }).click();
+    await expect(dialog.getByRole('button', { name: 'Закрыть настройки', exact: true })).toBeDisabled();
+    await dialog.getByRole('tab', { name: 'Бэкапы', exact: true }).click();
+    await expect(checkbox).toBeDisabled();
+  } finally { release(); }
+  await expect(panel.getByRole('status')).toContainText('Автообновление выключено');
+  await expect(checkbox).not.toBeChecked();
+  await expect(checkbox).toBeEnabled();
+  await expect(dialog.getByRole('button', { name: 'Закрыть настройки', exact: true })).toBeEnabled();
+  expect(state.autoUpdateChanges).toEqual([{ id: 'current', autoUpdate: true }, { id: 'current', autoUpdate: false }]);
 });
 
 test('backup tab works with keyboard navigation and fits narrow screens with large text in a dark theme', async ({ page }, testInfo) => {
-  await fixtureApi(page, [{ id: 'long', name: 'Очень длинное имя бэкапа проекта-'.repeat(7) + '.sqlite', source: 'update', createdAt: date, size: 16384, selected: true }]);
+  await fixtureApi(page, [{ id: 'long', name: 'Очень длинное имя бэкапа проекта-'.repeat(7) + '.sqlite', source: 'update', createdAt: date, updatedAt: date + 6_000, size: 16384, selected: true, autoUpdate: true }]);
   await page.setViewportSize({ width: 320, height: 740 });
   await page.goto('/');
   await page.addStyleTag({ content: 'html { font-size: 26px !important; }' });
@@ -249,6 +344,8 @@ test('backup tab works with keyboard navigation and fits narrow screens with lar
   expect(size.content).toBeLessThanOrEqual(size.dialog + 1);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addStyleTag({ content: 'html { font-size: 13px !important; }' });
-  await dialog.evaluate(element => { element.scrollTop = 0; });
+  const checkbox = panel.getByRole('checkbox', { name: 'Автообновление бэкапа', exact: true });
+  await expect(checkbox).toBeChecked();
+  await checkbox.scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath('backups-narrow-dark.png'), fullPage: true });
 });

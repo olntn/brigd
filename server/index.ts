@@ -7,7 +7,8 @@ import { readConfig } from './config';
 import { ATTACHMENT_MAX_BYTES } from '../src/lib/attachments';
 import { GitWorkspaces } from './workspaces';
 import { acquireServerStartupLock, assertDatabaseIdle } from './startup-lock';
-import { BACKUP_MAX_BYTES } from './backups';
+import { BACKUP_MAX_BYTES, BackupManager } from './backups';
+import { BackupAutoUpdater } from './backup-auto-update';
 import { restoreBackup } from './backup-restore';
 import { AppError } from './errors';
 
@@ -24,12 +25,16 @@ if (process.platform !== 'win32') chmodSync(dbPath, 0o600);
 let lease = store.acquireLease();
 const createEngine = (database: Store) => new Engine(database, mode === 'mock', undefined, undefined, { cliAccess, maxParallel, maxPerRepository, integrationChecks, autoReconcile, ...(mode === 'cli' ? { workspaces: new GitWorkspaces(workspacesDir, () => database.getIntegrationChecks() ?? integrationChecks) } : {}) });
 let engine = createEngine(store);
+const backups = new BackupManager({ dbPath, updateBackupDir });
+const backupAutoUpdater = new BackupAutoUpdater(backups, () => store.db, error => {
+  console.error('[brigd] Не удалось автоматически обновить выбранный бэкап:', error instanceof Error ? error.message : error);
+});
 let engineStopped = false;
 let active = false;
 let requests = 0;
 let restoring = false;
 let restoreInFlight: Promise<void> | null = null;
-const createAppHandler = (): ReturnType<typeof createHandler> => createHandler(engine, { port, root, dev, allowedHosts, allowedOrigins, defaultCwd, cliHome, updateBackupDir,
+const createAppHandler = (): ReturnType<typeof createHandler> => createHandler(engine, { port, root, dev, allowedHosts, allowedOrigins, defaultCwd, cliHome, updateBackupDir, backupManager: backups,
   async restoreBackup(backups, id) {
     if (restoring || exiting) throw new AppError('Дождитесь завершения восстановления.', 409);
     restoring = true;
@@ -37,6 +42,7 @@ const createAppHandler = (): ReturnType<typeof createHandler> => createHandler(e
       dbPath,
       async pause() {
         active = false;
+        backupAutoUpdater.stop();
         clearInterval(attachmentCleanup);
         // Let uploads and writes already accepted by the old handler finish.
         // The restoring request itself remains counted until its response returns.
@@ -99,6 +105,7 @@ function activate() {
   if (active || exiting) return;
   store.cleanupAttachments();
   engine.startScheduler();
+  backupAutoUpdater.start();
   attachmentCleanup = setInterval(() => store.cleanupAttachments(), 60_000);
   active = true;
   console.log(`brigd → http://127.0.0.1:${server.port} • ${mode === 'mock' ? 'ДЕМО: реальные CLI не вызываются' : 'CLI-режим'}\nБаза: ${dbPath}`);
@@ -111,6 +118,7 @@ async function shutdown() {
   const wasActive = active;
   const wasRestoring = restoring;
   active = false;
+  backupAutoUpdater.stop();
   clearInterval(attachmentCleanup);
   server.stop();
   // A paused candidate has not started work. Keep the pre-update DB state intact.
@@ -118,6 +126,7 @@ async function shutdown() {
   if (storeOpen) {
     if (wasActive || wasRestoring) await engine.shutdown();
     store.releaseLease(lease);
+    if (wasActive || wasRestoring) backupAutoUpdater.flush();
     store.close();
   }
   startupLock.release();

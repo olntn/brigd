@@ -1,5 +1,7 @@
 import { homedir } from 'node:os';
+import { closeSync, createReadStream, fstatSync, openSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
+import { Readable } from 'node:stream';
 import type { AppInfo, GeneralSettings } from '../src/lib/types';
 import { Engine } from './engine';
 import { AppError } from './store';
@@ -20,6 +22,7 @@ export interface HttpOptions { port: number; dev?: boolean; root?: string; start
   /** Home folder whose ~/.claude and ~/.codex the CLI setup buttons check and edit. */
   cliHome?: string;
   updateBackupDir?: string;
+  backupManager?: BackupManager;
   restoreBackup?: (backups: BackupManager, id: string) => Promise<void>;
 }
 const JSON_LIMIT = 32_768;
@@ -66,7 +69,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
   });
   let uploading = 0;
   let backupUploading = false;
-  let backups: BackupManager | undefined;
+  let backups = options.backupManager;
   const backupManager = () => backups ??= new BackupManager({ dbPath: engine.store.db.filename,
     updateBackupDir: options.updateBackupDir ?? resolve(options.root ?? process.cwd(), '.brigd-updates/backup') });
   return async (req: Request): Promise<Response> => {
@@ -106,11 +109,24 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         const manager = backupManager();
         if (action === 'download' && (method === 'GET' || method === 'HEAD')) {
           const backup = manager.download(id!);
-          const file = Bun.file(backup.path);
-          return new Response(method === 'HEAD' ? null : file, { headers: { ...securityHeaders,
-            'Content-Type': 'application/vnd.sqlite3', 'Content-Length': String(file.size),
+          // Hold this inode so an automatic refresh cannot replace a download in progress.
+          const fd = openSync(backup.path, 'r');
+          let stream: ReadableStream | null;
+          let size: number;
+          try {
+            size = fstatSync(fd).size;
+            if (method === 'HEAD') { closeSync(fd); stream = null; }
+            else stream = Readable.toWeb(createReadStream(backup.path, { fd, autoClose: true })) as unknown as ReadableStream;
+          } catch (error) { closeSync(fd); throw error; }
+          return new Response(stream, { headers: { ...securityHeaders,
+            'Content-Type': 'application/vnd.sqlite3', 'Content-Length': String(size),
             'Content-Disposition': attachmentDisposition(backup.name), 'Cross-Origin-Resource-Policy': 'same-origin',
           } });
+        }
+        if (!action && method === 'PATCH') {
+          const value = await body(req);
+          if (Object.keys(value).length !== 1 || !Object.hasOwn(value, 'autoUpdate')) throw new AppError('Укажите только поле autoUpdate');
+          return json(manager.setAutoUpdate(id, value.autoUpdate));
         }
         if (action === 'select' && method === 'POST') {
           const value = await body(req);

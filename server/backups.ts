@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { AppError } from './errors';
 import type { BackupEntry, BackupOverview } from '../src/lib/types';
@@ -8,7 +8,14 @@ export type { BackupEntry, BackupOverview } from '../src/lib/types';
 
 export const BACKUP_MAX_BYTES = 256 * 1024 * 1024;
 export interface BackupManagerOptions { dbPath: string; updateBackupDir: string; }
-interface BackupState { version: 1; selectedId: string | null; names: Record<string, string>; }
+interface BackupState {
+  version: 1;
+  selectedId: string | null;
+  autoUpdate: boolean;
+  names: Record<string, string>;
+  /** Preserve the creation time of updater files whose names contain no timestamp. */
+  createdAt: Record<string, number>;
+}
 type BackupSource = BackupEntry['source'];
 const LOCAL_NAME = /^(manual|upload)-(\d{13})-[a-f0-9-]{36}\.sqlite$/;
 const SAFE_NAME = /^[^/\\\x00-\x1f\x7f\u202a-\u202e\u2066-\u2069]{1,240}$/u;
@@ -153,15 +160,45 @@ export class BackupManager {
   validate(id: string): void { validateBackup(this.file(id).path); }
 
   /** Persist only after the caller has successfully restored the selected database. */
-  select(id: string): BackupEntry {
+  select(id: string, autoUpdate?: boolean): BackupEntry {
     const state = this.readState();
     const entry = this.entry(id, state);
-    this.commitSelection(state, id);
-    return { ...entry, selected: true };
+    if (autoUpdate !== undefined && typeof autoUpdate !== 'boolean') throw new AppError('Автообновление должно быть boolean');
+    const next = { ...state, selectedId: id,
+      autoUpdate: autoUpdate ?? (state.selectedId === id && state.autoUpdate),
+      createdAt: { ...state.createdAt, [id]: entry.createdAt } };
+    this.commitState(state, next);
+    return this.entry(id, next);
   }
 
   /** Clear a newly selected marker when restoration rolls back to an unselected database. */
-  clearSelection(): void { this.commitSelection(this.readState(), null); }
+  clearSelection(): void {
+    const state = this.readState();
+    this.commitState(state, { ...state, selectedId: null, autoUpdate: false });
+  }
+
+  /** The monitor reads only the external manifest, without listing or opening snapshots. */
+  getAutoUpdate(): { selectedId: string | null; enabled: boolean } {
+    const state = this.readState();
+    return { selectedId: state.selectedId, enabled: state.autoUpdate };
+  }
+
+  setAutoUpdate(id: string, enabled: unknown): BackupEntry {
+    if (typeof enabled !== 'boolean') throw new AppError('Автообновление должно быть boolean');
+    const state = this.readState();
+    if (state.selectedId !== id) throw new AppError('Автообновление доступно только для выбранного бэкапа', 409);
+    const entry = this.entry(id, state);
+    if (enabled) return this.replaceWithSnapshot(id, state, true);
+    this.commitState(state, { ...state, autoUpdate: false });
+    return { ...entry, autoUpdate: false };
+  }
+
+  /** Replace only the selected file; historical and nonselected snapshots stay untouched. */
+  updateSelected(): BackupEntry | null {
+    const state = this.readState();
+    if (!state.selectedId || !state.autoUpdate) return null;
+    return this.replaceWithSnapshot(state.selectedId, state, true);
+  }
 
   delete(id: string): void {
     const state = this.readState();
@@ -169,8 +206,9 @@ export class BackupManager {
     const { path } = this.file(id);
     rmSync(path);
     syncPath(dirname(path));
-    if (Object.hasOwn(state.names, id)) {
+    if (Object.hasOwn(state.names, id) || Object.hasOwn(state.createdAt, id)) {
       delete state.names[id];
+      delete state.createdAt[id];
       this.writeState(state);
     }
   }
@@ -201,8 +239,55 @@ export class BackupManager {
   private entry(id: string, state: BackupState): BackupEntry {
     const { filename, source, stat } = this.file(id);
     const timestamp = /^(?:manual-|upload-)?(\d{13})-/.exec(filename)?.[1];
-    return { id, name: state.names[id] ?? filename, source, createdAt: timestamp ? Number(timestamp) : stat.mtimeMs,
-      size: stat.size, selected: state.selectedId === id };
+    const selected = state.selectedId === id;
+    return { id, name: state.names[id] ?? filename, source,
+      createdAt: state.createdAt[id] ?? (timestamp ? Number(timestamp) : stat.mtimeMs), updatedAt: stat.mtimeMs,
+      size: stat.size, selected, autoUpdate: selected && state.autoUpdate };
+  }
+
+  private replaceWithSnapshot(id: string, state: BackupState, autoUpdate: boolean): BackupEntry {
+    const entry = this.entry(id, state);
+    const target = this.file(id);
+    const directory = dirname(target.path);
+    const temporary = join(directory, `.${randomUUID()}.tmp`);
+    const previous = join(directory, `.${randomUUID()}.previous.tmp`);
+    const next = { ...state, autoUpdate, createdAt: { ...state.createdAt, [id]: entry.createdAt } };
+    const changeState = state.autoUpdate !== autoUpdate || state.createdAt[id] !== entry.createdAt;
+    let db: Database | undefined;
+    let replaced = false;
+    let stateChanged = false;
+    try {
+      writeFileSync(temporary, '', { flag: 'wx', mode: 0o600 });
+      db = new Database(this.dbPath, { readonly: true });
+      db.exec('PRAGMA busy_timeout=5000');
+      db.query('VACUUM INTO ?').run(temporary);
+      db.close();
+      db = undefined;
+      syncPath(temporary);
+      const current = this.file(id);
+      if (current.stat.dev !== target.stat.dev || current.stat.ino !== target.stat.ino) throw missing();
+      // Keep the last valid inode until the replacement and its directory entry are durable.
+      linkSync(target.path, previous);
+      if (changeState) {
+        this.commitState(state, next);
+        stateChanged = true;
+      }
+      renameSync(temporary, target.path);
+      replaced = true;
+      syncPath(directory);
+      return this.entry(id, next);
+    } catch (error) {
+      if (replaced) {
+        try { renameSync(previous, target.path); syncPath(directory); } catch {}
+      }
+      if (stateChanged) { try { this.writeState(state); } catch {} }
+      if (error instanceof AppError) throw error;
+      throw new AppError('Не удалось обновить выбранный бэкап базы данных', 500);
+    } finally {
+      db?.close();
+      rmSync(temporary, { force: true });
+      rmSync(previous, { force: true });
+    }
   }
 
   private publish(temporary: string, filename: string, source: BackupSource, name: string, state: BackupState): BackupEntry {
@@ -225,15 +310,24 @@ export class BackupManager {
       if (lstatSync(this.statePath).isSymbolicLink()) throw badState();
       fd = openSync(this.statePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     }
-    catch (error: any) { if (error.code === 'ENOENT') return { version: 1, selectedId: null, names: {} }; throw badState(); }
+    catch (error: any) { if (error.code === 'ENOENT') return { version: 1, selectedId: null, autoUpdate: false, names: {}, createdAt: {} }; throw badState(); }
     try {
       const file = fstatSync(fd);
       if (!file.isFile() || file.size > 1024 * 1024) throw badState();
       const state = JSON.parse(readFileSync(fd, 'utf8')) as BackupState;
       if (!state || state.version !== 1 || (state.selectedId !== null && typeof state.selectedId !== 'string') ||
           !state.names || typeof state.names !== 'object' || Array.isArray(state.names)) throw badState();
+      // Version 1 manifests from before auto-update remain valid and opt out by default.
+      if (!Object.hasOwn(state, 'autoUpdate')) state.autoUpdate = false;
+      if (!Object.hasOwn(state, 'createdAt')) state.createdAt = {};
+      if (typeof state.autoUpdate !== 'boolean' || (state.autoUpdate && state.selectedId === null) ||
+          !state.createdAt || typeof state.createdAt !== 'object' || Array.isArray(state.createdAt)) throw badState();
       if (state.selectedId !== null) decodeId(state.selectedId);
       for (const [id, name] of Object.entries(state.names)) { decodeId(id); backupName(name); }
+      for (const [id, createdAt] of Object.entries(state.createdAt)) {
+        decodeId(id);
+        if (typeof createdAt !== 'number' || !Number.isFinite(createdAt) || createdAt < 0) throw badState();
+      }
       return state;
     } catch { throw badState(); }
     finally { closeSync(fd); }
@@ -250,10 +344,10 @@ export class BackupManager {
     } finally { rmSync(temporary, { force: true }); }
   }
 
-  private commitSelection(state: BackupState, selectedId: string | null): void {
-    try { this.writeState({ ...state, selectedId }); }
+  private commitState(state: BackupState, next: BackupState): void {
+    try { this.writeState(next); }
     catch (error) {
-      // A directory fsync can fail after rename; preserve the previous marker if possible.
+      // A directory fsync can fail after rename; preserve the previous manifest if possible.
       try { this.writeState(state); } catch {}
       throw error;
     }

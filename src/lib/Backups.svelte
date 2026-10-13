@@ -131,6 +131,27 @@
     finally { busy = false; }
   }
 
+  async function setAutoUpdate(entry: BackupEntry, event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const autoUpdate = input.checked;
+    if (busy || loading || !entry.selected) { input.checked = entry.autoUpdate; return; }
+    busy = true;
+    pendingMessage = autoUpdate ? 'Включаем автообновление и обновляем бэкап…' : 'Выключаем автообновление…';
+    status = '';
+    actionError = '';
+    backups = backups.map(backup => backup.id === entry.id ? { ...backup, autoUpdate } : backup);
+    try {
+      const saved = await request<BackupEntry>(`/api/backups/${encodeURIComponent(entry.id)}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ autoUpdate }),
+      });
+      applyEntry(saved);
+      status = saved.autoUpdate ? 'Автообновление включено. Бэкап обновлён.' : 'Автообновление выключено';
+    } catch (error) {
+      backups = backups.map(backup => backup.id === entry.id ? { ...backup, autoUpdate: entry.autoUpdate } : backup);
+      actionError = message(error, 'Не удалось изменить автообновление бэкапа. Попробуйте ещё раз.');
+    } finally { busy = false; }
+  }
+
   async function confirmRestore(entry: BackupEntry, trigger: HTMLElement) {
     if (busy || loading) return;
     returnFocus = trigger;
@@ -197,8 +218,8 @@
     return size < 1024 ? `${size} Б` : size < 1024 * 1024 ? `${(size / 1024).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} КБ`
       : `${(size / (1024 * 1024)).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} МБ`;
   }
-  function dateLabel(timestamp: number) {
-    return new Date(timestamp).toLocaleString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  function dateLabel(timestamp: number, includeSeconds = false) {
+    return new Date(timestamp).toLocaleString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', second: includeSeconds ? '2-digit' : undefined });
   }
 </script>
 
@@ -223,6 +244,13 @@
         <li class="backup-entry" class:selected={entry.selected} aria-label={entry.name}>
           <div class="backup-entry-heading"><strong>{entry.name}</strong>{#if entry.selected}<span class="backup-selected"><Icon name="check" size={14} />Выбран</span>{/if}</div>
           <div class="backup-entry-meta"><span>{sourceLabels[entry.source]}</span><time datetime={new Date(entry.createdAt).toISOString()}>{dateLabel(entry.createdAt)}</time><span>{sizeLabel(entry.size)}</span></div>
+          {#if entry.updatedAt > entry.createdAt}<div class="backup-entry-meta"><span>Обновлён: <time datetime={new Date(entry.updatedAt).toISOString()}>{dateLabel(entry.updatedAt, true)}</time></span></div>{/if}
+          {#if entry.selected}
+            <div class="backup-auto-update">
+              <label><input type="checkbox" checked={entry.autoUpdate} disabled={busy || loading} aria-describedby={'backup-auto-update-note-' + entry.id} onchange={(event) => setAutoUpdate(entry, event)} /><span>Автообновление бэкапа</span></label>
+              <p id={'backup-auto-update-note-' + entry.id}>Обновлять этот бэкап при изменении данных приложения. Копия будет перезаписываться.</p>
+            </div>
+          {/if}
           <div class="backup-entry-actions">
             <a class="button secondary" href="/api/backups/{encodeURIComponent(entry.id)}/download" download={entry.name} aria-label={'Скачать бэкап: ' + entry.name} aria-disabled={busy || loading} tabindex={busy || loading ? -1 : 0} onclick={(event) => { if (busy || loading) event.preventDefault(); }}><Icon name="down" size={16} />Скачать</a>
             <button type="button" class="button secondary" disabled={busy || loading} aria-label={(entry.selected ? 'Восстановить бэкап: ' : 'Выбрать бэкап: ') + entry.name} onclick={(event) => confirmRestore(entry, event.currentTarget)}><Icon name="restore" size={16} />{entry.selected ? 'Восстановить снова' : 'Выбрать'}</button>

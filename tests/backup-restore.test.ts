@@ -271,6 +271,27 @@ test('a corrupt integration snapshot is rejected during staged scheduler reconci
   expectNoTemporaryFiles(f);
 });
 
+test('activation rollback restores the previous backup auto-update setting', async () => {
+  const f = fixture();
+  await addTask(f, 'Original', 'old bytes');
+  const target = f.backups.create();
+  await addTask(f, 'Current', 'current bytes');
+  const selected = f.backups.create();
+  f.backups.select(selected.id);
+  // A checkbox request already in flight may finish while the runtime drains requests.
+  const pause = f.runtime.pause;
+  f.runtime.pause = async () => { await pause(); f.backups.setAutoUpdate(selected.id, true); };
+  const resume = f.runtime.resume;
+  let attempts = 0;
+  f.runtime.resume = () => { if (++attempts === 1) throw new Error('Activation failed'); resume(); };
+
+  await expect(restoreBackup(f.backups, target.id, f.runtime)).rejects.toThrow('Предыдущие данные сохранены');
+
+  expect(f.store.listTasks()).toHaveLength(2);
+  expect(f.backups.getAutoUpdate()).toEqual({ selectedId: selected.id, enabled: true });
+  expect(f.backups.list().backups.find(backup => backup.id === target.id)?.autoUpdate).toBe(false);
+});
+
 test('a pause failure resumes service without closing or replacing the current database', async () => {
   const f = fixture();
   const current = await addTask(f, 'Current', 'current bytes');

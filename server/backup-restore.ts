@@ -87,10 +87,10 @@ export async function restoreBackup(backups: BackupManager, id: string, runtime:
   let closeStarted = false;
   let rollbackPath: string | undefined;
   let previousSelectedId: string | null = null;
+  let previousAutoUpdate = false;
   let selectionStarted = false;
   let resumeStarted = false;
   try {
-    previousSelectedId = backups.list().selectedId;
     backups.validate(id);
     staging = mkdtempSync(join(dirname(path), '.brigd-restore-'));
     chmodSync(staging, 0o700);
@@ -99,6 +99,10 @@ export async function restoreBackup(backups: BackupManager, id: string, runtime:
 
     pauseStarted = true;
     await runtime.pause();
+    // Preserve settings from requests that were already accepted before the pause.
+    const previous = backups.getAutoUpdate();
+    previousSelectedId = previous.selectedId;
+    previousAutoUpdate = previous.enabled;
     // Workers can write their final status during shutdown; capture those writes too.
     const rollback = backups.create(`Перед восстановлением — ${new Date().toISOString().replace(/[:.]/g, '-')}.sqlite`);
     rollbackPath = join(staging, 'previous.sqlite');
@@ -123,7 +127,7 @@ export async function restoreBackup(backups: BackupManager, id: string, runtime:
         runtime.open();
         if (selectionStarted) {
           if (previousSelectedId === null) backups.clearSelection();
-          else backups.select(previousSelectedId);
+          else backups.select(previousSelectedId, previousAutoUpdate);
         }
         runtime.resume();
       } catch {

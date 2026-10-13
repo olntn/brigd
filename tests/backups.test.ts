@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import * as fs from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BACKUP_MAX_BYTES, BackupManager, validateBackup } from '../server/backups';
@@ -24,6 +25,10 @@ function status(action: () => unknown, expected: number) {
 function task(title = 'Before backup', attachmentIds?: string[]) {
   return store.createTask({ title, instruction: 'Inspect safely', provider: 'codex', cwd: folder, schedule: 'manual',
     intervalMinutes: null, firstRunAt: null, paused: false, attachmentIds });
+}
+function snapshotRows(id: string, query: string) {
+  const db = new Database(backups.download(id).path, { readonly: true });
+  try { return db.query(query).all(); } finally { db.close(); }
 }
 
 test('manual backups contain committed WAL data, settings and attachment bytes in a standalone snapshot', async () => {
@@ -217,4 +222,220 @@ test('older application snapshots without additive settings or attachments table
   `);
   db.close();
   expect(backups.upload(readFileSync(legacyPath), 'legacy.sqlite')).toMatchObject({ source: 'upload', name: 'legacy.sqlite' });
+});
+
+test('legacy manifests opt out of auto-update while preserving the selected backup and names', () => {
+  const saved = backups.create('Старый бэкап.sqlite');
+  writeFileSync(join(backups.directory, 'state.json'), JSON.stringify({ version: 1, selectedId: saved.id,
+    names: { [saved.id]: saved.name } }));
+  const reopened = new BackupManager({ dbPath: path, updateBackupDir });
+  expect(reopened.getAutoUpdate()).toEqual({ selectedId: saved.id, enabled: false });
+  expect(reopened.list().backups).toEqual([{ ...saved, selected: true, autoUpdate: false }]);
+  expect(reopened.updateSelected()).toBeNull();
+  status(() => reopened.delete(saved.id), 409);
+});
+
+test('auto-update toggles require a boolean and the selected backup, and persist outside the database', () => {
+  const first = backups.create();
+  const second = backups.create();
+  expect(backups.getAutoUpdate()).toEqual({ selectedId: null, enabled: false });
+  status(() => backups.setAutoUpdate(first.id, true), 409);
+  backups.select(first.id);
+  for (const value of [null, undefined, 1, 'true', {}, []]) status(() => backups.setAutoUpdate(first.id, value), 400);
+  status(() => backups.setAutoUpdate(second.id, true), 409);
+  expect(backups.setAutoUpdate(first.id, true)).toMatchObject({ selected: true, autoUpdate: true });
+  const reopened = new BackupManager({ dbPath: path, updateBackupDir });
+  expect(reopened.getAutoUpdate()).toEqual({ selectedId: first.id, enabled: true });
+  expect(reopened.list().backups.find(entry => entry.id === second.id)?.autoUpdate).toBe(false);
+  expect(reopened.setAutoUpdate(first.id, false)).toMatchObject({ autoUpdate: false });
+  expect(new BackupManager({ dbPath: path, updateBackupDir }).getAutoUpdate()).toEqual({ selectedId: first.id, enabled: false });
+});
+
+test('enabling immediately refreshes the same selected file with current WAL data, settings and attachments', async () => {
+  store.db.exec('PRAGMA wal_autocheckpoint=0');
+  task('Original task');
+  const selected = backups.create('Рабочий бэкап.sqlite');
+  const historical = backups.create();
+  const originalPath = backups.download(selected.id).path;
+  const historicalBytes = readFileSync(backups.download(historical.id).path);
+  backups.select(selected.id);
+  const file = store.stageAttachment(await prepareAttachment(Buffer.from('live attachment'), 'text/plain', 'live.txt'));
+  const added = task('Latest task', [file.id]);
+  store.db.query('UPDATE general_settings SET default_cwd=? WHERE singleton=1').run(folder);
+  store.db.exec('UPDATE autopilot SET enabled=1 WHERE singleton=1');
+  utimesSync(originalPath, new Date(1_700_000_000_000), new Date(1_700_000_000_000));
+  const updated = backups.setAutoUpdate(selected.id, true);
+  expect(backups.download(updated.id).path).toBe(originalPath);
+  expect(updated).toMatchObject({ id: selected.id, name: selected.name, source: selected.source,
+    createdAt: selected.createdAt, selected: true, autoUpdate: true });
+  expect(updated.updatedAt).toBeGreaterThan(1_700_000_000_000);
+  expect(snapshotRows(updated.id, 'SELECT title FROM tasks ORDER BY title')).toEqual([{ title: 'Latest task' }, { title: 'Original task' }]);
+  expect(snapshotRows(updated.id, 'SELECT default_cwd FROM general_settings')).toEqual([{ default_cwd: folder }]);
+  expect(snapshotRows(updated.id, 'SELECT enabled FROM autopilot')).toEqual([{ enabled: 1 }]);
+  const attachments = snapshotRows(updated.id, 'SELECT task_id,data FROM attachments') as { task_id: string; data: Uint8Array }[];
+  expect(attachments).toHaveLength(1);
+  expect(attachments[0]!.task_id).toBe(added.id);
+  expect(Buffer.from(attachments[0]!.data).toString()).toBe('live attachment');
+  expect(readFileSync(backups.download(historical.id).path)).toEqual(historicalBytes);
+  expect(backups.list().backups).toHaveLength(2);
+  if (process.platform !== 'win32') expect(statSync(originalPath).mode & 0o777).toBe(0o600);
+  expect(readdirSync(backups.directory).filter(name => name.startsWith('.'))).toEqual([]);
+});
+
+test('refresh follows subsequent changes while disabling freezes the last selected snapshot', () => {
+  task('Initial');
+  const saved = backups.create();
+  backups.select(saved.id);
+  backups.setAutoUpdate(saved.id, true);
+  task('Automatically saved');
+  expect(backups.updateSelected()).toMatchObject({ id: saved.id, autoUpdate: true });
+  expect(snapshotRows(saved.id, 'SELECT COUNT(*) AS count FROM tasks')).toEqual([{ count: 2 }]);
+  const bytes = readFileSync(backups.download(saved.id).path);
+  task('Not saved after disabling');
+  backups.setAutoUpdate(saved.id, false);
+  expect(backups.updateSelected()).toBeNull();
+  expect(readFileSync(backups.download(saved.id).path)).toEqual(bytes);
+});
+
+test('imported and application-update backups support refresh without changing identity or creation time', () => {
+  task('Initial');
+  const original = backups.create();
+  const imported = backups.upload(readFileSync(backups.download(original.id).path), 'Загруженный.sqlite');
+  mkdirSync(updateBackupDir, { recursive: true });
+  const updatePath = join(updateBackupDir, 'before-upgrade.sqlite');
+  copyFileSync(backups.download(original.id).path, updatePath);
+  utimesSync(updatePath, new Date(1_700_000_000_000), new Date(1_700_000_000_000));
+  const update = backups.list().backups.find(entry => entry.source === 'update')!;
+  for (const selected of [imported, update]) {
+    backups.select(selected.id);
+    const selectedPath = backups.download(selected.id).path;
+    task(`Before enabling ${selected.source}`);
+    const enabled = backups.setAutoUpdate(selected.id, true);
+    expect(enabled).toMatchObject({ id: selected.id, name: selected.name, source: selected.source, createdAt: selected.createdAt });
+    expect(backups.download(selected.id).path).toBe(selectedPath);
+    task(`After enabling ${selected.source}`);
+    const refreshed = backups.updateSelected()!;
+    expect(refreshed.createdAt).toBe(selected.createdAt);
+    expect(snapshotRows(selected.id, 'SELECT title FROM tasks WHERE title LIKE \'After enabling %\'')).toContainEqual({ title: `After enabling ${selected.source}` });
+    const reopened = new BackupManager({ dbPath: path, updateBackupDir });
+    expect(reopened.list().backups.find(entry => entry.id === selected.id)).toEqual(refreshed);
+    if (process.platform !== 'win32') expect(statSync(selectedPath).mode & 0o777).toBe(0o600);
+  }
+  expect(readdirSync(updateBackupDir)).toEqual(['before-upgrade.sqlite']);
+});
+
+test('reselecting retains auto-update, switching resets it, and rollback can restore it without refreshing', () => {
+  task('Initial');
+  const first = backups.create();
+  const second = backups.create();
+  backups.select(first.id);
+  backups.setAutoUpdate(first.id, true);
+  const bytes = readFileSync(backups.download(first.id).path);
+  task('Live data');
+  expect(backups.select(first.id).autoUpdate).toBe(true);
+  expect(readFileSync(backups.download(first.id).path)).toEqual(bytes);
+  expect(backups.select(second.id).autoUpdate).toBe(false);
+  expect(backups.getAutoUpdate()).toEqual({ selectedId: second.id, enabled: false });
+  expect(backups.select(first.id, true).autoUpdate).toBe(true);
+  expect(readFileSync(backups.download(first.id).path)).toEqual(bytes);
+  backups.clearSelection();
+  expect(backups.getAutoUpdate()).toEqual({ selectedId: null, enabled: false });
+  expect(backups.updateSelected()).toBeNull();
+  backups.delete(first.id);
+});
+
+test('a failed snapshot refresh preserves the last valid file, selection and auto-update flag', () => {
+  task('Saved');
+  const saved = backups.create();
+  backups.select(saved.id);
+  backups.setAutoUpdate(saved.id, true);
+  const bytes = readFileSync(backups.download(saved.id).path);
+  const files = readdirSync(backups.directory).sort();
+  const actualDatabase = join(folder, 'held.sqlite');
+  store.close();
+  renameSync(path, actualDatabase);
+  writeFileSync(path, 'broken source database');
+  try { status(() => backups.updateSelected(), 500); }
+  finally { rmSync(path); renameSync(actualDatabase, path); store = new Store(path); }
+  expect(readFileSync(backups.download(saved.id).path)).toEqual(bytes);
+  expect(readdirSync(backups.directory).sort()).toEqual(files);
+  expect(backups.getAutoUpdate()).toEqual({ selectedId: saved.id, enabled: true });
+  backups.validate(saved.id);
+});
+
+test('a failed manifest commit when enabling preserves the previous snapshot and disabled flag', () => {
+  task('Saved');
+  const saved = backups.create();
+  backups.select(saved.id);
+  const bytes = readFileSync(backups.download(saved.id).path);
+  const files = readdirSync(backups.directory).sort();
+  task('Changed but not saved');
+  const internals = backups as unknown as { writeState: (state: unknown) => void };
+  const writer = internals.writeState;
+  internals.writeState = () => { throw new Error('Disk write failed'); };
+  try { status(() => backups.setAutoUpdate(saved.id, true), 500); }
+  finally { internals.writeState = writer; }
+  expect(readFileSync(backups.download(saved.id).path)).toEqual(bytes);
+  expect(readdirSync(backups.directory).sort()).toEqual(files);
+  expect(backups.getAutoUpdate()).toEqual({ selectedId: saved.id, enabled: false });
+});
+
+test('a durability failure after replacement rolls back to the previous valid snapshot', () => {
+  if (process.platform === 'win32') return;
+  task('Saved');
+  const saved = backups.create();
+  backups.select(saved.id);
+  backups.setAutoUpdate(saved.id, true);
+  const bytes = readFileSync(backups.download(saved.id).path);
+  const files = readdirSync(backups.directory).sort();
+  task('Changed');
+  const originalSync = fs.fsyncSync;
+  let calls = 0;
+  const syncing = spyOn(fs, 'fsyncSync').mockImplementation(fd => {
+    if (++calls === 2) throw new Error('Directory fsync failed');
+    return originalSync(fd);
+  });
+  try { status(() => backups.updateSelected(), 500); }
+  finally { syncing.mockRestore(); }
+  expect(calls).toBe(3);
+  expect(readFileSync(backups.download(saved.id).path)).toEqual(bytes);
+  expect(readdirSync(backups.directory).sort()).toEqual(files);
+  expect(backups.getAutoUpdate()).toEqual({ selectedId: saved.id, enabled: true });
+  backups.validate(saved.id);
+});
+
+test('auto-update rejects replaced symlink files and directories without touching their targets', () => {
+  const saved = backups.create();
+  backups.select(saved.id);
+  backups.setAutoUpdate(saved.id, true);
+  const selectedPath = backups.download(saved.id).path;
+  const outside = join(folder, 'outside.sqlite');
+  const bytes = readFileSync(selectedPath);
+  writeFileSync(outside, bytes);
+  rmSync(selectedPath);
+  symlinkSync(outside, selectedPath);
+  status(() => backups.updateSelected(), 404);
+  status(() => backups.setAutoUpdate(saved.id, true), 404);
+  expect(readFileSync(outside)).toEqual(bytes);
+  rmSync(backups.directory, { recursive: true });
+  const linkedDirectory = join(folder, 'outside-backups');
+  mkdirSync(linkedDirectory);
+  symlinkSync(linkedDirectory, backups.directory);
+  status(() => backups.getAutoUpdate(), 500);
+  status(() => backups.updateSelected(), 500);
+  expect(readdirSync(linkedDirectory)).toEqual([]);
+});
+
+test('malformed auto-update values in the manifest fail closed', () => {
+  const saved = backups.create();
+  backups.select(saved.id);
+  const statePath = join(backups.directory, 'state.json');
+  const manifest = JSON.parse(readFileSync(statePath, 'utf8'));
+  for (const autoUpdate of [null, 'true', 1, {}, []]) {
+    writeFileSync(statePath, JSON.stringify({ ...manifest, autoUpdate }));
+    status(() => backups.getAutoUpdate(), 500);
+    status(() => backups.updateSelected(), 500);
+  }
+  writeFileSync(statePath, JSON.stringify({ ...manifest, selectedId: null, autoUpdate: true }));
+  status(() => backups.getAutoUpdate(), 500);
 });

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -10,17 +11,15 @@ import { Store } from '../server/store';
 
 const servers: { child: ReturnType<typeof Bun.spawn>; folder: string }[] = [];
 afterEach(async () => {
-  for (const { child, folder } of servers.splice(0)) {
-    child.kill('SIGTERM');
-    await child.exited;
-    rmSync(folder, { recursive: true, force: true });
-  }
+  const current = servers.splice(0);
+  for (const { child } of current) if (child.exitCode === null) child.kill('SIGTERM');
+  await Promise.all(current.map(({ child }) => child.exited));
+  for (const folder of new Set(current.map(server => server.folder))) rmSync(folder, { recursive: true, force: true });
 });
 
-async function start() {
-  const folder = mkdtempSync(join(tmpdir(), 'brigd-backup-http-'));
+async function start(folder = mkdtempSync(join(tmpdir(), 'brigd-backup-http-'))) {
   const updateBackupDir = join(folder, 'update-backups');
-  mkdirSync(updateBackupDir);
+  mkdirSync(updateBackupDir, { recursive: true });
   const reservation = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') });
   const port = reservation.port!;
   reservation.stop(true);
@@ -171,3 +170,67 @@ describe('backup HTTP lifecycle', () => {
     } finally { chmodSync(backups.directory, 0o700); }
   }, 20_000);
 });
+
+function snapshotTitles(path: string): string[] {
+  const db = new Database(path, { readonly: true });
+  try { return (db.query('SELECT title FROM tasks ORDER BY title').all() as { title: string }[]).map(row => row.title); }
+  finally { db.close(); }
+}
+
+test('selected backup auto update works without a browser and persists across native server restarts', async () => {
+  const app = await start();
+  await app.task('Original');
+  const backup = await app.json<BackupEntry>('/api/backups', 'POST');
+  const untouched = await app.json<BackupEntry>('/api/backups', 'POST');
+  await app.json(`/api/backups/${backup.id}/select`, 'POST');
+  await app.task('Before enabling');
+  const enabled = await app.json<BackupEntry>(`/api/backups/${encodeURIComponent(backup.id)}`, 'PATCH', { autoUpdate: true });
+  expect(enabled).toMatchObject({ id: backup.id, name: backup.name, createdAt: backup.createdAt, selected: true, autoUpdate: true });
+  const backups = new BackupManager({ dbPath: join(app.folder, 'app.sqlite'), updateBackupDir: app.updateBackupDir });
+  const path = backups.download(backup.id).path;
+  expect(snapshotTitles(path)).toEqual(['Before enabling', 'Original']);
+  await app.task('Background change');
+  const deadline = Date.now() + 8_000;
+  while (!snapshotTitles(path).includes('Background change')) {
+    if (Date.now() > deadline) throw new Error('Selected backup was not automatically updated');
+    await Bun.sleep(50);
+  }
+  expect(snapshotTitles(backups.download(untouched.id).path)).toEqual(['Original']);
+  const selected = (await app.json<BackupOverview>('/api/backups')).backups.find(entry => entry.id === backup.id)!;
+  expect(selected.updatedAt).toBeGreaterThanOrEqual(enabled.updatedAt);
+  expect((await app.request(`/api/backups/${backup.id}`, 'DELETE')).status).toBe(409);
+  // Shutdown must flush a final change even before the next five-second tick.
+  await app.task('Shutdown change');
+  app.child.kill('SIGTERM');
+  await app.child.exited;
+  expect(snapshotTitles(path)).toContain('Shutdown change');
+
+  const restarted = await start(app.folder);
+  expect((await restarted.json<BackupOverview>('/api/backups')).backups.find(entry => entry.id === backup.id)?.autoUpdate).toBe(true);
+  await restarted.json(`/api/backups/${backup.id}`, 'PATCH', { autoUpdate: false });
+  await restarted.task('Disabled change');
+  restarted.child.kill('SIGTERM');
+  await restarted.child.exited;
+  expect(snapshotTitles(path)).not.toContain('Disabled change');
+  expect(backups.getAutoUpdate()).toEqual({ selectedId: backup.id, enabled: false });
+}, 20_000);
+
+test('auto update PATCH validates selected backup and payload and resets for a different selection', async () => {
+  const app = await start();
+  await app.task('Original');
+  const first = await app.json<BackupEntry>('/api/backups', 'POST');
+  const other = await app.json<BackupEntry>('/api/backups', 'POST');
+  expect((await app.request(`/api/backups/${first.id}`, 'PATCH', { autoUpdate: true })).status).toBe(409);
+  await app.json(`/api/backups/${first.id}/select`, 'POST');
+  for (const value of [{}, { autoUpdate: 'true' }, { autoUpdate: null }, { autoUpdate: true, extra: true }]) {
+    expect((await app.request(`/api/backups/${first.id}`, 'PATCH', value)).status).toBe(400);
+  }
+  expect((await app.request(`/api/backups/${other.id}`, 'PATCH', { autoUpdate: true })).status).toBe(409);
+  await app.json(`/api/backups/${first.id}`, 'PATCH', { autoUpdate: true });
+  await app.json(`/api/backups/${first.id}/select`, 'POST');
+  expect((await app.json<BackupOverview>('/api/backups')).backups.find(entry => entry.id === first.id)?.autoUpdate).toBe(true);
+  await app.json(`/api/backups/${other.id}/select`, 'POST');
+  const overview = await app.json<BackupOverview>('/api/backups');
+  expect(overview.selectedId).toBe(other.id);
+  expect(overview.backups.every(entry => entry.autoUpdate === false)).toBe(true);
+}, 15_000);
