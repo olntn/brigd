@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { readFileSync, readlinkSync } from 'node:fs';
+import { readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
@@ -303,6 +303,9 @@ export class Store {
     this.db.exec(`CREATE TABLE IF NOT EXISTS autopilot_settings (
       singleton INTEGER PRIMARY KEY CHECK(singleton=1), integration_checks TEXT
     ); INSERT OR IGNORE INTO autopilot_settings (singleton,integration_checks) VALUES (1,NULL)`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS general_settings (
+      singleton INTEGER PRIMARY KEY CHECK(singleton=1), default_cwd TEXT
+    ); INSERT OR IGNORE INTO general_settings (singleton,default_cwd) VALUES (1,NULL)`);
     // The explicit marker makes even an intentionally empty catalog persistent.
     // Creation, seeding and the marker commit together, including concurrent opens.
     this.db.transaction(() => {
@@ -369,6 +372,25 @@ export class Store {
     }).immediate();
   }
   close() { this.db.close(); }
+  getDefaultCwd(): string | null {
+    const row = this.db.query('SELECT default_cwd FROM general_settings WHERE singleton=1').get() as { default_cwd: string | null };
+    return row.default_cwd;
+  }
+  setDefaultCwd(value: unknown): string {
+    if (typeof value !== 'string' || !value.trim() || value.length > 4_096 || value.includes('\0')) {
+      throw new AppError('Рабочая папка по умолчанию: введите от 1 до 4096 символов');
+    }
+    const input = value.trim();
+    if (!isAbsolute(input)) throw new AppError('Нужен абсолютный путь к рабочей папке');
+    let cwd: string;
+    try {
+      cwd = realpathSync(input);
+      if (!statSync(cwd).isDirectory()) throw new Error('Not a directory');
+    } catch { throw new AppError('Рабочая папка не существует или недоступна сервису'); }
+    if (cwd.length > 4_096) throw new AppError('Рабочая папка по умолчанию: не больше 4096 символов');
+    this.db.query('UPDATE general_settings SET default_cwd=? WHERE singleton=1').run(cwd);
+    return cwd;
+  }
   getIntegrationChecks(): string[][] | null {
     const row = this.db.query('SELECT integration_checks FROM autopilot_settings WHERE singleton=1').get() as { integration_checks: string | null };
     if (row.integration_checks === null) return null;

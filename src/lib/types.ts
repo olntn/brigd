@@ -62,6 +62,10 @@ export interface IntegratorProfileInput {
 }
 export interface IntegratorProfile extends IntegratorProfileInput { model: string | null; updatedAt: number; }
 
+export interface GeneralSettings {
+  defaultCwd: string;
+}
+
 export interface AutopilotSettings {
   integrationChecks: string[][] | null;
   source: 'settings' | 'environment' | null;

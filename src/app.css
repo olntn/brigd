@@ -663,7 +663,7 @@ dialog::backdrop { background: var(--overlay); }
 .model-delete-confirm .button.danger:hover:not(:disabled) { border-color: var(--error); }
 .model-catalog-empty { margin: 0; padding: 14px; border: 1px dashed var(--line); border-radius: var(--radius-md); background: var(--subtle); }
 .model-catalog-limit { font-size: .77rem; margin-top: 18px; }
-.autopilot-settings-form { display: grid; gap: 16px; min-width: 0; margin-top: 20px; }
+.general-settings-form, .autopilot-settings-form { display: grid; gap: 16px; min-width: 0; margin-top: 20px; }
 .autopilot-settings-form textarea { font-family: var(--font-mono); font-size: .85rem; }
 .autopilot-settings-form .model-catalog-note { margin: 0; }
 .autopilot-checks-example { color: var(--muted); font-size: .77rem; min-width: 0; }

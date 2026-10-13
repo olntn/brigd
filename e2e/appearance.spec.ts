@@ -51,6 +51,8 @@ async function fixtureApi(page: Page, mode: AppInfo['mode'] = 'mock', populated:
       await route.fulfill({ json: [] });
     } else if (path === '/api/settings/autopilot') {
       await route.fulfill({ json: { integrationChecks: [['bun', 'run', 'verify']], source: 'settings' } });
+    } else if (path === '/api/settings/general') {
+      await route.fulfill({ json: { defaultCwd: '/workspace/project' } });
     } else if (path === '/api/tasks') {
       await route.fulfill({ json: Array.isArray(populated) ? populated : populated ? [task] : [] });
     } else if (path === `/api/tasks/${taskId}`) {
@@ -67,11 +69,12 @@ async function openApp(page: Page) {
   await expect(page.getByRole('button', { name: 'Задачи', exact: true })).toBeVisible();
 }
 
-async function openSettings(page: Page) {
+async function openSettings(page: Page, selectAppearance = true) {
   const trigger = page.getByRole('button', { name: 'Настройки', exact: true });
   await trigger.click();
   const dialog = page.getByRole('dialog', { name: 'Настройки', exact: true });
   await expect(dialog).toBeVisible();
+  if (selectAppearance) await dialog.getByRole('tab', { name: 'Внешний вид', exact: true }).click();
   return {
     trigger,
     dialog,
@@ -280,24 +283,32 @@ test('CLI workspace is uncluttered and demo safety warning is preserved', async 
 test('settings sections use side navigation that stacks on narrow screens', async ({ page }) => {
   await fixtureApi(page);
   await openApp(page);
-  const { dialog } = await openSettings(page);
+  const { dialog } = await openSettings(page, false);
   const sections = dialog.getByRole('tablist', { name: 'Разделы настроек', exact: true });
+  const general = sections.getByRole('tab', { name: 'Общие', exact: true });
   const appearance = sections.getByRole('tab', { name: 'Внешний вид', exact: true });
   const models = sections.getByRole('tab', { name: 'Модели', exact: true });
   const permissions = sections.getByRole('tab', { name: 'Разрешения', exact: true });
   const autopilot = sections.getByRole('tab', { name: 'Автопилот', exact: true });
+  const generalPanel = dialog.getByRole('tabpanel', { name: 'Общие', exact: true });
   const appearancePanel = dialog.getByRole('tabpanel', { name: 'Внешний вид', exact: true });
   const modelsPanel = dialog.getByRole('tabpanel', { name: 'Модели', exact: true });
   const permissionsPanel = dialog.getByRole('tabpanel', { name: 'Разрешения', exact: true });
   const autopilotPanel = dialog.getByRole('tabpanel', { name: 'Автопилот', exact: true });
-  await expect(sections.getByRole('tab')).toHaveCount(4);
+  await expect(sections.getByRole('tab')).toHaveText(['Общие', 'Внешний вид', 'Модели', 'Разрешения', 'Автопилот']);
+  await expect(general).toHaveAttribute('aria-selected', 'true');
+  await expect(generalPanel.getByRole('heading', { name: 'Общие', exact: true })).toBeVisible();
+  await expect(generalPanel.getByLabel('Рабочая папка по умолчанию', { exact: true })).toBeVisible();
+  await expect(appearancePanel).toBeHidden();
+  const [navBox, panelBox] = [await sections.boundingBox(), await generalPanel.boundingBox()];
+  expect(navBox!.x + navBox!.width, 'sections sit to the left of the parameters').toBeLessThanOrEqual(panelBox!.x + 1);
+
+  await appearance.click();
   await expect(appearance).toHaveAttribute('aria-selected', 'true');
   await expect(appearancePanel.getByRole('group', { name: 'Цветовая схема', exact: true })).toBeVisible();
   await expect(appearancePanel.getByRole('heading', { name: 'Светлые', exact: true })).toBeVisible();
   await expect(appearancePanel.getByRole('heading', { name: 'Тёмные', exact: true })).toBeVisible();
   await expect(modelsPanel).toBeHidden();
-  const [navBox, panelBox] = [await sections.boundingBox(), await appearancePanel.boundingBox()];
-  expect(navBox!.x + navBox!.width, 'sections sit to the left of the parameters').toBeLessThanOrEqual(panelBox!.x + 1);
 
   await models.click();
   await expect(models).toHaveAttribute('aria-selected', 'true');
@@ -316,12 +327,13 @@ test('settings sections use side navigation that stacks on narrow screens', asyn
   await expect(permissionsPanel.getByRole('heading', { name: 'Разрешения', exact: true })).toBeVisible();
   await expect(modelsPanel).toBeHidden();
   await page.keyboard.press('Home');
-  await expect(appearance).toBeFocused();
-  await expect(appearancePanel).toBeVisible();
+  await expect(general).toBeFocused();
+  await expect(general).toHaveAttribute('aria-selected', 'true');
+  await expect(generalPanel).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expectNoHorizontalOverflow(page, dialog);
-  const [narrowNav, narrowPanel] = [await sections.boundingBox(), await appearancePanel.boundingBox()];
+  const [narrowNav, narrowPanel] = [await sections.boundingBox(), await generalPanel.boundingBox()];
   expect(narrowNav!.y + narrowNav!.height, 'sections stack above the parameters').toBeLessThanOrEqual(narrowPanel!.y + 1);
 });
 

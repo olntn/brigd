@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { resolve, sep } from 'node:path';
-import type { AppInfo } from '../src/lib/types';
+import type { AppInfo, GeneralSettings } from '../src/lib/types';
 import { Engine } from './engine';
 import { AppError } from './store';
 import { MAX_AVATAR_BYTES, validateAvatar } from './avatars';
@@ -56,6 +56,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
   const dist = resolve(options.root ?? process.cwd(), 'dist');
   const startedAt = options.startedAt ?? Date.now();
   const cliHome = options.cliHome ?? homedir();
+  const generalSettings = (): GeneralSettings => ({ defaultCwd: engine.store.getDefaultCwd() ?? options.defaultCwd ?? process.cwd() });
   let uploading = 0;
   return async (req: Request): Promise<Response> => {
     try {
@@ -68,7 +69,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
       const path = url.pathname;
       const method = req.method;
       if (path === '/api/info' && method === 'GET') {
-        const info: AppInfo = { mode: engine.mock ? 'mock' : 'cli', cwd: options.defaultCwd ?? process.cwd(), scheduler: 'running', startedAt,
+        const info: AppInfo = { mode: engine.mock ? 'mock' : 'cli', cwd: generalSettings().defaultCwd, scheduler: 'running', startedAt,
           providers: [{ id: 'codex', available: engine.mock || !!Bun.which('codex'), label: 'Codex' }, { id: 'claude', available: engine.mock || !!Bun.which('claude'), label: 'Claude Code' }] };
         return json(info);
       }
@@ -138,6 +139,13 @@ export function createHandler(engine: Engine, options: HttpOptions) {
       if (path === '/api/cli-config' && method === 'GET') return json({ claude: claudeStatus(cliHome), codex: codexStatus(cliHome) });
       const cliMatch = path.match(/^\/api\/cli-config\/(claude|codex)$/);
       if (cliMatch && method === 'POST') { await body(req); return json(cliMatch[1] === 'claude' ? configureClaude(cliHome) : configureCodex(cliHome)); }
+      if (path === '/api/settings/general' && method === 'GET') return json(generalSettings());
+      if (path === '/api/settings/general' && method === 'PATCH') {
+        const value = await body(req);
+        if (Object.keys(value).length !== 1 || !Object.hasOwn(value, 'defaultCwd')) throw new AppError('Укажите только поле defaultCwd');
+        engine.store.setDefaultCwd(value.defaultCwd);
+        return json(generalSettings());
+      }
       if (path === '/api/settings/autopilot' && method === 'GET') return json(engine.getAutopilotSettings());
       if (path === '/api/settings/autopilot' && method === 'PATCH') {
         const value = await body(req, 128_128);

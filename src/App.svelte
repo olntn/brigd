@@ -3,6 +3,7 @@
   import Icon from './lib/Icon.svelte';
   import Workers from './lib/Workers.svelte';
   import ModelSettings from './lib/ModelSettings.svelte';
+  import GeneralSettings from './lib/GeneralSettings.svelte';
   import AutopilotSettings from './lib/AutopilotSettings.svelte';
   import Instructions from './lib/Instructions.svelte';
   import Autopilot from './lib/Autopilot.svelte';
@@ -24,7 +25,7 @@
   import { tagColorStyle } from './lib/tags';
   import { followupTargets, followupFingerprint, followupStage, runWorkflowSteps, taskHasCompletedRun, resolveFollowupTarget, followupSessionKey, type FollowupTarget } from './lib/followups';
   import { applyTheme, readTheme, saveTheme, themes, themeStorageKey, type Theme } from './lib/theme';
-  import type { AppInfo, Attachment, AutopilotSettings as AutopilotSettingsValue, Comment, FollowupInput, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
+  import type { AppInfo, Attachment, AutopilotSettings as AutopilotSettingsValue, Comment, FollowupInput, GeneralSettings as GeneralSettingsValue, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
 
   type Scope = 'all' | 'scheduled' | 'autopilot' | 'attention' | 'completed';
   type View = 'board' | 'list';
@@ -53,13 +54,19 @@
   let modelSequence = 0;
   let modelReadSequence: number | null = null;
   let modelMutationPending = $state(false);
+  let generalSettings = $state<GeneralSettingsValue | null>(null);
+  let generalSettingsLoading = $state(true);
+  let generalSettingsError = $state('');
+  let generalSettingsSequence = 0;
+  let generalSettingsReadSequence: number | null = null;
+  let generalSettingsMutationPending = $state(false);
   let autopilotSettings = $state<AutopilotSettingsValue | null>(null);
   let autopilotSettingsLoading = $state(true);
   let autopilotSettingsError = $state('');
   let autopilotSettingsSequence = 0;
   let autopilotSettingsReadSequence: number | null = null;
   let autopilotSettingsMutationPending = $state(false);
-  let settingsMutationPending = $derived(modelMutationPending || autopilotSettingsMutationPending);
+  let settingsMutationPending = $derived(modelMutationPending || generalSettingsMutationPending || autopilotSettingsMutationPending);
   let integrationChecksMissing = $derived(info?.mode === 'cli' && !autopilotSettings?.integrationChecks?.length);
   const integrationChecksRequired = 'Сначала задайте BRIGD_INTEGRATION_CHECKS в Настройки → Автопилот.';
   let loading = $state(true);
@@ -92,12 +99,13 @@
   let settings: HTMLDialogElement;
   let settingsOpen = $state(false);
   const settingsSections = [
+    { id: 'general', label: 'Общие', icon: 'sliders' },
     { id: 'appearance', label: 'Внешний вид', icon: 'palette' },
     { id: 'models', label: 'Модели', icon: 'spark' },
     { id: 'permissions', label: 'Разрешения', icon: 'lock' },
     { id: 'autopilot', label: 'Автопилот', icon: 'moon' },
   ] as const;
-  let settingsSection = $state<(typeof settingsSections)[number]['id']>('appearance');
+  let settingsSection = $state<(typeof settingsSections)[number]['id']>('general');
   const themeGroups = [{ scheme: 'light', label: 'Светлые' }, { scheme: 'dark', label: 'Тёмные' }] as const;
   let theme = $state<Theme>(readTheme());
   let themeSaveError = $state(false);
@@ -336,6 +344,37 @@
     modelsLoading = false;
   }
 
+  async function loadGeneralSettings() {
+    if (generalSettingsMutationPending || generalSettingsReadSequence !== null) return;
+    const sequence = ++generalSettingsSequence;
+    generalSettingsReadSequence = sequence;
+    try {
+      const result = await api<GeneralSettingsValue>('/api/settings/general');
+      if (sequence !== generalSettingsSequence) return;
+      generalSettings = result;
+      generalSettingsError = '';
+    } catch (error) {
+      if (sequence === generalSettingsSequence) generalSettingsError = error instanceof Error ? error.message : 'Не удалось загрузить общие настройки';
+    } finally {
+      if (generalSettingsReadSequence === sequence) generalSettingsReadSequence = null;
+      if (sequence === generalSettingsSequence) generalSettingsLoading = false;
+    }
+  }
+
+  function generalSettingsChanged(value: GeneralSettingsValue) {
+    generalSettingsSequence++;
+    generalSettingsReadSequence = null;
+    generalSettings = value;
+    generalSettingsError = '';
+    generalSettingsLoading = false;
+    if (info) info = { ...info, cwd: value.defaultCwd };
+  }
+
+  function generalSettingsMutationStarted() {
+    generalSettingsSequence++;
+    generalSettingsReadSequence = null;
+  }
+
   async function loadAutopilotSettings() {
     if (autopilotSettingsMutationPending || autopilotSettingsReadSequence !== null) return;
     const sequence = ++autopilotSettingsSequence;
@@ -392,7 +431,7 @@
   }
 
   async function refresh() {
-    await Promise.all([loadTasks(), loadWorkers(), loadModels(), loadTags(), loadAutopilotSettings(), selectedId ? loadDetail() : Promise.resolve()]);
+    await Promise.all([loadTasks(), loadWorkers(), loadModels(), loadTags(), loadGeneralSettings(), loadAutopilotSettings(), selectedId ? loadDetail() : Promise.resolve()]);
   }
 
   async function loadInfo() {
@@ -423,6 +462,7 @@
     if (section) settingsSection = section;
     settingsOpen = true;
     settings.showModal();
+    void loadGeneralSettings();
     void loadModels();
     void loadAutopilotSettings();
   }
@@ -495,7 +535,7 @@
     formSteps = (task?.steps?.length ? task.steps : [1, 2].map(index => ({ workerId: '', title: `Этап ${index}`, instruction: '' }))).map(step => ({ ...step, key: crypto.randomUUID() }));
     formOriginalStepWorkers = task?.steps?.map(step => step.workerId) ?? [];
     void loadWorkers();
-    formCwd = task?.cwd ?? info?.cwd ?? '';
+    formCwd = task?.cwd ?? generalSettings?.defaultCwd ?? info?.cwd ?? '';
     formSchedule = task?.schedule ?? 'manual';
     formInterval = task?.intervalMinutes ?? 60;
     formFirstRun = localInputDate(task?.firstRunAt ?? null);
@@ -1118,6 +1158,9 @@
         {/each}
       </div>
       <!-- Inactive panels stay mounted so unsaved drafts survive switching sections. -->
+      <div id="settings-general-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-general-tab" hidden={settingsSection !== 'general'}>
+        {#if settingsOpen}<GeneralSettings settings={generalSettings} loading={generalSettingsLoading} error={generalSettingsError} retry={() => { void loadGeneralSettings(); }} onchange={generalSettingsChanged} onmutation={generalSettingsMutationStarted} bind:busy={generalSettingsMutationPending} />{/if}
+      </div>
       <div id="settings-appearance-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-appearance-tab" hidden={settingsSection !== 'appearance'}>
         <fieldset class="theme-settings">
           <legend>Цветовая схема</legend>
