@@ -227,13 +227,14 @@ describe('durable sequential execution and frozen inputs', () => {
   });
 
   test('future workers, every step definition, task folder, and reusable instructions are frozen when the workflow starts', async () => {
-    const crew = workers();
+    const crew = workers().map((worker, index) => store.updateWorker(worker.id, { ...worker, ultracode: index < 2 }));
     const task = workflow({}, crew);
     const guidance = store.createInstruction({ title: 'Shared rules', body: 'Only report verified work.', enabled: true });
     const run = engine.start(task.id);
+    expect(calls[0]!.input.ultracode).toBe(true);
     const frozen = run.steps.map(step => ({ title: step.title, instruction: step.instruction, worker: step.worker }));
     for (const worker of crew) {
-      store.updateWorker(worker.id, { ...worker, name: 'Edited later', provider: 'claude', model: 'new-profile-model', effort: 'low', communicationStyle: 'New style.' });
+      store.updateWorker(worker.id, { ...worker, name: 'Edited later', provider: 'claude', model: 'new-profile-model', ultracode: false, effort: 'low', communicationStyle: 'New style.' });
       store.archiveWorker(worker.id);
     }
     store.updateInstruction(guidance.id, { body: 'Changed guidance', enabled: false });
@@ -241,10 +242,10 @@ describe('durable sequential execution and frozen inputs', () => {
     store.createInstruction({ title: 'New guidance', body: 'Only for future runs.', enabled: true });
     store.updateTask(task.id, taskInput({ title: 'Edited task', cwd: '/var/tmp', instruction: 'New overall task', steps: [] }));
     await settle(0, 'Frozen plan');
-    expect(calls[1]!.input).toMatchObject({ provider: 'claude', model: 'opus', cwd: folder, instruction: task.instruction, effort: 'max', communicationStyle: crew[1]!.communicationStyle,
+    expect(calls[1]!.input).toMatchObject({ provider: 'claude', model: 'opus', ultracode: true, cwd: folder, instruction: task.instruction, effort: 'max', communicationStyle: crew[1]!.communicationStyle,
       instructions: [{ id: guidance.id, title: guidance.title, body: guidance.body }], workflow: { title: 'Implement', instruction: 'Do only step 2.' } });
     await settle(1, 'Frozen implementation');
-    expect(calls[2]!.input).toMatchObject({ provider: 'codex', model: 'custom-review-model', effort: 'xhigh', cwd: folder, instruction: task.instruction,
+    expect(calls[2]!.input).toMatchObject({ provider: 'codex', model: 'custom-review-model', ultracode: false, effort: 'xhigh', cwd: folder, instruction: task.instruction,
       communicationStyle: crew[2]!.communicationStyle, instructions: run.instructions, workflow: { title: 'Verify', instruction: 'Do only step 3.' } });
     expect(store.getRun(run.id).steps.map(step => ({ title: step.title, instruction: step.instruction, worker: step.worker }))).toEqual(frozen);
     await settle(2);
@@ -823,7 +824,7 @@ describe('handoff prompt and native argv safety', () => {
 // Capture legacy bytes independently of the current Store so its migrations cannot
 // make a malformed compatibility fixture look self-consistent.
 describe('additive workflow migration', () => {
-  test.each(['missing', 'null', 'mixed'])('pre-model/description workflow snapshots with %s description normalize without rewriting history or borrowing current profiles', async legacyDescription => {
+  test.each(['missing', 'null', 'mixed'])('pre-model/description/ultracode workflow snapshots with %s description normalize without rewriting history or borrowing current profiles', async legacyDescription => {
     const crew = workers();
     const task = workflow({}, crew);
     const first = store.startManual(task.id, true, BASE);
@@ -832,7 +833,7 @@ describe('additive workflow migration', () => {
     store.setSession(first.id, 'legacy-build-session');
     const waiting = store.finish(first.id, 'waiting_input', 'Historical question', null, BASE + 2);
     const legacyWorker = (worker: Run['steps'][number]['worker'], index = -1) => {
-      const { model: _model, description: _description, ...legacy } = worker;
+      const { model: _model, description: _description, ultracode: _ultracode, ...legacy } = worker;
       const useNull = legacyDescription === 'null' || legacyDescription === 'mixed' && (index === -1 || index % 2 === 0);
       return { ...legacy, ...(useNull ? { description: null } : {}) };
     };
@@ -841,6 +842,7 @@ describe('additive workflow migration', () => {
     store.db.query('UPDATE runs SET worker_snapshot=?,steps_snapshot=? WHERE id=?').run(workerJSON, stepsJSON, waiting.id);
     store.db.exec('ALTER TABLE workers DROP COLUMN model');
     store.db.exec('ALTER TABLE workers DROP COLUMN description');
+    store.db.exec('ALTER TABLE workers DROP COLUMN ultracode');
     const tables = ['workers', 'tasks', 'runs', 'comments', 'instructions'];
     const original = new Map(tables.map(table => [table, store.db.query(`SELECT * FROM ${table} ORDER BY rowid`).all() as Record<string, unknown>[]]));
     for (let pass = 0; pass < 2; pass++) {
@@ -853,20 +855,23 @@ describe('additive workflow migration', () => {
       }
       expect(store.listWorkers().every(worker => worker.model === null)).toBe(true);
       expect(store.listWorkers().every(worker => worker.description === '')).toBe(true);
+      expect(store.listWorkers().every(worker => worker.ultracode === false)).toBe(true);
       expect(store.getRun(waiting.id).worker?.model).toBeNull();
       expect(store.getRun(waiting.id).worker?.description).toBe('');
       expect(store.getRun(waiting.id).steps.map(step => step.worker.model)).toEqual([null, null, null]);
       expect(store.getRun(waiting.id).steps.map(step => step.worker.description)).toEqual(['', '', '']);
+      expect(store.getRun(waiting.id).steps.map(step => step.worker.ultracode)).toEqual([false, false, false]);
       expect(store.db.query('SELECT worker_snapshot,steps_snapshot FROM runs WHERE id=?').get(waiting.id)).toEqual({ worker_snapshot: workerJSON, steps_snapshot: stepsJSON });
       expect(store.db.query('PRAGMA foreign_key_check').all()).toEqual([]);
     }
-    for (const worker of crew) store.updateWorker(worker.id, { ...worker, model: 'profile-after-migration', description: 'DISPLAY_ONLY_CURRENT_ROLE', communicationStyle: 'Updated instructions after migration.' });
+    for (const worker of crew) store.updateWorker(worker.id, { ...worker, model: 'profile-after-migration', ultracode: true, description: 'DISPLAY_ONLY_CURRENT_ROLE', communicationStyle: 'Updated instructions after migration.' });
     engine.resume(waiting.id, 'Resume with the historical CLI default.', false);
-    expect(calls[0]!.input).toMatchObject({ model: null, sessionId: 'legacy-build-session' });
+    expect(calls[0]!.input).toMatchObject({ model: null, ultracode: false, sessionId: 'legacy-build-session' });
     expect(calls[0]!.input.communicationStyle).toBe(crew[1]!.communicationStyle);
     expect(buildPrompt(calls[0]!.input)).not.toContain('DISPLAY_ONLY_CURRENT_ROLE');
     await settle(0, 'Historical implementation', 'completed', 'legacy-build-session');
     expect(calls[1]!.input.model).toBeNull();
+    expect(calls[1]!.input.ultracode).toBe(false);
     expect(store.getRun(waiting.id).steps.map(step => step.worker.model)).toEqual([null, null, null]);
     expect(store.getRun(waiting.id).steps.map(step => step.worker.description)).toEqual(['', '', '']);
     await settle(1);
@@ -874,6 +879,7 @@ describe('additive workflow migration', () => {
     const fresh = engine.start(freshTask.id);
     expect(fresh.steps.map(step => step.worker.model)).toEqual(crew.map(() => 'profile-after-migration'));
     expect(fresh.steps.map(step => step.worker.description)).toEqual(crew.map(() => 'DISPLAY_ONLY_CURRENT_ROLE'));
+    expect(fresh.steps.map(step => step.worker.ultracode)).toEqual([true, true, true]);
   });
 
   test('two opens preserve all raw legacy rows, JSON bytes, comments, IDs, leases, and session continuity', () => {
@@ -922,15 +928,15 @@ describe('additive workflow migration', () => {
           const columns = Object.keys(original[0]!).map(name => `"${name}"`).join(',');
           expect(migrated.db.query(`SELECT ${columns} FROM ${table} ORDER BY rowid`).all()).toEqual(original);
         }
-        expect(migrated.getWorker('legacy-worker')).toMatchObject({ model: null, description: '', communicationStyle: 'Keep exact style' });
+        expect(migrated.getWorker('legacy-worker')).toMatchObject({ model: null, description: '', ultracode: false, communicationStyle: 'Keep exact style' });
         expect(migrated.getTask('legacy-task')).toMatchObject({ steps: [], workerId: 'legacy-worker', worker: { model: null }, status: 'waiting_input' });
-        expect(migrated.getRun('legacy-waiting')).toMatchObject({ steps: [], currentStepIndex: null, worker: { model: null }, sessionId: 'waiting-session', turn: 3 });
+        expect(migrated.getRun('legacy-waiting')).toMatchObject({ steps: [], currentStepIndex: null, worker: { model: null, ultracode: false }, sessionId: 'waiting-session', turn: 3 });
         expect(migrated.detail('legacy-task').comments.every(comment => comment.stepIndex === null)).toBe(true);
         expect(migrated.db.query('PRAGMA foreign_key_check').all()).toEqual([]);
         if (pass === 0) { migrated.close(); migrated = undefined; }
       }
       const resumed = migrated!.resume('legacy-waiting', 'main');
-      expect(resumed).toMatchObject({ steps: [], currentStepIndex: null, worker: { model: null }, sessionId: 'waiting-session', turn: 4, status: 'running' });
+      expect(resumed).toMatchObject({ steps: [], currentStepIndex: null, worker: { model: null, ultracode: false }, sessionId: 'waiting-session', turn: 4, status: 'running' });
       expect(migrated!.db.query('SELECT worker_snapshot,instructions_snapshot FROM runs WHERE id=?').get(resumed.id)).toEqual({ worker_snapshot: rawWorker, instructions_snapshot: rawGuidance });
       const comment = migrated!.detail('legacy-task').comments.at(-1)!;
       expect(comment).toMatchObject({ kind: 'user', body: 'main', stepIndex: null });
@@ -1028,6 +1034,8 @@ describe('persisted workflow corruption fails closed', () => {
       { name: 'missing active worker snapshot', row: { worker_snapshot: null } },
       { name: 'changed active provider snapshot', row: { worker_snapshot: JSON.stringify({ ...run.steps[1]!.worker, provider: 'codex' }) } },
       { name: 'changed active model snapshot', row: { worker_snapshot: JSON.stringify({ ...run.steps[1]!.worker, model: 'different-model' }) } },
+      { name: 'changed active ultracode snapshot', row: { worker_snapshot: JSON.stringify({ ...run.steps[1]!.worker, ultracode: true }) } },
+      { name: 'nonboolean future ultracode', steps: steps => { Object.assign(steps[2]!.worker, { ultracode: 'true' }); return steps; } },
       { name: 'changed active description snapshot', row: { worker_snapshot: JSON.stringify({ ...run.steps[1]!.worker, description: 'Mismatched role' }) } },
       { name: 'oversized future description', steps: steps => { steps[2]!.worker.description = 'x'.repeat(1_001); return steps; } },
       { name: 'nul future description', steps: steps => { steps[2]!.worker.description = 'a\0b'; return steps; } },

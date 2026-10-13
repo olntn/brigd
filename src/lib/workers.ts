@@ -16,7 +16,7 @@ export const isBuiltinWorker = (id: string | null | undefined): boolean => id ==
 export function integratorSnapshot(profile: IntegratorProfileInput, source: { provider: Provider; model: string | null; effort: Effort }): WorkerSnapshot {
   const custom = profile.mode === 'custom';
   return { ...INTEGRATOR_WORKER, provider: custom ? profile.provider : source.provider, model: custom ? profile.model ?? null : source.model,
-    effort: custom ? profile.effort : source.effort, communicationStyle: profile.communicationStyle, avatarUrl: profile.avatarUrl };
+    effort: custom ? profile.effort : source.effort, ultracode: false, communicationStyle: profile.communicationStyle, avatarUrl: profile.avatarUrl };
 }
 
 /** Optional display metadata, kept separate from executable personal instructions. */

@@ -25,6 +25,7 @@ export interface AgentInput {
   mock?: boolean;
   model?: string | null;
   effort?: Effort;
+  ultracode?: boolean;
   communicationStyle?: string;
 }
 export interface AgentCallbacks {
@@ -54,6 +55,8 @@ export interface CliCapabilities {
   model?: boolean;
   /** Explicitly supported overrides, as opposed to the model's effective level. */
   efforts?: readonly Effort[];
+  /** Native ultra agent mode, checked separately from ordinary effort levels. */
+  ultracode?: boolean;
 }
 
 function flag(help: string, name: string): boolean {
@@ -68,6 +71,7 @@ function validateWorkerSettings(input: AgentInput): Effort {
   if (!effortOptions[input.provider].includes(effort)) {
     throw new AgentRunError('UNSUPPORTED', `Unsupported effort for ${input.provider}. Choose one of: ${effortOptions[input.provider].join(', ')}.`);
   }
+  if (input.ultracode !== undefined && typeof input.ultracode !== 'boolean') throw new ProtocolError('ultracode must be a boolean.');
   if (input.communicationStyle !== undefined && (typeof input.communicationStyle !== 'string' || input.communicationStyle.length > 4000 || input.communicationStyle.includes('\0'))) {
     throw new ProtocolError('Communication style must be text of at most 4,000 characters without null bytes.');
   }
@@ -85,7 +89,7 @@ function claudeEfforts(help: string): readonly Effort[] {
 }
 
 /** All flags are checked against the installed CLI. Older schema-less CLIs still undergo strict result validation. */
-export function capabilitiesFromHelp(provider: Provider, help: string, resumeHelp = ''): CliCapabilities {
+export function capabilitiesFromHelp(provider: Provider, help: string, resumeHelp = '', version = ''): CliCapabilities {
   if (provider !== 'codex' && provider !== 'claude') throw new ProtocolError('Unsupported provider.');
   if (provider === 'codex') {
     for (const option of ['--json', '--sandbox', '--config']) {
@@ -102,14 +106,20 @@ export function capabilitiesFromHelp(provider: Provider, help: string, resumeHel
       // strict validation on both paths and enable it whenever we override effort.
       efforts: flag(help, '--strict-config') && flag(resumeHelp, '--strict-config') && flag(resumeHelp, '--config')
         ? effortOptions.codex.filter(value => value !== 'default') : [],
+      ultracode: flag(help, '--strict-config') && flag(resumeHelp, '--strict-config') && flag(resumeHelp, '--config'),
     };
   }
   for (const option of ['--print', '--output-format', '--verbose', '--resume', '--permission-mode']) {
     if (!flag(help, option)) throw new AgentRunError('UNSUPPORTED', `Installed Claude lacks required ${option} support. Update the CLI.`);
   }
   if (!help.includes('stream-json')) throw new AgentRunError('UNSUPPORTED', 'Installed Claude does not advertise stream-json output. Update the CLI.');
+  // The independent toggle was added in 2.1.284. Older --settings accepts unknown
+  // keys silently, so help alone cannot establish support for this setting.
+  const release = /^\s*(\d+)\.(\d+)\.(\d+)\b/.exec(version);
+  const ultracode = !!release && (+release[1]! > 2 || (+release[1]! === 2 && (+release[2]! > 1 || (+release[2]! === 1 && +release[3]! >= 284))));
   return { schema: flag(help, '--json-schema'), permissionPrompts: flag(help, '--permission-prompts'), model: flag(help, '--model'),
-    taskMcp: flag(help, '--mcp-config') && flag(help, '--allowedTools') && flag(help, '--permission-prompts'), efforts: claudeEfforts(help) };
+    taskMcp: flag(help, '--mcp-config') && flag(help, '--allowedTools') && flag(help, '--permission-prompts'), efforts: claudeEfforts(help),
+    ultracode: ultracode && flag(help, '--settings') };
 }
 
 function validateTaskBridge(bridge: TaskBridgeConfig): void {
@@ -236,12 +246,16 @@ export function buildPrompt(input: AgentInput): string {
 
 /** Argument vectors only: no shell interpolation, no --last, forks, or approval bypass. */
 export function buildArgv(input: AgentInput, binary: string, capabilities: CliCapabilities): string[] {
-  const effort = validateWorkerSettings(input);
+  const requestedEffort = validateWorkerSettings(input);
+  const effort = input.provider === 'codex' && input.ultracode ? 'ultra' : requestedEffort;
   const model = normalizeModel(input.model);
   if (model && !capabilities.model) {
     throw new AgentRunError('UNSUPPORTED', `Installed ${input.provider === 'codex' ? 'Codex' : 'Claude Code'} CLI cannot safely apply requested model "${model}" on new and resumed runs. Update the CLI or choose the default model.`);
   }
-  if (effort !== 'default' && !capabilities.efforts?.includes(effort)) {
+  if (input.ultracode && !capabilities.ultracode) {
+    throw new AgentRunError('UNSUPPORTED', `Installed ${input.provider === 'codex' ? 'Codex' : 'Claude Code'} CLI cannot safely enable ultra mode. Update the CLI${input.provider === 'claude' ? ' to 2.1.284 or later' : ''} or disable ultracode in the worker profile.`);
+  }
+  if (effort !== 'default' && effort !== 'ultra' && !capabilities.efforts?.includes(effort)) {
     throw new AgentRunError('UNSUPPORTED', `Installed ${input.provider === 'codex' ? 'Codex' : 'Claude Code'} CLI cannot safely apply requested effort "${effort}". Update the CLI or choose default effort.`);
   }
   if (input.taskBridge && !capabilities.taskMcp) throw new AgentRunError('UNSUPPORTED', `Installed ${input.provider} CLI cannot safely configure the ephemeral task attachment tools. Update the CLI.`);
@@ -252,6 +266,7 @@ export function buildArgv(input: AgentInput, binary: string, capabilities: CliCa
     const args = [binary, 'exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="on-request"', '-c', 'sandbox_workspace_write.network_access=true'];
     if (effort !== 'default' || input.taskBridge) args.push('--strict-config');
     if (effort !== 'default') args.push('-c', `model_reasoning_effort="${effort}"`);
+    if (input.ultracode) args.push('-c', 'agents.enabled=true');
     if (input.taskBridge) {
       const bridge = input.taskBridge, prefix = `mcp_servers.${bridge.name}`;
       for (const [key, value] of Object.entries({ command: bridge.command, args: bridge.args, env_vars: TASK_MCP_ENV, enabled: true, required: true,
@@ -269,6 +284,7 @@ export function buildArgv(input: AgentInput, binary: string, capabilities: CliCa
     return args;
   }
   const args = [binary, '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'default'];
+  if (input.ultracode !== undefined && capabilities.ultracode) args.push('--settings', JSON.stringify({ ultracode: input.ultracode }));
   if (model) args.push('--model', model);
   if (input.taskBridge) {
     const bridge = input.taskBridge;
@@ -374,8 +390,8 @@ export async function runBoundedProcess(argv: string[], options: ProcessOptions)
 }
 
 const capabilityCache = new Map<string, Promise<CliCapabilities>>();
-async function inspectCli(provider: Provider, binary: string, cwd: string): Promise<CliCapabilities> {
-  const key = `${provider}:${binary}`;
+async function inspectCli(provider: Provider, binary: string, cwd: string, inspectUltracode = false): Promise<CliCapabilities> {
+  const key = `${provider}:${binary}:${inspectUltracode}`;
   let cached = capabilityCache.get(key);
   if (!cached) {
     cached = (async () => {
@@ -390,7 +406,7 @@ async function inspectCli(provider: Provider, binary: string, cwd: string): Prom
         return output;
       };
       if (provider === 'codex') return capabilitiesFromHelp(provider, await help(['exec', '--help']), await help(['exec', 'resume', '--help']));
-      return capabilitiesFromHelp(provider, await help(['--help']));
+      return capabilitiesFromHelp(provider, await help(['--help']), '', inspectUltracode ? await help(['--version']) : '');
     })();
     capabilityCache.set(key, cached);
     void cached.catch(() => capabilityCache.delete(key));
@@ -436,6 +452,7 @@ export function startAgent(input: AgentInput, callbacks: AgentCallbacks): AgentH
   const abort = new AbortController();
   const result = (async (): Promise<AgentOutcome> => {
     const effort = validateWorkerSettings(input);
+    const effectiveEffort = input.provider === 'codex' && input.ultracode ? 'ultra' : effort;
     const model = normalizeModel(input.model);
     buildPrompt(input); // Apply the same guidance and size validation in mock mode.
     if (!input.instruction.trim()) throw new ProtocolError('The task instruction cannot be empty.');
@@ -445,13 +462,14 @@ export function startAgent(input: AgentInput, callbacks: AgentCallbacks): AgentH
     if (input.sessionId?.startsWith('mock-')) throw new ProtocolError('A mock session cannot be resumed with a real CLI.');
     const binary = Bun.which(input.provider, { PATH: process.env.PATH });
     if (!binary) throw new AgentRunError('UNAVAILABLE', `${input.provider === 'codex' ? 'Codex' : 'Claude Code'} CLI was not found on PATH. Install and sign in through its terminal before running real tasks.`);
-    const capabilities = await inspectCli(input.provider, binary, input.cwd);
+    const capabilities = await inspectCli(input.provider, binary, input.cwd, input.ultracode !== undefined);
     if (abort.signal.aborted) throw abort.signal.reason;
     const argv = buildArgv(input, binary, capabilities);
     const protocol = new AgentProtocol(input.provider, callbacks, input.sessionId);
     callbacks.onLog?.({ kind: 'lifecycle', summary: `${input.sessionId ? 'Продолжение сессии' : 'Запуск'} ${input.provider === 'codex' ? 'Codex' : 'Claude Code'}`, details: [
       `Рабочая папка: ${input.cwd}`,
-      `Модель: ${model ?? 'по умолчанию'}; уровень рассуждений: ${effort}.`,
+      `Модель: ${model ?? 'по умолчанию'}; уровень рассуждений: ${effectiveEffort}.`,
+      ...(input.ultracode !== undefined ? [`Режим ultra: ${input.ultracode ? 'запрошен профилем' : 'не запрошен профилем'}.`] : []),
       `Входные вложения: ${input.attachments?.length ?? 0}; общие инструкции: ${input.instructions?.length ?? 0}.`,
       'Применяются штатные правила разрешений CLI.',
     ] });
@@ -469,9 +487,9 @@ export function startAgent(input: AgentInput, callbacks: AgentCallbacks): AgentH
       catch (error) {
         // Keep provider stderr private, but give a useful diagnostic when an
         // installed model/account rejects a requested (CLI-supported) level.
-        if ((model || effort !== 'default') && error instanceof ProtocolError) {
-          const requested = [model ? `Requested ${input.provider} model: ${model}.` : '', effort !== 'default' ? `Requested ${input.provider} effort: ${effort}.` : ''].filter(Boolean).join(' ');
-          throw new ProtocolError(`${error.message} ${requested} Check the selected model/account supports these settings, or choose default model and effort. brigd did not substitute the requested model. Native permissions still apply.`);
+        if ((model || effort !== 'default' || input.ultracode) && error instanceof ProtocolError) {
+          const requested = [model ? `Requested ${input.provider} model: ${model}.` : '', effectiveEffort !== 'default' ? `Requested ${input.provider} effort: ${effectiveEffort}.` : '', input.ultracode ? `Requested ${input.provider} ultra mode.` : ''].filter(Boolean).join(' ');
+          throw new ProtocolError(`${error.message} ${requested} Check the selected model/account supports these settings, or choose default model and effort${input.ultracode ? ' and disable ultracode' : ''}. brigd did not substitute the requested model. Native permissions still apply.`);
         }
         throw error;
       }

@@ -24,7 +24,7 @@ for (const provider of ['codex', 'claude'] as Provider[]) {
   if (!binary) throw new Error(`${provider} is missing; this check requires the pinned container CLIs.`);
   const capabilities = provider === 'codex'
     ? capabilitiesFromHelp(provider, await probe([binary, 'exec', '--help']), await probe([binary, 'exec', 'resume', '--help']))
-    : capabilitiesFromHelp(provider, await probe([binary, '--help']));
+    : capabilitiesFromHelp(provider, await probe([binary, '--help']), '', await probe([binary, '--version']));
   if (!capabilities.model) throw new Error(`${provider} does not advertise --model on new and resumed paths`);
   for (const effort of effortOptions[provider]) {
     if (effort !== 'default' && !capabilities.efforts?.includes(effort)) throw new Error(`${provider} does not advertise the configured effort ${effort}`);
@@ -38,10 +38,15 @@ for (const provider of ['codex', 'claude'] as Provider[]) {
       await probe(help);
     }
   }
+  for (const ultracode of [true, false]) for (const resumed of [false, true]) {
+    const argv = buildArgv({ provider, cwd: process.cwd(), instruction: 'Never submitted: ultra mode help probe only.', ultracode, effort: 'high',
+      ...(resumed ? { sessionId: '0199a213-81c0-7800-8aa1-bbab2a035a53', answer: 'Never submitted.' } : {}) }, binary, capabilities);
+    await probe(provider === 'codex' ? [...argv.slice(0, argv.indexOf('--')), '--help'] : [...argv.slice(0, -1), '--help']);
+  }
   if (provider === 'codex') {
     // --help alone does not deserialize TOML. The read-only mcp get command
     // validates every generated server/tool option without starting a server.
-    const argv = buildArgv({ provider, cwd: process.cwd(), instruction: 'Never submitted.', taskBridge: bridge }, binary, capabilities);
+    const argv = buildArgv({ provider, cwd: process.cwd(), instruction: 'Never submitted.', taskBridge: bridge, ultracode: true }, binary, capabilities);
     const config: string[] = [];
     for (let index = 0; index < argv.indexOf('--'); index++) if (argv[index] === '-c') config.push('-c', argv[++index]!);
     const home = mkdtempSync(join(tmpdir(), 'brigd-cli-config-'));
@@ -50,5 +55,5 @@ for (const provider of ['codex', 'claude'] as Provider[]) {
       if (!parsed || JSON.stringify(parsed).includes(bridge.env.BRIGD_TASK_CAPABILITY)) throw new Error('Invalid or credential-bearing MCP config');
     } finally { rmSync(home, { recursive: true, force: true }); }
   }
-  console.log(`PASS: ${provider} native new/resume flag parsing for default/explicit model and ${effortOptions[provider].join(', ')} with and without task MCP${provider === 'codex' ? ', including TOML server/tool config deserialization' : ''}; no model calls.`);
+  console.log(`PASS: ${provider} native new/resume flag parsing for default/explicit model and ${effortOptions[provider].join(', ')}, ultra mode on/off, with and without task MCP${provider === 'codex' ? ', including TOML server/tool config deserialization' : ''}; no model calls.`);
 }

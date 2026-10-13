@@ -36,7 +36,7 @@ function matchesFence(run: Run, fence?: RunFence): boolean {
 }
 function workerSnapshot(worker: Worker): WorkerSnapshot {
   return { id: worker.id, name: worker.name, description: worker.description, provider: worker.provider, model: worker.model, effort: worker.effort,
-    communicationStyle: worker.communicationStyle, avatarUrl: worker.avatarUrl };
+    ultracode: worker.ultracode, communicationStyle: worker.communicationStyle, avatarUrl: worker.avatarUrl };
 }
 /** The built-in integrator has no catalog row, so runs it performs keep worker_id NULL beside its frozen snapshot. */
 const storedWorkerId = (worker: WorkerSnapshot | null | undefined): string | null => worker && !isBuiltinWorker(worker.id) ? worker.id : null;
@@ -49,6 +49,11 @@ function validatedModel(value: unknown): string | null {
 function validatedDescription(value: unknown): string {
   try { return normalizeWorkerDescription(value); }
   catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректное описание'); }
+}
+function validatedUltracode(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== 'boolean') throw new AppError('ultracode должен быть boolean');
+  return value;
 }
 function validatedDefaultCwd(value: unknown): string {
   if (typeof value !== 'string' || !value.trim() || value.length > 4_096 || value.includes('\0')) {
@@ -73,8 +78,9 @@ function validatedDefaultSchedule(value: unknown): TaskInput['schedule'] {
 function validWorkerSnapshot(value: unknown): value is WorkerSnapshot {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const worker = value as WorkerSnapshot;
-  const keys = Object.keys(worker).filter(key => key !== 'model' && key !== 'description').sort().join(',');
+  const keys = Object.keys(worker).filter(key => key !== 'model' && key !== 'description' && key !== 'ultracode').sort().join(',');
   if (keys !== 'avatarUrl,communicationStyle,effort,id,name,provider') return false;
+  if ('ultracode' in worker && typeof worker.ultracode !== 'boolean') return false;
   if (typeof worker.id !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(worker.id) || typeof worker.name !== 'string' || !worker.name.trim() || worker.name.length > 80 || worker.name.includes('\0')) return false;
   if (!['codex', 'claude'].includes(worker.provider) || !effortOptions[worker.provider]?.includes(worker.effort)) return false;
   if (typeof worker.communicationStyle !== 'string' || worker.communicationStyle.length > 4_000 || worker.communicationStyle.includes('\0')) return false;
@@ -87,11 +93,12 @@ function validWorkerSnapshot(value: unknown): value is WorkerSnapshot {
     // Upgrade legacy JSON in memory only; opening a database never rewrites snapshots.
     worker.model = model;
     worker.description = description;
+    worker.ultracode ??= false;
     return true;
   } catch { return false; }
 }
 function sameWorker(left: WorkerSnapshot, right: WorkerSnapshot): boolean {
-  return left.id === right.id && left.name === right.name && left.description === right.description && left.provider === right.provider && left.model === right.model && left.effort === right.effort && left.communicationStyle === right.communicationStyle && left.avatarUrl === right.avatarUrl;
+  return left.id === right.id && left.name === right.name && left.description === right.description && left.provider === right.provider && left.model === right.model && left.ultracode === right.ultracode && left.effort === right.effort && left.communicationStyle === right.communicationStyle && left.avatarUrl === right.avatarUrl;
 }
 function invalidSnapshot(): never {
   throw new AppError('Повреждён снимок запуска. Запуск остановлен; восстановите базу из резервной копии.', 409);
@@ -259,6 +266,7 @@ export class Store {
         ['tags', 'color', `TEXT NOT NULL DEFAULT '${DEFAULT_TAG_COLOR}'`],
         ['workers', 'model', 'TEXT'],
         ['workers', 'description', "TEXT NOT NULL DEFAULT ''"],
+        ['workers', 'ultracode', 'INTEGER NOT NULL DEFAULT 0 CHECK(ultracode IN (0,1))'],
         ['tasks', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_snapshot', 'TEXT'],
@@ -611,7 +619,7 @@ export class Store {
   }
   private mapWorker(row: Row): Worker {
     return { id: row.id, name: row.name, description: validatedDescription(row.description), provider: row.provider, model: validatedModel(row.model), effort: row.effort,
-      communicationStyle: row.communication_style, avatarUrl: row.avatar_url, archived: !!row.archived,
+      ultracode: !!row.ultracode, communicationStyle: row.communication_style, avatarUrl: row.avatar_url, archived: !!row.archived,
       createdAt: row.created_at, updatedAt: row.updated_at };
   }
   listWorkers(): Worker[] {
@@ -630,19 +638,21 @@ export class Store {
   createWorker(input: WorkerInput, now = Date.now()): Worker {
     const model = validatedModel(input.model);
     const description = validatedDescription(input.description);
+    const ultracode = validatedUltracode(input.ultracode);
     this.assertAvatar(input.avatarUrl);
     const id = crypto.randomUUID();
-    this.db.query(`INSERT INTO workers (id,name,description,provider,model,effort,communication_style,avatar_url,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
-      .run(id, input.name, description, input.provider, model, input.effort, input.communicationStyle, input.avatarUrl, now, now);
+    this.db.query(`INSERT INTO workers (id,name,description,provider,model,ultracode,effort,communication_style,avatar_url,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, input.name, description, input.provider, model, +ultracode, input.effort, input.communicationStyle, input.avatarUrl, now, now);
     return this.getWorker(id);
   }
   updateWorker(id: string, input: WorkerInput & { archived?: boolean }, now = Date.now()): Worker {
     const current = this.getWorker(id);
     const model = validatedModel(input.model === undefined && input.provider === current.provider ? current.model : input.model);
     const description = validatedDescription(input.description === undefined ? current.description : input.description);
+    const ultracode = validatedUltracode(input.ultracode === undefined ? current.ultracode : input.ultracode);
     this.assertAvatar(input.avatarUrl);
-    this.db.query('UPDATE workers SET name=?,description=?,provider=?,model=?,effort=?,communication_style=?,avatar_url=?,archived=?,updated_at=? WHERE id=?')
-      .run(input.name, description, input.provider, model, input.effort, input.communicationStyle, input.avatarUrl, +(input.archived ?? current.archived), now, id);
+    this.db.query('UPDATE workers SET name=?,description=?,provider=?,model=?,ultracode=?,effort=?,communication_style=?,avatar_url=?,archived=?,updated_at=? WHERE id=?')
+      .run(input.name, description, input.provider, model, +ultracode, input.effort, input.communicationStyle, input.avatarUrl, +(input.archived ?? current.archived), now, id);
     return this.getWorker(id);
   }
   archiveWorker(id: string, now = Date.now()): Worker {

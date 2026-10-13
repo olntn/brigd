@@ -53,6 +53,48 @@ test.afterEach(async ({ page }, testInfo) => {
   if (!page.isClosed()) await page.screenshot({ path: testInfo.outputPath('brigd-workers.png'), fullPage: true });
 });
 
+for (const provider of ['codex', 'claude'] as const) {
+  test(`${provider} ultracode defaults off and persists when enabled or disabled in the worker profile`, async ({ page, request }) => {
+    const name = unique(`${provider} ultracode работник`);
+    const { editor } = await newWorker(page);
+    const checkbox = editor.getByRole('checkbox', { name: 'ultracode', exact: true });
+    await editor.getByLabel('Провайдер', { exact: true }).selectOption(provider);
+    await expect(checkbox).not.toBeChecked();
+    await editor.getByLabel('Имя работника', { exact: true }).fill(name);
+    await checkbox.check();
+    await editor.getByLabel('Провайдер', { exact: true }).selectOption(provider === 'codex' ? 'claude' : 'codex');
+    await expect(checkbox).toBeChecked();
+    await editor.getByLabel('Провайдер', { exact: true }).selectOption(provider);
+    await editor.getByRole('button', { name: 'Создать работника', exact: true }).click();
+    await expect(editor).not.toBeVisible();
+    const worker = (await (await request.get('/api/workers')).json() as Worker[]).find(row => row.name === name)!;
+    expect(worker).toMatchObject({ provider, ultracode: true });
+
+    await page.reload();
+    await openWorkers(page);
+    await page.getByRole('button', { name: `Изменить работника: ${name}`, exact: true }).click();
+    const profile = page.getByRole('dialog', { name: 'Редактировать работника', exact: true });
+    await expect(profile.getByRole('checkbox', { name: 'ultracode', exact: true })).toBeChecked();
+    await profile.getByRole('button', { name: 'Отмена', exact: true }).click();
+
+    // A new draft must not inherit the previously opened profile's checked state.
+    const fresh = await newWorker(page);
+    await fresh.editor.getByLabel('Провайдер', { exact: true }).selectOption(provider);
+    await expect(fresh.editor.getByRole('checkbox', { name: 'ultracode', exact: true })).not.toBeChecked();
+    await fresh.editor.getByRole('button', { name: 'Отмена', exact: true }).click();
+    await page.getByRole('button', { name: `Изменить работника: ${name}`, exact: true }).click();
+    await profile.getByRole('checkbox', { name: 'ultracode', exact: true }).uncheck();
+    await profile.getByRole('button', { name: 'Сохранить профиль', exact: true }).click();
+    await expect(profile).not.toBeVisible();
+    expect((await (await request.get('/api/workers')).json() as Worker[]).find(row => row.id === worker.id)?.ultracode).toBe(false);
+
+    await page.reload();
+    await openWorkers(page);
+    await page.getByRole('button', { name: `Изменить работника: ${name}`, exact: true }).click();
+    await expect(profile.getByRole('checkbox', { name: 'ultracode', exact: true })).not.toBeChecked();
+  });
+}
+
 test('profile avatar, task assignment and immutable identity through edit and resume', async ({ page, request }, testInfo) => {
   const catalog = await (await request.get('/api/models')).json() as ModelCatalogEntry[];
   const codex = catalog.find(model => model.provider === 'codex')!;

@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentProtocol, ProtocolError, validateEnvelope } from '../server/protocol';
@@ -219,6 +219,51 @@ describe('CLI argument safety and compatibility', () => {
     expect(() => capabilitiesFromHelp('codex', '--json', '--json SESSION_ID')).toThrow('sandbox');
     expect(() => capabilitiesFromHelp('claude', '--print --output-format stream-json --verbose --resume')).toThrow('permission-mode');
   });
+  test('ultra uses native mode overrides on new and resumed runs for both providers', () => {
+    for (const provider of ['codex', 'claude'] as const) for (const sessionId of [undefined, sid]) {
+      const input = { ...base, provider, sessionId, effort: 'high' as const, ultracode: true };
+      const supported = { ...caps, ultracode: true, efforts: effortOptions[provider] };
+      const args = buildArgv(input, provider, supported);
+      if (provider === 'codex') {
+        expect(args).toContain('--strict-config');
+        expect(args).toContain('model_reasoning_effort="ultra"');
+        expect(args).toContain('agents.enabled=true');
+        expect(args).not.toContain('model_reasoning_effort="high"');
+      } else {
+        expect(args[args.indexOf('--settings') + 1]).toBe('{"ultracode":true}');
+        expect(args[args.indexOf('--effort') + 1]).toBe('high');
+      }
+      expect(args.at(-1)).toBe(buildPrompt(input));
+      expect(args).not.toContain('--dangerously-skip-permissions');
+      expect(args).not.toContain('--dangerously-bypass-approvals-and-sandbox');
+      const disabled = buildArgv({ ...input, ultracode: false }, provider, supported);
+      if (provider === 'codex') {
+        expect(disabled).toContain('model_reasoning_effort="high"');
+        expect(disabled).not.toContain('model_reasoning_effort="ultra"');
+        expect(disabled).not.toContain('agents.enabled=true');
+      } else expect(disabled[disabled.indexOf('--settings') + 1]).toBe('{"ultracode":false}');
+      expect(() => buildArgv(input, provider, { ...supported, ultracode: false })).toThrow('cannot safely enable ultra mode');
+    }
+  });
+  test('Claude toggle support requires settings and a sufficiently recent version', () => {
+    const help = '--print --output-format stream-json --verbose --resume --permission-mode --settings';
+    for (const version of ['2.1.284 (Claude Code)', '2.1.295 (Claude Code)', '2.2.0', '3.0.0']) {
+      expect(capabilitiesFromHelp('claude', help, '', version).ultracode).toBe(true);
+    }
+    for (const version of ['', 'unrecognized', '2.1.283 (Claude Code)', '2.0.999']) {
+      expect(capabilitiesFromHelp('claude', help, '', version).ultracode).toBe(false);
+    }
+    expect(capabilitiesFromHelp('claude', help.replace('--settings', '--other'), '', '2.1.295').ultracode).toBe(false);
+    expect(capabilitiesFromHelp('codex', '--json --sandbox --config --strict-config', '--json --config --strict-config SESSION_ID').ultracode).toBe(true);
+    expect(capabilitiesFromHelp('codex', '--json --sandbox --config', '--json SESSION_ID').ultracode).toBe(false);
+  });
+  test('invalid ultracode values are rejected before any invocation, including mock mode', async () => {
+    for (const ultracode of [null, 'true', 1, {}]) {
+      const input = { ...base, ultracode, mock: true } as unknown as AgentInput;
+      expect(() => buildPrompt(input)).toThrow('ultracode must be a boolean');
+      await expect(startAgent(input, capture()).result).rejects.toThrow('ultracode must be a boolean');
+    }
+  });
   test('session IDs cannot be CLI flags or injected argv', () => {
     expect(() => buildArgv({ ...base, sessionId: '--last' }, 'codex', caps)).toThrow('invalid session');
     expect(() => buildArgv({ ...base, sessionId: 'a b' }, 'codex', caps)).toThrow('invalid session');
@@ -326,6 +371,41 @@ describe('CLI argument safety and compatibility', () => {
 });
 
 describe('effort launch failures (synthetic CLI, no model calls)', () => {
+  test.each(['codex', 'claude'] as const)('%s submits native ultra settings on new and resumed CLI processes', async provider => {
+    const folder = mkdtempSync(join(tmpdir(), 'brigd-ultra-cli-'));
+    const previousPath = process.env.PATH;
+    const marker = join(folder, 'argv.json');
+    const help = provider === 'codex' ? '--json --sandbox --config --strict-config SESSION_ID' : '--print --output-format stream-json --verbose --resume --permission-mode --settings --effort low medium high xhigh max';
+    writeFileSync(join(folder, provider), `#!${process.execPath}\nif (process.argv.includes('--help')) console.log(${JSON.stringify(help)});\nelse if (process.argv.includes('--version')) console.log('2.1.295 (Claude Code)');\nelse { await Bun.write(${JSON.stringify(marker)}, JSON.stringify(process.argv.slice(2))); for (const event of ${JSON.stringify(provider === 'codex' ? codex() : claude())}) console.log(JSON.stringify(event)); }`, { mode: 0o700 });
+    try {
+      process.env.PATH = folder + ':' + previousPath;
+      for (const sessionId of [undefined, sid]) for (const ultracode of [true, false]) {
+        const result = await startAgent({ provider, cwd: folder, instruction: 'Synthetic ultra check.', ultracode, effort: 'high', sessionId }, capture()).result;
+        expect(result).toEqual({ sessionId: sid, envelope: completed });
+        const argv = JSON.parse(readFileSync(marker, 'utf8')) as string[];
+        if (provider === 'codex') {
+          expect(argv).toContain(`model_reasoning_effort="${ultracode ? 'ultra' : 'high'}"`);
+          expect(argv.includes('agents.enabled=true')).toBe(ultracode);
+          expect(argv.includes('resume')).toBe(!!sessionId);
+        } else {
+          expect(argv[argv.indexOf('--settings') + 1]).toBe(JSON.stringify({ ultracode }));
+          expect(argv[argv.indexOf('--effort') + 1]).toBe('high');
+          expect(argv.includes('--resume')).toBe(!!sessionId);
+        }
+      }
+    } finally { process.env.PATH = previousPath; rmSync(folder, { recursive: true, force: true }); }
+  });
+  test('older Claude cannot silently ignore an enabled ultra toggle', async () => {
+    const folder = mkdtempSync(join(tmpdir(), 'brigd-old-ultra-cli-'));
+    const previousPath = process.env.PATH;
+    const marker = join(folder, 'launched');
+    writeFileSync(join(folder, 'claude'), `#!${process.execPath}\nif (process.argv.includes('--help')) console.log('--print --output-format stream-json --verbose --resume --permission-mode --settings');\nelse if (process.argv.includes('--version')) console.log('2.1.283 (Claude Code)');\nelse await Bun.write(${JSON.stringify(marker)}, 'called');`, { mode: 0o700 });
+    try {
+      process.env.PATH = folder + ':' + previousPath;
+      await expect(startAgent({ provider: 'claude', cwd: folder, instruction: 'Never submitted.', ultracode: true }, capture()).result).rejects.toThrow('2.1.284');
+      expect(existsSync(marker)).toBe(false);
+    } finally { process.env.PATH = previousPath; rmSync(folder, { recursive: true, force: true }); }
+  });
   test('unsupported installed effort prevents an actual task invocation', async () => {
     const folder = mkdtempSync(join(tmpdir(), 'brigd-fake-cli-'));
     const previousPath = process.env.PATH;

@@ -17,9 +17,10 @@ for (const provider of ['codex', 'claude'] as Provider[]) {
     };
     const capabilities = provider === 'codex'
       ? capabilitiesFromHelp(provider, await help(['exec', '--help']), await help(['exec', 'resume', '--help']))
-      : capabilitiesFromHelp(provider, await help(['--help']));
+      : capabilitiesFromHelp(provider, await help(['--help']), '', await help(['--version']));
     console.log(`✓ ${provider}: CLI найден, нужные флаги поддерживаются${capabilities.schema ? ', JSON Schema доступна' : ''}`);
     console.log(`  Effort: ${capabilities.efforts?.length ? capabilities.efforts.join(', ') : 'только по умолчанию; обновите CLI для выбора effort'}`);
+    console.log(`  Ultra: ${capabilities.ultracode ? 'поддерживается CLI' : 'обновите CLI для включения режима ultra'}`);
     available++;
   } catch (error) { console.log(`! ${provider}: ${error instanceof Error ? error.message : error}`); }
 }

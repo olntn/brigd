@@ -23,6 +23,7 @@
   let draftModel = $state('');
   let customSelection = $state(false);
   let effort = $state<Effort>('default');
+  let ultracode = $state(false);
   let communicationStyle = $state('');
   let avatarUrl = $state<string | null>(null);
   let previewUrl = $state<string | null>(null);
@@ -118,6 +119,7 @@
     draftModel = worker?.model ?? '';
     customSelection = !!draftModel && (modelsError !== '' || !models.some(option => option.provider === provider && option.modelId === draftModel));
     effort = worker?.effort ?? 'default';
+    ultracode = worker?.ultracode ?? false;
     communicationStyle = worker?.communicationStyle ?? '';
     avatarUrl = worker?.avatarUrl ?? null;
     await presentEditor('[name="workerName"]');
@@ -261,7 +263,7 @@
         integrator = await request<IntegratorProfile>('/api/integrator', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         notify('Настройки Интегратора сохранены');
       } else {
-        const payload: WorkerInput = { name: name.trim(), description: description.trim(), provider, model, effort, communicationStyle: communicationStyle.trim(), avatarUrl };
+        const payload: WorkerInput = { name: name.trim(), description: description.trim(), provider, model, effort, ultracode, communicationStyle: communicationStyle.trim(), avatarUrl };
         const saved = await request<Worker>(editingId ? `/api/workers/${encodeURIComponent(editingId)}` : '/api/workers', {
           method: editingId ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
         });
@@ -345,6 +347,9 @@
       {#if modelSelection === '__custom__'}<label class="form-field"><span>ID модели <span class="required">*</span></span><input name="workerCustomModel" aria-label="ID модели" bind:value={draftModel} maxlength={MODEL_ID_LIMIT} placeholder={providerModels[0]?.modelId ?? 'model-id'} autocomplete="off" autocapitalize="off" spellcheck="false" required disabled={submitting} /><small>Укажите ID или алиас, который принимает ваш CLI, до {MODEL_ID_LIMIT} символов. Без пробелов внутри и символов управления.</small></label>{/if}
       <label class="form-field"><span>Уровень усилий</span><select name="workerEffort" aria-label="Уровень усилий" bind:value={effort} disabled={submitting}>{#each effortOptions[provider] as option}<option value={option}>{effortLabel(option)}</option>{/each}</select><small>Поддержка уровня зависит от выбранной модели, аккаунта и версии CLI. «По умолчанию CLI» сохраняет настройки CLI.</small></label>
       {/if}
+      {#if !editingBuiltin}
+      <div class="form-field"><label class="worker-ultracode-option"><input name="workerUltracode" type="checkbox" bind:checked={ultracode} aria-describedby="worker-ultracode-help" disabled={submitting} /><span>ultracode</span></label><small id="worker-ultracode-help">{provider === 'codex' ? 'Включает режим ultra с подагентами. Вместо выбранного уровня усилий используется ultra.' : 'Включает режим ultracode с подагентами. Выбранный уровень усилий сохраняется.'}</small></div>
+      {/if}
       {#if editingBuiltin}
       <label class="form-field"><span>Указания Интегратору</span><textarea name="communicationStyle" aria-label="Указания Интегратору" bind:value={communicationStyle} rows="5" maxlength="4000" disabled={submitting}></textarea><small>Передаются при разрешении конфликта: например, какие файлы не трогать или чью версию предпочитать. Показываются только здесь.</small></label>
       {:else}
@@ -355,3 +360,8 @@
     <footer class="editor-footer"><button type="button" class="button secondary" disabled={submitting} onclick={closeEditor}>Отмена</button><button type="submit" class="button primary" disabled={submitting || imageBusy || !!imageError}>{#if submitting}<Icon name="refresh" class="spin" size={16} />{:else}<Icon name={editingId || editingBuiltin ? 'check' : 'plus'} size={16} />{/if}{submitting ? 'Сохраняем…' : editingBuiltin ? 'Сохранить настройки' : editingId ? 'Сохранить профиль' : 'Создать работника'}</button></footer>
   </form>{/if}
 </dialog>
+
+<style>
+  .worker-ultracode-option { display: flex; align-items: center; gap: 10px; color: var(--secondary); font-size: .92rem; cursor: pointer; }
+  .worker-ultracode-option input[type='checkbox'] { width: 17px; height: 17px; margin: 0; padding: 0; }
+</style>

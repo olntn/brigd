@@ -12,7 +12,7 @@ async function noPrivateInstructions(scope: Locator) {
   await expect(scope.getByText('Личные инструкции', { exact: true })).toHaveCount(0);
 }
 function worker(id: string, provider: 'codex' | 'claude' = 'codex'): Worker {
-  return { id, name: `Работник ${id}`, provider, model: modelPresets[provider][0].id, effort: 'high', description: `Описание роли: ${id}`, communicationStyle: `PRIVATE_WORKFLOW_INSTRUCTIONS_${id}`, avatarUrl: null, archived: false, createdAt: timestamp, updatedAt: timestamp };
+  return { id, name: `Работник ${id}`, provider, model: modelPresets[provider][0].id, effort: 'high', ultracode: false, description: `Описание роли: ${id}`, communicationStyle: `PRIVATE_WORKFLOW_INSTRUCTIONS_${id}`, avatarUrl: null, archived: false, createdAt: timestamp, updatedAt: timestamp };
 }
 const fixtureWorkers = [worker('аналитик'), worker('редактор', 'claude'), worker('проверяющий')];
 function fixtureDetail(status: RunStatus = 'waiting_input', session = true): TaskDetail {

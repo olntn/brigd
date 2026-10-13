@@ -20,7 +20,7 @@ async function noOverflow(page: Page, surface?: Locator) {
 }
 
 function workerFixture(description: string | undefined): Worker {
-  const worker: Worker = { id: 'description-worker', name: 'Хранитель описания', description: description ?? '', provider: 'codex', model: null, effort: 'high', communicationStyle: privateText, avatarUrl: null, archived: false, createdAt: timestamp, updatedAt: timestamp };
+  const worker: Worker = { id: 'description-worker', name: 'Хранитель описания', description: description ?? '', provider: 'codex', model: null, effort: 'high', ultracode: false, communicationStyle: privateText, avatarUrl: null, archived: false, createdAt: timestamp, updatedAt: timestamp };
   // Deliberately emulate an old serialized record, before the description field existed.
   if (description === undefined) Reflect.deleteProperty(worker, 'description');
   return worker;

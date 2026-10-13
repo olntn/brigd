@@ -249,13 +249,13 @@ describe('explicit follow-up HTTP contract', () => {
 
 describe('immutable follow-up source selection', () => {
   test.each([0, 1, 2])('stage %s keeps its original worker, settings, session and historical context without replaying the chain', async index => {
-    const workers = crew();
+    const workers = crew().map((worker, i) => store.updateWorker(worker.id, { ...worker, ultracode: i < 2 }));
     const guidance = store.createInstruction({ title: 'Original guidance', body: 'Keep the original frozen rule.', enabled: true });
     const task = workflow(workers);
     const source = completed(task);
     const snapshot = source.steps[index]!;
     for (const worker of workers) {
-      store.updateWorker(worker.id, { ...worker, name: 'Changed profile', model: 'changed-model', effort: 'low', communicationStyle: 'Changed style.' });
+      store.updateWorker(worker.id, { ...worker, name: 'Changed profile', model: 'changed-model', ultracode: false, effort: 'low', communicationStyle: 'Changed style.' });
       store.archiveWorker(worker.id);
     }
     store.updateInstruction(guidance.id, { body: 'New guidance.', enabled: false });
@@ -267,7 +267,7 @@ describe('immutable follow-up source selection', () => {
       steps: [], currentStepIndex: null, followup: { sourceRunId: source.id, sourceStepIndex: index,
         workflow: { steps: source.steps, currentStepIndex: index } } });
     expect(calls[0]!.input).toMatchObject({ instruction: source.instruction, cwd: source.cwd, instructions: source.instructions,
-      model: snapshot.worker.model, effort: snapshot.worker.effort, communicationStyle: snapshot.worker.communicationStyle,
+      model: snapshot.worker.model, ultracode: snapshot.worker.ultracode, effort: snapshot.worker.effort, communicationStyle: snapshot.worker.communicationStyle,
       provider: snapshot.worker.provider, sessionId: snapshot.sessionId, workflow: { stepIndex: index, title: snapshot.title, instruction: snapshot.instruction } });
     await settle(0);
     expect(calls).toHaveLength(1);
@@ -303,16 +303,17 @@ describe('immutable follow-up source selection', () => {
   });
 
   test('a scalar source freezes worker and reusable instructions and preserves mock rather than current engine mode', async () => {
-    const worker = crew()[0]!;
+    const original = crew()[0]!;
+    const worker = store.updateWorker(original.id, { ...original, ultracode: true });
     const guidance = store.createInstruction({ title: 'Frozen', body: 'Original rule.', enabled: true });
     const task = store.createTask(taskInput({ workerId: worker.id }));
     const source = completed(task, false);
-    store.updateWorker(worker.id, { ...worker, provider: 'claude', model: 'changed', effort: 'low' });
+    store.updateWorker(worker.id, { ...worker, provider: 'claude', model: 'changed', ultracode: false, effort: 'low' });
     store.updateInstruction(guidance.id, { body: 'Changed rule.' });
     store.updateTask(task.id, taskInput({ workerId: null, cwd: '/tmp', instruction: 'Changed task.' }));
     const run = engine.followup(task.id, input(source));
     expect(run).toMatchObject({ mock: false, provider: 'codex', worker: source.worker, instruction: source.instruction, cwd: source.cwd, instructions: source.instructions });
-    expect(calls[0]!.input).toMatchObject({ mock: false, sessionId: source.sessionId, model: worker.model, effort: worker.effort });
+    expect(calls[0]!.input).toMatchObject({ mock: false, sessionId: source.sessionId, model: worker.model, ultracode: true, effort: worker.effort });
     await settle(0);
   });
 

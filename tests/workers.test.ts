@@ -84,7 +84,7 @@ const workerInput = (patch: Partial<WorkerInput> = {}): WorkerInput => ({
 });
 const snapshot = (worker: Worker): WorkerSnapshot => ({
   id: worker.id, name: worker.name, description: worker.description, provider: worker.provider, model: worker.model, effort: worker.effort,
-  communicationStyle: worker.communicationStyle, avatarUrl: worker.avatarUrl,
+  ultracode: worker.ultracode, communicationStyle: worker.communicationStyle, avatarUrl: worker.avatarUrl,
 });
 function request(path: string, method = 'GET', value?: unknown, headers: Record<string, string> = {}) {
   return handler(new Request(ORIGIN + path, { method,
@@ -221,7 +221,7 @@ describe('worker profile CRUD and validation', () => {
     const response = await request('/api/workers', 'POST', { name: '  Ада  ', provider: 'codex' });
     expect(response.status).toBe(201);
     const created: Worker = await response.json();
-    expect(created).toMatchObject({ name: 'Ада', description: '', provider: 'codex', model: null, effort: 'default', communicationStyle: '', avatarUrl: null, archived: false });
+    expect(created).toMatchObject({ name: 'Ада', description: '', provider: 'codex', model: null, ultracode: false, effort: 'default', communicationStyle: '', avatarUrl: null, archived: false });
     expect(created.id).toMatch(/^[a-zA-Z0-9-]+$/);
     expect(created.createdAt).toBeGreaterThan(0);
     expect(created.updatedAt).toBe(created.createdAt);
@@ -241,6 +241,35 @@ describe('worker profile CRUD and validation', () => {
     expect(await restored.json()).toMatchObject({ id: created.id, archived: false, effort: 'high', createdAt: created.createdAt });
     await reopen();
     expect(store.getWorker(created.id)).toMatchObject({ id: created.id, archived: false, name: 'Ada Lovelace' });
+  });
+
+  test.each(['codex', 'claude'] as const)('%s ultracode persists, survives unrelated edits and provider changes, and can be explicitly disabled', async provider => {
+    const worker = await createWorker({ provider, ultracode: true });
+    expect(worker.ultracode).toBe(true);
+    expect((await (await request('/api/workers')).json())[0].ultracode).toBe(true);
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { name: 'Renamed' })).status).toBe(200);
+    expect(store.getWorker(worker.id)).toMatchObject({ name: 'Renamed', ultracode: true });
+    expect(store.updateWorker(worker.id, workerInput({ provider, name: 'Direct edit' })).ultracode).toBe(true);
+    await reopen();
+    expect(store.getWorker(worker.id).ultracode).toBe(true);
+    const nextProvider = provider === 'codex' ? 'claude' : 'codex';
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { provider: nextProvider })).status).toBe(200);
+    expect(store.getWorker(worker.id)).toMatchObject({ name: 'Direct edit', provider: nextProvider, ultracode: true });
+    const disabled = await request(`/api/workers/${worker.id}`, 'PATCH', { ultracode: false });
+    expect(disabled.status).toBe(200);
+    expect((await disabled.json()).ultracode).toBe(false);
+    await reopen();
+    expect(store.getWorker(worker.id)).toMatchObject({ provider: nextProvider, ultracode: false });
+  });
+
+  test.each([null, 'true', 1, {}].map(ultracode => ({ ultracode })))('rejects malformed ultracode $ultracode atomically in HTTP and Store calls', async ({ ultracode }) => {
+    const worker = await createWorker({ provider: 'claude', ultracode: true });
+    const invalid = { ...workerInput({ provider: 'claude' }), ultracode } as WorkerInput;
+    expect((await request('/api/workers', 'POST', invalid)).status).toBe(400);
+    expect((await request(`/api/workers/${worker.id}`, 'PATCH', { ultracode, name: 'Do not save' })).status).toBe(400);
+    expectAppError(() => store.createWorker(invalid), 400);
+    expectAppError(() => store.updateWorker(worker.id, invalid), 400);
+    expect(store.listWorkers()).toEqual([worker]);
   });
 
   test.each(['codex', 'claude'] as const)('round-trips nullable, trimmed and custom %s model IDs without an allowlist', async provider => {
@@ -369,7 +398,7 @@ describe('worker assignment and immutable run snapshots', () => {
     const frozen = snapshot(original);
     expect(run).toMatchObject({ workerId: original.id, worker: frozen, provider: 'codex' });
     expect(frozen.model).toBe('gpt-5.3-codex');
-    expect(Object.keys(run.worker!).sort()).toEqual(['avatarUrl', 'communicationStyle', 'description', 'effort', 'id', 'model', 'name', 'provider']);
+    expect(Object.keys(run.worker!).sort()).toEqual(['avatarUrl', 'communicationStyle', 'description', 'effort', 'id', 'model', 'name', 'provider', 'ultracode']);
     store.setSession(run.id, 'original-persistent-session');
     store.finish(run.id, 'waiting_input', 'Choose branch', null, BASE + 2);
     const edited = store.updateWorker(original.id, workerInput({ name: 'Edited', description: 'Updated role', provider: 'claude', model: 'claude-opus-4-6', effort: 'max', communicationStyle: 'Long explanations', avatarUrl: replacementAvatar }), BASE + 3);
@@ -410,7 +439,7 @@ describe('worker assignment and immutable run snapshots', () => {
     expect(store.startManual(freshTask.id, true).worker?.model).toBe('new-explicit-model');
   });
 
-  test('malicious model data in a persisted simple snapshot cannot launch a resumed process', async () => {
+  test('malformed worker settings in a persisted simple snapshot cannot launch a resumed process', async () => {
     const worker = store.createWorker(workerInput({ model: 'valid-model' }));
     const task = store.createTask(taskInput({ workerId: worker.id }));
     const run = store.startManual(task.id, true);
@@ -418,8 +447,9 @@ describe('worker assignment and immutable run snapshots', () => {
     store.finish(run.id, 'waiting_input', 'Continue?', null);
     const original = (store.db.query('SELECT worker_snapshot FROM runs WHERE id=?').get(run.id) as { worker_snapshot: string }).worker_snapshot;
     try {
-      for (const model of ['--dangerous-option', 'model\n--dangerous-option', { value: 'model' }]) {
-        const corrupted = JSON.stringify({ ...JSON.parse(original), model });
+      for (const patch of [{ model: '--dangerous-option' }, { model: 'model\n--dangerous-option' }, { model: { value: 'model' } },
+        { ultracode: null }, { ultracode: 'true' }]) {
+        const corrupted = JSON.stringify({ ...JSON.parse(original), ...patch });
         store.db.query('UPDATE runs SET worker_snapshot=? WHERE id=?').run(corrupted, run.id);
         expectAppError(() => engine.resume(run.id, 'Do not launch.', false), 409);
         expect(calls).toHaveLength(0);
@@ -543,16 +573,17 @@ describe('display-only worker descriptions', () => {
     expect(store.listWorkers()).toEqual([worker]);
   });
 
-  test.each(['missing', 'null'])('pre-description database and %s snapshots upgrade in memory without changing raw data', async legacyDescription => {
+  test.each(['missing', 'null'])('pre-description/ultracode database and %s description snapshots upgrade in memory without changing raw data', async legacyDescription => {
     const worker = store.createWorker(workerInput({ model: 'kept-model', communicationStyle: '  Keep exact personal instructions.\nDo not make this a role.  ' }), BASE);
     const task = store.createTask(taskInput({ workerId: worker.id }), BASE);
     const run = store.startManual(task.id, true, BASE + 1);
     store.setSession(run.id, 'legacy-description-session');
     store.finish(run.id, 'waiting_input', 'Which target?', null, BASE + 2);
-    const { description: _description, ...legacyWorker } = snapshot(worker);
+    const { description: _description, ultracode: _ultracode, ...legacyWorker } = snapshot(worker);
     const workerJSON = JSON.stringify({ ...legacyWorker, ...(legacyDescription === 'null' ? { description: null } : {}) }, null, 2);
     store.db.query('UPDATE runs SET worker_snapshot=? WHERE id=?').run(workerJSON, run.id);
     store.db.exec('ALTER TABLE workers DROP COLUMN description');
+    store.db.exec('ALTER TABLE workers DROP COLUMN ultracode');
     const tables = ['workers', 'tasks', 'runs', 'comments', 'instructions'];
     const originals = new Map(tables.map(table => [table, store.db.query(`SELECT * FROM ${table} ORDER BY rowid`).all() as Record<string, unknown>[]]));
     for (let pass = 0; pass < 2; pass++) {
@@ -563,18 +594,18 @@ describe('display-only worker descriptions', () => {
         const columns = Object.keys(rows[0]!).map(name => `"${name}"`).join(',');
         expect(store.db.query(`SELECT ${columns} FROM ${table} ORDER BY rowid`).all()).toEqual(rows);
       }
-      expect(store.getWorker(worker.id)).toMatchObject({ description: '', communicationStyle: worker.communicationStyle, model: 'kept-model' });
-      expect(store.db.query('SELECT description FROM workers WHERE id=?').get(worker.id)).toEqual({ description: '' });
+      expect(store.getWorker(worker.id)).toMatchObject({ description: '', ultracode: false, communicationStyle: worker.communicationStyle, model: 'kept-model' });
+      expect(store.db.query('SELECT description,ultracode FROM workers WHERE id=?').get(worker.id)).toEqual({ description: '', ultracode: 0 });
       expect(store.getRun(run.id).worker).toEqual(snapshot(worker));
       expect(store.db.query('SELECT worker_snapshot FROM runs WHERE id=?').get(run.id)).toEqual({ worker_snapshot: workerJSON });
     }
-    store.updateWorker(worker.id, { ...worker, description: 'Current role', communicationStyle: 'Current personal instructions' });
+    store.updateWorker(worker.id, { ...worker, provider: 'claude', ultracode: true, description: 'Current role', communicationStyle: 'Current personal instructions' });
     const resumed = store.resume(run.id, 'main');
-    expect(resumed.worker).toMatchObject({ description: '', communicationStyle: worker.communicationStyle });
+    expect(resumed.worker).toMatchObject({ description: '', ultracode: false, communicationStyle: worker.communicationStyle });
     expect(store.db.query('SELECT worker_snapshot FROM runs WHERE id=?').get(run.id)).toEqual({ worker_snapshot: workerJSON });
     store.finish(run.id, 'completed', 'Done', null);
     const freshTask = store.createTask(taskInput({ workerId: worker.id }));
-    expect(store.startManual(freshTask.id, true).worker).toMatchObject({ description: 'Current role', communicationStyle: 'Current personal instructions' });
+    expect(store.startManual(freshTask.id, true).worker).toMatchObject({ description: 'Current role', ultracode: true, communicationStyle: 'Current personal instructions' });
     expect(store.db.query('PRAGMA foreign_key_check').all()).toEqual([]);
   });
 

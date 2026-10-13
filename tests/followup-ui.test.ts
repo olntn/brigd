@@ -3,7 +3,7 @@ import type { Run, RunStep, Task, WorkerSnapshot } from '../src/lib/types';
 import { followupFingerprint, followupStage, followupTargets, runWorkflowSteps, taskHasCompletedRun, followupSessionKey, resolveFollowupTarget } from '../src/lib/followups';
 
 const worker = (id: string, provider: 'codex' | 'claude' = 'codex'): WorkerSnapshot => ({ id, name: id, description: 'Public role',
-  provider, model: 'frozen-model', effort: 'high', communicationStyle: 'Private guidance', avatarUrl: null });
+  provider, model: 'frozen-model', ultracode: false, effort: 'high', communicationStyle: 'Private guidance', avatarUrl: null });
 function run(id: string, extra: Partial<Run> = {}): Run {
   return { id, taskId: 'task', workerId: 'worker', worker: worker('worker'), provider: 'codex', cwd: '/project', instruction: 'Original task',
     instructions: [], trigger: 'manual', scheduledFor: null, status: 'completed', sessionId: `session-${id}`, startedAt: 1,

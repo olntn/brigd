@@ -34,6 +34,8 @@ export interface WorkerInput {
   provider: Provider;
   /** null/omitted keeps the native CLI default; explicit IDs are frozen per run. */
   model?: string | null;
+  /** Enables the provider's ultra agent mode; omitted creation inputs default to false. */
+  ultracode?: boolean;
   effort: Effort;
   communicationStyle: string;
   avatarUrl: string | null;
@@ -41,13 +43,14 @@ export interface WorkerInput {
 export interface Worker extends WorkerInput {
   model: string | null;
   description: string;
+  ultracode: boolean;
   id: string;
   archived: boolean;
   createdAt: number;
   updatedAt: number;
 }
 /** Immutable identity and execution settings captured when a run starts. */
-export interface WorkerSnapshot extends WorkerInput { id: string; model: string | null; description: string; }
+export interface WorkerSnapshot extends WorkerInput { id: string; model: string | null; description: string; ultracode: boolean; }
 /** How the built-in integrator chooses its CLI: the merged run's settings, or its own saved ones. */
 export type IntegratorMode = 'inherit' | 'custom';
 export interface IntegratorProfileInput {
