@@ -250,6 +250,9 @@ export class Store {
         run_id TEXT REFERENCES runs(id), kind TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS task_runs ON runs(task_id, started_at DESC);
+      CREATE TABLE IF NOT EXISTS run_code_diffs (
+        run_id TEXT PRIMARY KEY REFERENCES runs(id), baseline TEXT, result TEXT
+      );
       CREATE INDEX IF NOT EXISTS task_comments ON comments(task_id, seq);
       CREATE TABLE IF NOT EXISTS task_logs (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id),

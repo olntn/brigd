@@ -8,6 +8,7 @@ import { createTaskBridge } from './task-mcp';
 import { dirname, join, resolve } from 'node:path';
 import { DirectWorkspaces, GitWorkspaces, WorkspaceError, type RepositoryLocation, type WorkspaceProvider } from './workspaces';
 import { GitIntegrator, type Integrator } from './integration';
+import { RunCodeDiffs } from './code-diff';
 
 export type AgentFactory = (input: AgentInput, callbacks: AgentCallbacks) => AgentHandle;
 export type TaskBridgeFactory = (store: Store, run: Run, fence: RunFence) => ReturnType<typeof createTaskBridge>;
@@ -16,6 +17,7 @@ export interface EngineOptions { workspaces?: WorkspaceProvider; maxParallel?: n
   autoReconcile?: boolean; }
 interface Launch { taskId: string; handle: AgentHandle | null; fence: RunFence; cancelRequested: boolean; bridge?: ReturnType<typeof createTaskBridge>; settled?: Promise<void>; }
 export class Engine {
+  readonly codeDiffs: RunCodeDiffs;
   private handles = new Map<string, Launch>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private closing = false;
@@ -31,6 +33,7 @@ export class Engine {
   /** Repository identity per task folder, so a busy pool does not spawn Git every second. */
   private locations = new Map<string, { location: RepositoryLocation; at: number }>();
   constructor(readonly store: Store, readonly mock = false, private factory: AgentFactory = startAgent, private bridgeFactory?: TaskBridgeFactory, options: EngineOptions = {}) {
+    this.codeDiffs = new RunCodeDiffs(store);
     this.environmentChecks = options.integrationChecks === undefined ? undefined : validateIntegrationChecks(options.integrationChecks);
     this.workspaces = options.workspaces ?? (mock || factory !== startAgent ? new DirectWorkspaces() : new GitWorkspaces(join(dirname(resolve(store.db.filename)), 'workspaces'), () => this.integrationChecks()));
     this.requiresIntegrationChecks = !mock && this.workspaces instanceof GitWorkspaces;
@@ -211,6 +214,7 @@ export class Engine {
           if (launch.cancelRequested || this.closing) { this.release(run, launch); return; }
           // A resumed integrator session keeps the merge it was already working in.
           if (run.trigger === 'reconcile' && run.turn === 1 && !run.sessionId) return this.prepareReconcile(run, launch);
+          this.codeDiffs.begin(this.store.getRun(run.id));
           const current = this.store.beginExecution(run.id, launch.fence);
           if (!current) { this.release(run, launch); return; }
           return this.invoke(current, launch, request.answer);
@@ -257,6 +261,7 @@ export class Engine {
     }
     if (launch.cancelRequested || this.closing) { this.release(run, launch); return; }
     this.store.attachReconciliation(run.id, launch.fence, prepared);
+    this.codeDiffs.begin(this.store.getRun(run.id));
     const current = this.store.beginExecution(run.id, launch.fence);
     if (!current) { this.release(run, launch); return; }
     if (prepared.conflicts.length) return this.invoke(current, launch);
@@ -294,6 +299,7 @@ export class Engine {
     launch.bridge?.close();
     this.store.completeCancellation(run.id, Date.now(), launch.fence);
     const current = this.store.getRun(run.id);
+    this.codeDiffs.freeze(current);
     const hold = !current.mock && current.workspace?.mode === 'direct' &&
       (current.status === 'waiting_input' || !!current.steps.length && ['failed', 'blocked'].includes(current.status));
     this.store.settleExecution(run.id, launch.fence.turn, hold);

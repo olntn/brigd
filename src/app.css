@@ -560,6 +560,7 @@ dialog::backdrop { background: var(--overlay); }
 .task-activity .comment-form { border-top: 1px solid var(--line); }
 .task-activity .resume-panel { margin-top: 12px; }
 .logs-panel { padding: 0 24px 24px; }
+.changes-panel { padding: 0 24px 24px; }
 .activity-help { margin: 18px 0; font-size: .85rem; color: var(--muted); line-height: 1.75; }
 .task-logs { display: grid; gap: 10px; }
 .task-log { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); overflow-wrap: anywhere; }

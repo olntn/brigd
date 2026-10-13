@@ -177,14 +177,15 @@ test('a saved agent answer and its matching result appear as one final comment a
   }
 });
 
-test('all three activity tabs support keyboard selection and wraparound', async ({ page }) => {
+test('all four activity tabs support keyboard selection and wraparound', async ({ page }) => {
   const dialog = await openTask(page, fixtureDetail());
   const comments = dialog.getByRole('tab', { name: /Комментарии/ });
   const logs = dialog.getByRole('tab', { name: /Логи/ });
+  const changes = dialog.getByRole('tab', { name: /Изменения/ });
   const runs = dialog.getByRole('tab', { name: /Запуски/ });
   await comments.focus();
   for (const [key, tab, panelName] of [
-    ['ArrowRight', logs, /Логи/], ['ArrowRight', runs, /Запуски/], ['ArrowRight', comments, /Комментарии/],
+    ['ArrowRight', logs, /Логи/], ['ArrowRight', changes, /Изменения/], ['ArrowRight', runs, /Запуски/], ['ArrowRight', comments, /Комментарии/],
     ['ArrowLeft', runs, /Запуски/], ['Home', comments, /Комментарии/], ['End', runs, /Запуски/],
   ] as const) {
     await page.keyboard.press(key);

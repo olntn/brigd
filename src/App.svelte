@@ -19,6 +19,7 @@
   import WorkflowChecklist from './lib/WorkflowChecklist.svelte';
   import IntegrationPanel from './lib/IntegrationPanel.svelte';
   import TaskLogs from './lib/TaskLogs.svelte';
+  import CodeDiff from './lib/CodeDiff.svelte';
   import { taskActivity } from './lib/activity';
   import { WORKFLOW_MIN_STEPS, WORKFLOW_MAX_STEPS, WORKFLOW_TEXT_LIMIT, WORKFLOW_BYTES_LIMIT } from './lib/workflows';
   import { effortLabel, modelLabel } from './lib/workers';
@@ -81,7 +82,7 @@
   let selectedId = $state<string | null>(null);
   let detail = $state<TaskDetail | null>(null);
   let detailError = $state('');
-  let detailTab = $state<'conversation' | 'logs' | 'history'>('conversation');
+  let detailTab = $state<'conversation' | 'logs' | 'changes' | 'history'>('conversation');
   let activity = $derived(taskActivity(detail));
   let comment = $state('');
   let followupTargetKey = $state('');
@@ -843,7 +844,7 @@
   function tabKey(event: KeyboardEvent) {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
-    const tabs = ['conversation', 'logs', 'history'] as const;
+    const tabs = ['conversation', 'logs', 'changes', 'history'] as const;
     const next = (tabs.indexOf(detailTab) + (event.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length;
     detailTab = event.key === 'Home' ? 'conversation' : event.key === 'End' ? 'history' : tabs[next];
     drawer.querySelector<HTMLButtonElement>(`#${detailTab}-tab`)?.focus();
@@ -1106,12 +1107,15 @@
       <div class="detail-tabs" role="tablist" aria-label="История задачи">
         <button id="conversation-tab" role="tab" tabindex={detailTab === 'conversation' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'conversation'} aria-controls="conversation-panel" class:active={detailTab === 'conversation'} onclick={() => detailTab = 'conversation'}><Icon name="message" size={15} />Комментарии{#if currentRun?.status === 'waiting_input'}<span class="tab-attention" aria-label="Нужен ответ">!</span>{/if}</button>
         <button id="logs-tab" role="tab" tabindex={detailTab === 'logs' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'logs'} aria-controls="logs-panel" class:active={detailTab === 'logs'} onclick={() => detailTab = 'logs'}><Icon name="terminal" size={15} />Логи</button>
+        <button id="changes-tab" role="tab" tabindex={detailTab === 'changes' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'changes'} aria-controls="changes-panel" class:active={detailTab === 'changes'} onclick={() => detailTab = 'changes'}><Icon name="code" size={15} />Изменения</button>
         <button id="history-tab" role="tab" tabindex={detailTab === 'history' ? 0 : -1} onkeydown={tabKey} aria-selected={detailTab === 'history'} aria-controls="history-panel" class:active={detailTab === 'history'} onclick={() => detailTab = 'history'}><Icon name="history" size={15} />Запуски</button>
       </div>
       {#if !detail}<div class="detail-loading"><Icon name="refresh" class="spin" size={19} />Загружаем историю…</div>{:else if detailTab === 'conversation'}
         <div id="conversation-panel" tabindex="0" role="tabpanel" aria-labelledby="conversation-tab" class="conversation-panel">{#each activity.comments as entry (entry.id)}<article class="comment-entry comment-{entry.kind}">{#if commentWorker(entry)}<WorkerAvatar name={commentWorker(entry)!.name} avatarUrl={commentWorker(entry)!.avatarUrl} size={40} />{:else}<span class="comment-avatar">{#if entry.kind === 'user'}Я{:else if entry.kind === 'system'}<Icon name="terminal" size={14} />{:else if entry.kind === 'question'}<Icon name="message" size={14} />{:else}<Icon name="spark" size={14} />{/if}</span>{/if}<div class="comment-main"><div class="comment-meta"><span class="comment-author"><strong>{commentAuthor(entry)}</strong>{#if commentWorker(entry)?.description?.trim()}<small class="worker-description">{commentWorker(entry)!.description}</small>{/if}</span>{#if commentRun(entry)?.followup}<span class="comment-step-label">Дополнительный запрос{#if followupStage(commentRun(entry)!)} · Этап {followupStage(commentRun(entry)!)!.index + 1}{/if}</span>{:else if entry.stepIndex != null}<span class="comment-step-label">Этап {entry.stepIndex + 1}</span>{/if}<time datetime={new Date(entry.createdAt).toISOString()}>{dateTime(entry.createdAt)}</time></div>{#if entry.body}<p>{entry.body}</p>{/if}<AttachmentList attachments={entry.attachments ?? []} taskId={selectedTask.id} label="Вложения сообщения" author={attachmentAuthor} /></div></article>{:else}<div class="conversation-empty"><Icon name="message" size={25} /><strong>У каждой задачи своя история</strong><p>Здесь появятся сообщения агента, вопросы и результат.{#if selectedTask.archivedAt === null}<br />Можно оставить заметку уже сейчас.{/if}</p></div>{/each}</div>
       {:else if detailTab === 'logs'}
         <div id="logs-panel" tabindex="0" role="tabpanel" aria-labelledby="logs-tab" class="logs-panel"><TaskLogs logs={activity.logs} runs={detail.runs} taskId={selectedTask.id} author={attachmentAuthor} /></div>
+      {:else if detailTab === 'changes'}
+        <div id="changes-panel" tabindex="0" role="tabpanel" aria-labelledby="changes-tab" class="changes-panel">{#key selectedTask.id}<CodeDiff runs={detail.runs} />{/key}</div>
       {:else}
         <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name={run.followup ? "message" : run.reconcile ? "refresh" : "play"} size={14} />{run.followup ? "Дополнительный запрос" : run.reconcile ? "Разрешение конфликта" : "Запуск"} {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{#if run.worker}{@render workerBadge(run.worker, true)}{:else}{@render providerBadge(run.provider, true)}{/if}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'followup' ? 'Из обсуждения' : run.trigger === 'reconcile' ? 'Конфликт слияния' : run.trigger === 'schedule' ? 'По расписанию' : run.trigger === 'autopilot' ? 'Автопилот' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.followup}<div class="run-followup-request"><strong>Запрос{#if followupStage(run)} · Этап {followupStage(run)!.index + 1}: {followupStage(run)!.title}{/if}</strong><p>{run.followup.request || 'Запрос с вложениями'}</p></div>{:else if run.reconcile}<div class="run-followup-request"><strong>Целевая ветка: {run.reconcile.targetBranch}</strong>{#if run.reconcile.conflicts.length}<ul class="integration-conflicts">{#each run.reconcile.conflicts as path}<li><code>{path}</code></li>{/each}</ul>{/if}</div>{/if}{#if run.reconcile}<div class="run-followup-request"><strong>Целевая ветка {run.reconcile.targetBranch}{#if run.reconcile.depth > 1} · попытка {run.reconcile.depth}{/if}</strong>{#if run.reconcile.conflicts.length}<p>{run.reconcile.conflicts.join('\n')}</p>{/if}</div>{/if}{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}{#if run.steps?.length}<WorkflowChecklist {run} />{:else if run.followup?.workflow?.steps.length}<WorkflowChecklist {run} historical />{/if}{@render instructionSnapshot(run)}{#if run.integration}<IntegrationPanel integration={run.integration} historical />{/if}<div class="run-details">Ход {run.turn}{#if run.worker}<span> · Усилия: {effortLabel(run.worker.effort)}</span>{/if}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
       {/if}

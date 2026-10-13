@@ -212,6 +212,8 @@ export function createHandler(engine: Engine, options: HttpOptions) {
           return json(engine.store.comment(id, null, 'user', text, Date.now(), undefined, ids), 201);
         }
       }
+      const diffMatch = path.match(/^\/api\/runs\/([a-zA-Z0-9-]+)\/diff$/);
+      if (diffMatch && method === 'GET') return json(engine.codeDiffs.get(engine.store.getRun(diffMatch[1]!)));
       const runMatch = path.match(/^\/api\/runs\/([a-zA-Z0-9-]+)\/(resume|cancel|retry|integrate|cancel-integration|reconcile)$/);
       if (runMatch && method === 'POST') {
         const [, id, action] = runMatch;
