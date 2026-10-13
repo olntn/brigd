@@ -56,7 +56,10 @@ export function createHandler(engine: Engine, options: HttpOptions) {
   const dist = resolve(options.root ?? process.cwd(), 'dist');
   const startedAt = options.startedAt ?? Date.now();
   const cliHome = options.cliHome ?? homedir();
-  const generalSettings = (): GeneralSettings => ({ defaultCwd: engine.store.getDefaultCwd() ?? options.defaultCwd ?? process.cwd() });
+  const generalSettings = (): GeneralSettings => ({
+    defaultCwd: engine.store.getDefaultCwd() ?? options.defaultCwd ?? process.cwd(),
+    defaultSchedule: engine.store.getDefaultSchedule(),
+  });
   let uploading = 0;
   return async (req: Request): Promise<Response> => {
     try {
@@ -142,8 +145,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
       if (path === '/api/settings/general' && method === 'GET') return json(generalSettings());
       if (path === '/api/settings/general' && method === 'PATCH') {
         const value = await body(req);
-        if (Object.keys(value).length !== 1 || !Object.hasOwn(value, 'defaultCwd')) throw new AppError('Укажите только поле defaultCwd');
-        engine.store.setDefaultCwd(value.defaultCwd);
+        engine.store.updateGeneralSettings(value);
         return json(generalSettings());
       }
       if (path === '/api/settings/autopilot' && method === 'GET') return json(engine.getAutopilotSettings());

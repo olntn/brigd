@@ -64,6 +64,7 @@ export interface IntegratorProfile extends IntegratorProfileInput { model: strin
 
 export interface GeneralSettings {
   defaultCwd: string;
+  defaultSchedule: TaskInput['schedule'];
 }
 
 export interface AutopilotSettings {

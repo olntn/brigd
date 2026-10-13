@@ -50,6 +50,26 @@ function validatedDescription(value: unknown): string {
   try { return normalizeWorkerDescription(value); }
   catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректное описание'); }
 }
+function validatedDefaultCwd(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 4_096 || value.includes('\0')) {
+    throw new AppError('Рабочая папка по умолчанию: введите от 1 до 4096 символов');
+  }
+  const input = value.trim();
+  if (!isAbsolute(input)) throw new AppError('Нужен абсолютный путь к рабочей папке');
+  let cwd: string;
+  try {
+    cwd = realpathSync(input);
+    if (!statSync(cwd).isDirectory()) throw new Error('Not a directory');
+  } catch { throw new AppError('Рабочая папка не существует или недоступна сервису'); }
+  if (cwd.length > 4_096) throw new AppError('Рабочая папка по умолчанию: не больше 4096 символов');
+  return cwd;
+}
+function validatedDefaultSchedule(value: unknown): TaskInput['schedule'] {
+  if (value !== 'auto' && value !== 'manual' && value !== 'interval') {
+    throw new AppError('Тип запуска по умолчанию: выберите Автопилот, Вручную или По расписанию');
+  }
+  return value;
+}
 function validWorkerSnapshot(value: unknown): value is WorkerSnapshot {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const worker = value as WorkerSnapshot;
@@ -303,9 +323,16 @@ export class Store {
     this.db.exec(`CREATE TABLE IF NOT EXISTS autopilot_settings (
       singleton INTEGER PRIMARY KEY CHECK(singleton=1), integration_checks TEXT
     ); INSERT OR IGNORE INTO autopilot_settings (singleton,integration_checks) VALUES (1,NULL)`);
-    this.db.exec(`CREATE TABLE IF NOT EXISTS general_settings (
-      singleton INTEGER PRIMARY KEY CHECK(singleton=1), default_cwd TEXT
-    ); INSERT OR IGNORE INTO general_settings (singleton,default_cwd) VALUES (1,NULL)`);
+    this.db.transaction(() => {
+      this.db.exec(`CREATE TABLE IF NOT EXISTS general_settings (
+        singleton INTEGER PRIMARY KEY CHECK(singleton=1), default_cwd TEXT,
+        default_schedule TEXT NOT NULL DEFAULT 'manual' CHECK(default_schedule IN ('auto','manual','interval'))
+      )`);
+      if (!(this.db.query('PRAGMA table_info(general_settings)').all() as Row[]).some(row => row.name === 'default_schedule')) {
+        this.db.exec("ALTER TABLE general_settings ADD COLUMN default_schedule TEXT NOT NULL DEFAULT 'manual' CHECK(default_schedule IN ('auto','manual','interval'))");
+      }
+      this.db.exec('INSERT OR IGNORE INTO general_settings (singleton,default_cwd) VALUES (1,NULL)');
+    }).immediate();
     // The explicit marker makes even an intentionally empty catalog persistent.
     // Creation, seeding and the marker commit together, including concurrent opens.
     this.db.transaction(() => {
@@ -377,19 +404,28 @@ export class Store {
     return row.default_cwd;
   }
   setDefaultCwd(value: unknown): string {
-    if (typeof value !== 'string' || !value.trim() || value.length > 4_096 || value.includes('\0')) {
-      throw new AppError('Рабочая папка по умолчанию: введите от 1 до 4096 символов');
-    }
-    const input = value.trim();
-    if (!isAbsolute(input)) throw new AppError('Нужен абсолютный путь к рабочей папке');
-    let cwd: string;
-    try {
-      cwd = realpathSync(input);
-      if (!statSync(cwd).isDirectory()) throw new Error('Not a directory');
-    } catch { throw new AppError('Рабочая папка не существует или недоступна сервису'); }
-    if (cwd.length > 4_096) throw new AppError('Рабочая папка по умолчанию: не больше 4096 символов');
+    const cwd = validatedDefaultCwd(value);
     this.db.query('UPDATE general_settings SET default_cwd=? WHERE singleton=1').run(cwd);
     return cwd;
+  }
+  getDefaultSchedule(): TaskInput['schedule'] {
+    const row = this.db.query('SELECT default_schedule FROM general_settings WHERE singleton=1').get() as { default_schedule: TaskInput['schedule'] };
+    return row.default_schedule;
+  }
+  setDefaultSchedule(value: unknown): TaskInput['schedule'] {
+    const schedule = validatedDefaultSchedule(value);
+    this.db.query('UPDATE general_settings SET default_schedule=? WHERE singleton=1').run(schedule);
+    return schedule;
+  }
+  updateGeneralSettings(value: Record<string, unknown>): void {
+    const keys = Object.keys(value);
+    if (!keys.length || keys.some(key => key !== 'defaultCwd' && key !== 'defaultSchedule')) {
+      throw new AppError('Укажите defaultCwd и/или defaultSchedule');
+    }
+    const cwd = Object.hasOwn(value, 'defaultCwd') ? validatedDefaultCwd(value.defaultCwd) : null;
+    const schedule = Object.hasOwn(value, 'defaultSchedule') ? validatedDefaultSchedule(value.defaultSchedule) : null;
+    this.db.query(`UPDATE general_settings SET default_cwd=COALESCE(?,default_cwd),
+      default_schedule=COALESCE(?,default_schedule) WHERE singleton=1`).run(cwd, schedule);
   }
   getIntegrationChecks(): string[][] | null {
     const row = this.db.query('SELECT integration_checks FROM autopilot_settings WHERE singleton=1').get() as { integration_checks: string | null };

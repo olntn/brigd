@@ -59,6 +59,7 @@
   let generalSettingsError = $state('');
   let generalSettingsSequence = 0;
   let generalSettingsReadSequence: number | null = null;
+  let generalSettingsRequest: Promise<void> | null = null;
   let generalSettingsMutationPending = $state(false);
   let autopilotSettings = $state<AutopilotSettingsValue | null>(null);
   let autopilotSettingsLoading = $state(true);
@@ -344,21 +345,28 @@
     modelsLoading = false;
   }
 
-  async function loadGeneralSettings() {
-    if (generalSettingsMutationPending || generalSettingsReadSequence !== null) return;
+  function loadGeneralSettings(): Promise<void> {
+    if (generalSettingsMutationPending) return Promise.resolve();
+    if (generalSettingsRequest && generalSettingsReadSequence !== null) return generalSettingsRequest;
     const sequence = ++generalSettingsSequence;
     generalSettingsReadSequence = sequence;
-    try {
-      const result = await api<GeneralSettingsValue>('/api/settings/general');
-      if (sequence !== generalSettingsSequence) return;
-      generalSettings = result;
-      generalSettingsError = '';
-    } catch (error) {
-      if (sequence === generalSettingsSequence) generalSettingsError = error instanceof Error ? error.message : 'Не удалось загрузить общие настройки';
-    } finally {
-      if (generalSettingsReadSequence === sequence) generalSettingsReadSequence = null;
-      if (sequence === generalSettingsSequence) generalSettingsLoading = false;
-    }
+    generalSettingsRequest = (async () => {
+      try {
+        const result = await api<GeneralSettingsValue>('/api/settings/general');
+        if (sequence !== generalSettingsSequence) return;
+        generalSettings = result;
+        generalSettingsError = '';
+      } catch (error) {
+        if (sequence === generalSettingsSequence) generalSettingsError = error instanceof Error ? error.message : 'Не удалось загрузить общие настройки';
+      } finally {
+        if (generalSettingsReadSequence === sequence) {
+          generalSettingsReadSequence = null;
+          generalSettingsRequest = null;
+        }
+        if (sequence === generalSettingsSequence) generalSettingsLoading = false;
+      }
+    })();
+    return generalSettingsRequest;
   }
 
   function generalSettingsChanged(value: GeneralSettingsValue) {
@@ -518,7 +526,11 @@
 
   async function openEditor(task?: Task) {
     if (submitting) return;
-    editorContext++;
+    const context = ++editorContext;
+    if (!task) {
+      await loadGeneralSettings();
+      if (context !== editorContext) return;
+    }
     formAttachments = [...(task?.attachments ?? [])];
     formAttachmentCount = formAttachments.length;
     formUploading = false;
@@ -536,7 +548,7 @@
     formOriginalStepWorkers = task?.steps?.map(step => step.workerId) ?? [];
     void loadWorkers();
     formCwd = task?.cwd ?? generalSettings?.defaultCwd ?? info?.cwd ?? '';
-    formSchedule = task?.schedule ?? 'manual';
+    formSchedule = task?.schedule ?? generalSettings?.defaultSchedule ?? 'manual';
     formInterval = task?.intervalMinutes ?? 60;
     formFirstRun = localInputDate(task?.firstRunAt ?? null);
     formPaused = task?.paused ?? false;

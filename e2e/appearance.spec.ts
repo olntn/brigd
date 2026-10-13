@@ -52,7 +52,7 @@ async function fixtureApi(page: Page, mode: AppInfo['mode'] = 'mock', populated:
     } else if (path === '/api/settings/autopilot') {
       await route.fulfill({ json: { integrationChecks: [['bun', 'run', 'verify']], source: 'settings' } });
     } else if (path === '/api/settings/general') {
-      await route.fulfill({ json: { defaultCwd: '/workspace/project' } });
+      await route.fulfill({ json: { defaultCwd: '/workspace/project', defaultSchedule: 'manual' } });
     } else if (path === '/api/tasks') {
       await route.fulfill({ json: Array.isArray(populated) ? populated : populated ? [task] : [] });
     } else if (path === `/api/tasks/${taskId}`) {
@@ -299,6 +299,7 @@ test('settings sections use side navigation that stacks on narrow screens', asyn
   await expect(general).toHaveAttribute('aria-selected', 'true');
   await expect(generalPanel.getByRole('heading', { name: 'Общие', exact: true })).toBeVisible();
   await expect(generalPanel.getByLabel('Рабочая папка по умолчанию', { exact: true })).toBeVisible();
+  await expect(generalPanel.getByRole('combobox', { name: 'Тип запуска по умолчанию', exact: true })).toBeVisible();
   await expect(appearancePanel).toBeHidden();
   const [navBox, panelBox] = [await sections.boundingBox(), await generalPanel.boundingBox()];
   expect(navBox!.x + navBox!.width, 'sections sit to the left of the parameters').toBeLessThanOrEqual(panelBox!.x + 1);

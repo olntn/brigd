@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,11 +34,12 @@ afterEach(async () => {
 describe('general settings', () => {
   test('the effective default folder falls back to configured cwd, then process cwd', async () => {
     expect(store.getDefaultCwd()).toBeNull();
-    expect(await (await request()).json()).toEqual({ defaultCwd: process.cwd() });
+    expect(store.getDefaultSchedule()).toBe('manual');
+    expect(await (await request()).json()).toEqual({ defaultCwd: process.cwd(), defaultSchedule: 'manual' });
     expect(await (await request('/api/info')).json()).toMatchObject({ cwd: process.cwd() });
 
     handler = createHandler(engine, { port: 4310, root: folder, defaultCwd: folder });
-    expect(await (await request()).json()).toEqual({ defaultCwd: folder });
+    expect(await (await request()).json()).toEqual({ defaultCwd: folder, defaultSchedule: 'manual' });
     expect(await (await request('/api/info')).json()).toMatchObject({ cwd: folder });
   });
 
@@ -56,7 +58,7 @@ describe('general settings', () => {
     engine = new Engine(store, true);
     handler = createHandler(engine, { port: 4310, root: folder, defaultCwd: folder });
     expect(store.getDefaultCwd()).toBe(cwd);
-    expect(await (await request()).json()).toEqual({ defaultCwd: cwd });
+    expect(await (await request()).json()).toEqual({ defaultCwd: cwd, defaultSchedule: 'manual' });
     expect(await (await request('/api/info')).json()).toMatchObject({ cwd });
   });
 
@@ -70,8 +72,8 @@ describe('general settings', () => {
 
     const saved = await request('/api/settings/general', 'PATCH', { defaultCwd: ` ${project} ` });
     expect(saved.status).toBe(200);
-    expect(await saved.json()).toEqual({ defaultCwd: cwd });
-    expect(await (await request()).json()).toEqual({ defaultCwd: cwd });
+    expect(await saved.json()).toEqual({ defaultCwd: cwd, defaultSchedule: 'manual' });
+    expect(await (await request()).json()).toEqual({ defaultCwd: cwd, defaultSchedule: 'manual' });
     expect(await (await request('/api/info')).json()).toMatchObject({ cwd });
     expect(store.getTask(task.id).cwd).toBe(folder);
 
@@ -94,12 +96,107 @@ describe('general settings', () => {
     }
   });
 
-  test('PATCH requires exactly the defaultCwd field in a JSON object', async () => {
+  test('PATCH requires a nonempty subset of supported settings in a JSON object', async () => {
     store.setDefaultCwd(folder);
-    for (const value of [{}, { cwd: folder }, { defaultCwd: folder, extra: true }, null, [], folder]) {
+    for (const value of [{}, { cwd: folder }, { defaultCwd: folder, extra: true }, { defaultSchedule: 'auto', extra: true }, null, [], folder]) {
       const response = await request('/api/settings/general', 'PATCH', value);
       expect(response.status).toBe(400);
       expect(store.getDefaultCwd()).toBe(realpathSync(folder));
+      expect(store.getDefaultSchedule()).toBe('manual');
+    }
+  });
+
+  test.each(['auto', 'manual', 'interval'] as const)('the %s default launch type persists after reopening', async schedule => {
+    const saved = await request('/api/settings/general', 'PATCH', { defaultSchedule: schedule });
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toEqual({ defaultCwd: process.cwd(), defaultSchedule: schedule });
+    expect(store.getDefaultSchedule()).toBe(schedule);
+    expect(store.getDefaultCwd()).toBeNull();
+
+    await engine.shutdown();
+    store.close();
+    store = new Store(join(folder, 'settings.sqlite'));
+    engine = new Engine(store, true);
+    handler = createHandler(engine, { port: 4310, root: folder });
+    expect(store.getDefaultSchedule()).toBe(schedule);
+    expect(await (await request()).json()).toEqual({ defaultCwd: process.cwd(), defaultSchedule: schedule });
+  });
+
+  test('partial writes preserve the other setting and combined writes save both', async () => {
+    const project = join(folder, 'next-project');
+    mkdirSync(project);
+    const cwd = realpathSync(project);
+    store.setDefaultCwd(folder);
+
+    const scheduleOnly = await request('/api/settings/general', 'PATCH', { defaultSchedule: 'auto' });
+    expect(scheduleOnly.status).toBe(200);
+    expect(await scheduleOnly.json()).toEqual({ defaultCwd: realpathSync(folder), defaultSchedule: 'auto' });
+
+    const cwdOnly = await request('/api/settings/general', 'PATCH', { defaultCwd: project });
+    expect(cwdOnly.status).toBe(200);
+    expect(await cwdOnly.json()).toEqual({ defaultCwd: cwd, defaultSchedule: 'auto' });
+
+    const combined = await request('/api/settings/general', 'PATCH', { defaultCwd: folder, defaultSchedule: 'interval' });
+    expect(combined.status).toBe(200);
+    expect(await combined.json()).toEqual({ defaultCwd: realpathSync(folder), defaultSchedule: 'interval' });
+  });
+
+  test('invalid launch types leave both settings intact, including combined patches', async () => {
+    store.setDefaultCwd(folder);
+    store.setDefaultSchedule('interval');
+    const project = join(folder, 'next-project');
+    mkdirSync(project);
+    for (const value of [null, 12, true, {}, [], '', ' ', 'Auto', ' auto ', 'schedule', 'unknown']) {
+      expect(() => store.setDefaultSchedule(value)).toThrow(AppError);
+      for (const patch of [{ defaultSchedule: value }, { defaultCwd: project, defaultSchedule: value }]) {
+        const response = await request('/api/settings/general', 'PATCH', patch);
+        expect(response.status).toBe(400);
+        expect(store.getDefaultCwd()).toBe(realpathSync(folder));
+        expect(store.getDefaultSchedule()).toBe('interval');
+      }
+    }
+
+    const invalidCwd = await request('/api/settings/general', 'PATCH', { defaultCwd: join(folder, 'missing'), defaultSchedule: 'auto' });
+    expect(invalidCwd.status).toBe(400);
+    expect(store.getDefaultCwd()).toBe(realpathSync(folder));
+    expect(store.getDefaultSchedule()).toBe('interval');
+  });
+
+  test('the launch default does not change existing tasks or task API validation', async () => {
+    const task = store.createTask({ title: 'Existing task', instruction: 'Review code.', provider: 'codex',
+      cwd: folder, schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false });
+    const saved = await request('/api/settings/general', 'PATCH', { defaultSchedule: 'auto' });
+    expect(saved.status).toBe(200);
+    expect(store.getTask(task.id).schedule).toBe('manual');
+    expect(await (await request('/api/info')).json()).toMatchObject({ cwd: process.cwd() });
+
+    for (const schedule of [undefined, 'invalid']) {
+      const invalidTask = await request('/api/tasks', 'POST', { ...task, schedule });
+      expect(invalidTask.status).toBe(400);
+    }
+    expect(store.listTasks()).toHaveLength(1);
+  });
+
+  test('additive migration preserves the saved folder and is idempotent', () => {
+    const path = join(folder, 'legacy.sqlite');
+    const cwd = realpathSync(folder);
+    const legacy = new Database(path);
+    legacy.exec('CREATE TABLE general_settings (singleton INTEGER PRIMARY KEY CHECK(singleton=1), default_cwd TEXT)');
+    legacy.query('INSERT INTO general_settings (singleton,default_cwd) VALUES (1,?)').run(cwd);
+    legacy.close();
+
+    for (let pass = 0; pass < 2; pass++) {
+      const migrated = new Store(path);
+      try {
+        expect(migrated.getDefaultCwd()).toBe(cwd);
+        expect(migrated.getDefaultSchedule()).toBe(pass === 0 ? 'manual' : 'auto');
+        expect((migrated.db.query('PRAGMA table_info(general_settings)').all() as { name: string; notnull: number; dflt_value: string }[])
+          .filter(column => column.name === 'default_schedule')).toEqual([
+            expect.objectContaining({ name: 'default_schedule', notnull: 1, dflt_value: "'manual'" }),
+          ]);
+        expect(() => migrated.db.query('UPDATE general_settings SET default_schedule=? WHERE singleton=1').run('invalid')).toThrow();
+        migrated.setDefaultSchedule('auto');
+      } finally { migrated.close(); }
     }
   });
 });
