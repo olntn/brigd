@@ -15,6 +15,10 @@
   let deletingId = $state<string | null>(null);
   let deleteError = $state('');
   let restoringId = $state<string | null>(null);
+  let renamingId = $state<string | null>(null);
+  let renameDraft = $state('');
+  let renameError = $state('');
+  let renameInput = $state<HTMLInputElement>();
   let uploadInput: HTMLInputElement;
   let createButton: HTMLButtonElement;
   let deleteConfirmButton = $state<HTMLButtonElement>();
@@ -58,6 +62,7 @@
       backups = result.backups.map(entry => ({ ...entry, selected: entry.id === result.selectedId }));
       if (!backups.some(entry => entry.id === deletingId && !entry.selected)) deletingId = null;
       if (!backups.some(entry => entry.id === restoringId)) restoringId = null;
+      if (!backups.some(entry => entry.id === renamingId)) clearRename();
     } catch (error) {
       if (!controller.signal.aborted) loadError = message(error, 'Не удалось загрузить бэкапы. Попробуйте ещё раз.');
     } finally {
@@ -156,6 +161,7 @@
     if (busy || loading) return;
     returnFocus = trigger;
     restoringId = entry.id;
+    clearRename();
     deletingId = null;
     deleteError = '';
     actionError = '';
@@ -176,11 +182,72 @@
     returnFocus = trigger;
     deletingId = entry.id;
     restoringId = null;
+    clearRename();
     deleteError = '';
     actionError = '';
     status = '';
     await tick();
     deleteConfirmButton?.focus();
+  }
+
+  function clearRename() {
+    renamingId = null;
+    renameDraft = '';
+    renameError = '';
+  }
+
+  async function beginRename(entry: BackupEntry, trigger: HTMLElement) {
+    if (busy || loading) return;
+    returnFocus = trigger;
+    renamingId = entry.id;
+    renameDraft = entry.name;
+    renameError = '';
+    deletingId = null;
+    restoringId = null;
+    deleteError = '';
+    actionError = '';
+    status = '';
+    await tick();
+    renameInput?.focus();
+    renameInput?.select();
+  }
+
+  function cancelRename() {
+    if (busy) return;
+    clearRename();
+    void restoreFocus();
+  }
+
+  function renameKey(event: KeyboardEvent) {
+    if (event.key !== 'Escape' || !active || !renamingId || !(event.target instanceof Element) || !event.target.closest('.backup-rename-form')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    cancelRename();
+  }
+
+  async function rename(entry: BackupEntry) {
+    if (busy || loading || renamingId !== entry.id) return;
+    const name = renameDraft.normalize('NFC').trim();
+    renameError = '';
+    if (!name) {
+      renameError = 'Введите имя бэкапа.';
+      renameInput?.focus();
+      return;
+    }
+    busy = true;
+    pendingMessage = 'Переименовываем бэкап…';
+    status = '';
+    actionError = '';
+    try {
+      const saved = await request<BackupEntry>(`/api/backups/${encodeURIComponent(entry.id)}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+      });
+      applyEntry(saved);
+      clearRename();
+      status = 'Бэкап переименован';
+    } catch (error) { renameError = message(error, 'Не удалось переименовать бэкап. Попробуйте ещё раз.'); }
+    finally { busy = false; }
+    if (!renamingId) void restoreFocus();
   }
 
   async function restoreFocus() {
@@ -223,6 +290,8 @@
   }
 </script>
 
+<svelte:window onkeydown={renameKey} />
+
 <section class="backup-settings model-settings" aria-labelledby="backup-settings-title" aria-busy={busy || loading}>
   <div class="model-settings-heading"><Icon name="archive" size={22} /><div><h3 id="backup-settings-title">Бэкапы</h3><p>Создавайте копии данных приложения и восстанавливайте их, выбирая нужный бэкап. Здесь также доступны бэкапы перед обновлением.</p></div></div>
   <div class="backup-toolbar">
@@ -253,10 +322,18 @@
           {/if}
           <div class="backup-entry-actions">
             <a class="button secondary" href="/api/backups/{encodeURIComponent(entry.id)}/download" download={entry.name} aria-label={'Скачать бэкап: ' + entry.name} aria-disabled={busy || loading} tabindex={busy || loading ? -1 : 0} onclick={(event) => { if (busy || loading) event.preventDefault(); }}><Icon name="down" size={16} />Скачать</a>
+            <button type="button" class="button secondary" disabled={busy || loading || renamingId === entry.id} aria-label={'Переименовать бэкап: ' + entry.name} onclick={(event) => beginRename(entry, event.currentTarget)}><Icon name="edit" size={16} />Переименовать</button>
             <button type="button" class="button secondary" disabled={busy || loading} aria-label={(entry.selected ? 'Восстановить бэкап: ' : 'Выбрать бэкап: ') + entry.name} onclick={(event) => confirmRestore(entry, event.currentTarget)}><Icon name="restore" size={16} />{entry.selected ? 'Восстановить снова' : 'Выбрать'}</button>
             <button type="button" class="button secondary danger-hover" disabled={busy || loading || entry.selected} aria-label={'Удалить бэкап: ' + entry.name} aria-describedby={entry.selected ? 'selected-backup-delete-note' : undefined} title={entry.selected ? 'Текущий выбранный бэкап нельзя удалить' : 'Удалить бэкап'} onclick={(event) => confirmDelete(entry, event.currentTarget)}><Icon name="close" size={16} />Удалить</button>
           </div>
           {#if entry.selected}<p id="selected-backup-delete-note" class="backup-protected-note">Текущий выбранный бэкап нельзя удалить.</p>{/if}
+          {#if renamingId === entry.id}
+            <form class="backup-rename-form" onsubmit={(event) => { event.preventDefault(); void rename(entry); }}>
+              <label class="form-field"><span>Имя бэкапа</span><input bind:this={renameInput} bind:value={renameDraft} type="text" autocomplete="off" disabled={busy || loading} aria-invalid={renameError ? true : undefined} aria-describedby={renameError ? 'backup-rename-error' : undefined} /></label>
+              {#if renameError}<div id="backup-rename-error" class="form-error" role="alert"><Icon name="alert" size={17} /><span>{renameError}</span></div>{/if}
+              <div class="model-catalog-actions"><button type="button" class="button secondary" disabled={busy} onclick={cancelRename}>Отмена переименования</button><button type="submit" class="button primary" disabled={busy || loading}><Icon name={busy ? 'refresh' : 'check'} class={busy ? 'spin' : ''} size={16} />Сохранить имя</button></div>
+            </form>
+          {/if}
           {#if restoringId === entry.id}
             <div class="model-delete-confirm"><p>Восстановить данные из бэкапа «{entry.name}»? Данные приложения будут заменены. Активные запуски остановятся. Перед восстановлением сохраним текущие данные в отдельный бэкап. После восстановления страница перезагрузится.</p><div class="model-catalog-actions"><button type="button" class="button secondary" disabled={busy} onclick={cancelRestore}>Отмена восстановления</button><button bind:this={restoreConfirmButton} type="button" class="button danger" disabled={busy || loading} onclick={() => select(entry)}>{busy ? 'Восстанавливаем…' : 'Восстановить данные'}</button></div></div>
           {/if}

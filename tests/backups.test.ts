@@ -72,6 +72,110 @@ test('upload preserves snapshot bytes and display name without opening it throug
   expect(reopened.list().backups.find(entry => entry.id === imported.id)).toEqual(imported);
 });
 
+test('renaming manual, uploaded and update backups changes only the persisted display and download name', () => {
+  task();
+  const manual = backups.create();
+  const uploaded = backups.upload(readFileSync(backups.download(manual.id).path), 'Загруженный.sqlite');
+  mkdirSync(updateBackupDir, { recursive: true });
+  const updatePath = join(updateBackupDir, '1700000000000-update.sqlite');
+  copyFileSync(backups.download(manual.id).path, updatePath);
+  const update = backups.list().backups.find(entry => entry.source === 'update')!;
+  expect(backups.rename(manual.id, 'Историческая копия')).toEqual({ ...manual, name: 'Историческая копия' });
+
+  for (const saved of [manual, uploaded, update]) {
+    const selected = backups.select(saved.id);
+    const downloaded = backups.download(saved.id);
+    const bytes = readFileSync(downloaded.path);
+    const files = readdirSync(backups.directory).sort();
+    const updateFiles = readdirSync(updateBackupDir).sort();
+    const name = `Копия ${saved.source} café`;
+    const renamed = backups.rename(saved.id, `  Копия ${saved.source} cafe\u0301  `);
+    expect(renamed).toEqual({ ...selected, name });
+    expect(backups.download(saved.id)).toEqual({ path: downloaded.path, name });
+    expect(readFileSync(downloaded.path)).toEqual(bytes);
+    expect(readdirSync(backups.directory).sort()).toEqual(files);
+    expect(readdirSync(updateBackupDir).sort()).toEqual(updateFiles);
+    const reopened = new BackupManager({ dbPath: path, updateBackupDir });
+    expect(reopened.list().backups.find(entry => entry.id === saved.id)).toEqual(renamed);
+    expect(reopened.download(saved.id)).toEqual({ path: downloaded.path, name });
+    status(() => reopened.delete(saved.id), 409);
+  }
+});
+
+test('renaming rejects invalid names and unknown IDs without changing the manifest or snapshot', () => {
+  const saved = backups.create('Исходное имя.sqlite');
+  const snapshotPath = backups.download(saved.id).path;
+  const bytes = readFileSync(snapshotPath);
+  const statePath = join(backups.directory, 'state.json');
+  const state = readFileSync(statePath);
+  const overview = backups.list();
+  const files = readdirSync(backups.directory).sort();
+  const invalidNames: unknown[] = [null, undefined, 42, {}, [], '', '   ', '.', '..', '../outside.sqlite',
+    '/tmp/outside.sqlite', 'C:\\outside.sqlite', 'line\n.sqlite', 'a\0.sqlite', 'a\x7f.sqlite',
+    'a\u202e.sqlite', 'a\u2066.sqlite', 'x'.repeat(241)];
+  for (const name of invalidNames) status(() => backups.rename(saved.id, name), 400);
+  for (const id of ['', '../app.sqlite', saved.id.replace('manual:', 'upload:'),
+    `manual:${Buffer.from('manual-1700000000000-00000000-0000-0000-0000-000000000000.sqlite').toString('base64url')}`]) {
+    status(() => backups.rename(id, 'Новое имя'), 404);
+  }
+  expect(backups.list()).toEqual(overview);
+  expect(readFileSync(statePath)).toEqual(state);
+  expect(readFileSync(snapshotPath)).toEqual(bytes);
+  expect(readdirSync(backups.directory).sort()).toEqual(files);
+});
+
+test('renaming an automatically updated backup preserves selection and keeps its new name after refresh', () => {
+  task('Saved');
+  const saved = backups.create('Старое имя.sqlite');
+  const historical = backups.create();
+  const historicalBytes = readFileSync(backups.download(historical.id).path);
+  backups.select(saved.id);
+  backups.setAutoUpdate(saved.id, true);
+  const selected = backups.list().backups.find(entry => entry.id === saved.id)!;
+  const snapshotPath = backups.download(saved.id).path;
+  const bytes = readFileSync(snapshotPath);
+  task('Pending automatic save');
+  const name = 'Рабочая копия';
+  expect(backups.rename(saved.id, name)).toEqual({ ...selected, name });
+  expect(readFileSync(snapshotPath)).toEqual(bytes);
+  expect(backups.getAutoUpdate()).toEqual({ selectedId: saved.id, enabled: true });
+
+  const reopened = new BackupManager({ dbPath: path, updateBackupDir });
+  expect(reopened.updateSelected()).toMatchObject({ id: saved.id, name, selected: true, autoUpdate: true,
+    source: saved.source, createdAt: saved.createdAt });
+  expect(reopened.download(saved.id)).toEqual({ path: snapshotPath, name });
+  expect(snapshotRows(saved.id, 'SELECT title FROM tasks ORDER BY title')).toEqual([
+    { title: 'Pending automatic save' }, { title: 'Saved' },
+  ]);
+  expect(readFileSync(backups.download(historical.id).path)).toEqual(historicalBytes);
+  status(() => reopened.delete(saved.id), 409);
+});
+
+test('a failed rename manifest commit preserves the old name, snapshot and automatic update settings', () => {
+  const saved = backups.create('Старое имя.sqlite');
+  backups.select(saved.id);
+  backups.setAutoUpdate(saved.id, true);
+  const overview = backups.list();
+  const downloaded = backups.download(saved.id);
+  const bytes = readFileSync(downloaded.path);
+  const statePath = join(backups.directory, 'state.json');
+  const state = readFileSync(statePath);
+  const files = readdirSync(backups.directory).sort();
+  const internals = backups as unknown as { writeState: (state: unknown) => void };
+  const writer = internals.writeState;
+  internals.writeState = () => { throw new Error('Disk write failed'); };
+  try { status(() => backups.rename(saved.id, 'Новое имя'), 500); }
+  finally { internals.writeState = writer; }
+  expect(backups.list()).toEqual(overview);
+  expect(backups.download(saved.id)).toEqual(downloaded);
+  expect(readFileSync(downloaded.path)).toEqual(bytes);
+  expect(readFileSync(statePath)).toEqual(state);
+  expect(readdirSync(backups.directory).sort()).toEqual(files);
+  const reopened = new BackupManager({ dbPath: path, updateBackupDir });
+  expect(reopened.list()).toEqual(overview);
+  expect(reopened.getAutoUpdate()).toEqual({ selectedId: saved.id, enabled: true });
+});
+
 test('uploads reject non-SQLite, corrupt or unrelated SQLite and leave no files behind', () => {
   const before = readdirSync(backups.directory);
   status(() => backups.upload(Buffer.from('not sqlite'), 'bad.sqlite'), 400);

@@ -721,6 +721,7 @@ dialog::backdrop { background: var(--overlay); }
 .backup-entry-actions .button { min-width: 0; font-size: .85rem; padding: 7px 10px; }
 .backup-entry-actions a[aria-disabled='true'] { opacity: .5; cursor: default; }
 .backup-protected-note { margin: 0; }
+.backup-rename-form { display: grid; gap: 12px; min-width: 0; padding-top: 12px; border-top: 1px solid var(--line); }
 .autopilot-checks-example { color: var(--muted); font-size: .77rem; min-width: 0; }
 .autopilot-checks-example pre { margin: 7px 0 0; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--subtle); color: var(--secondary); font-family: var(--font-mono); font-size: .77rem; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); width: max-content; max-width: min(560px, calc(100% - 32px)); z-index: 1000; display: flex; align-items: center; gap: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 12px 13px 12px 16px; color: var(--secondary); }.toast > span { display: flex; color: var(--success); }.toast p { font-size: .85rem; line-height: 1.7; margin: 0; min-width: 0; overflow-wrap: anywhere; }.toast .icon-button { margin-left: 8px; }.toast.error { border-color: var(--error-line); background: var(--error-bg); color: var(--error); }.toast.error > span { color: var(--error); }

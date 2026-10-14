@@ -24,6 +24,7 @@ async function fixtureApi(page: Page, initial: BackupEntry[] = [
     tasks: [task('Задача после бэкапа')],
     uploads: [] as { name: string; contentType: string; body: Buffer }[],
     autoUpdateChanges: [] as { id: string; autoUpdate: boolean }[],
+    nameChanges: [] as { id: string; name: string }[],
     deleted: [] as string[], restored: [] as string[], reads: 0, sequence: 0,
   };
   const info: AppInfo = {
@@ -67,12 +68,18 @@ async function fixtureApi(page: Page, initial: BackupEntry[] = [
           state.tasks = [task('Задача из бэкапа')];
           await route.fulfill({ json: { ...entry, selected: true } });
         } else if (method === 'PATCH') {
-          if (id !== state.selectedId) { await route.fulfill({ status: 409, json: { error: 'Выберите бэкап для автообновления' } }); return; }
-          const { autoUpdate } = request.postDataJSON();
-          entry.autoUpdate = autoUpdate;
-          if (autoUpdate) entry.updatedAt = Math.max(entry.updatedAt + 1, date + 5_000 + ++state.sequence);
-          state.autoUpdateChanges.push({ id, autoUpdate });
-          await route.fulfill({ json: { ...entry, selected: true } });
+          const changes = request.postDataJSON();
+          if ('name' in changes) {
+            entry.name = changes.name.normalize('NFC').trim();
+            state.nameChanges.push({ id, name: entry.name });
+          } else {
+            if (id !== state.selectedId) { await route.fulfill({ status: 409, json: { error: 'Выберите бэкап для автообновления' } }); return; }
+            const { autoUpdate } = changes;
+            entry.autoUpdate = autoUpdate;
+            if (autoUpdate) entry.updatedAt = Math.max(entry.updatedAt + 1, date + 5_000 + ++state.sequence);
+            state.autoUpdateChanges.push({ id, autoUpdate });
+          }
+          await route.fulfill({ json: { ...entry, selected: id === state.selectedId } });
         } else if (method === 'DELETE') {
           if (id === state.selectedId) { await route.fulfill({ status: 409, json: { error: 'Текущий выбранный бэкап нельзя удалить' } }); return; }
           state.deleted.push(id);
@@ -81,7 +88,9 @@ async function fixtureApi(page: Page, initial: BackupEntry[] = [
         } else await route.fulfill({ status: 405, json: { error: 'Unsupported backup fixture mutation' } });
       }
     } else if (/^\/api\/backups\/[^/]+\/download$/.test(path)) {
-      await route.fulfill({ contentType: 'application/octet-stream', headers: { 'Content-Disposition': 'attachment; filename="before-update.sqlite"' }, body: Buffer.from('SQLite format 3\0backup fixture') });
+      const id = decodeURIComponent(path.split('/')[3]);
+      const entry = state.backups.find(entry => entry.id === id)!;
+      await route.fulfill({ contentType: 'application/octet-stream', headers: { 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(entry.name)}` }, body: Buffer.from('SQLite format 3\0backup fixture') });
     } else if (path === '/api/info') await route.fulfill({ json: info });
     else if (path === '/api/tasks') await route.fulfill({ json: state.tasks });
     else if (path === '/api/workers' || path === '/api/models' || path === '/api/tags') await route.fulfill({ json: [] });
@@ -326,6 +335,123 @@ test('auto update errors restore the checkbox and pending changes prevent closin
   expect(state.autoUpdateChanges).toEqual([{ id: 'current', autoUpdate: true }, { id: 'current', autoUpdate: false }]);
 });
 
+test('selected, update and uploaded backups can be renamed and keep their state after reload and download', async ({ page }) => {
+  const state = await fixtureApi(page);
+  state.backups.find(entry => entry.id === 'current')!.autoUpdate = true;
+  await page.goto('/');
+  let { panel } = await openBackups(page);
+  await panel.getByLabel('Файл бэкапа', { exact: true }).setInputFiles({ name: 'Загруженная копия.sqlite', mimeType: 'application/vnd.sqlite3', buffer: Buffer.from('SQLite format 3\0renaming fixture') });
+  await expect(panel.getByRole('listitem', { name: 'Загруженная копия.sqlite', exact: true })).toBeVisible();
+  const renamed = [
+    { id: 'current', draft: '  Рабочая копия.sqlite  ', name: 'Рабочая копия.sqlite' },
+    { id: 'update', draft: 'Перед выпуском', name: 'Перед выпуском' },
+    { id: 'upload-1', draft: 'Архив проекта.sqlite', name: 'Архив проекта.sqlite' },
+  ];
+  for (const { id, draft, name } of renamed) {
+    const original = { ...state.backups.find(entry => entry.id === id)! };
+    const row = panel.getByRole('listitem', { name: original.name, exact: true });
+    await row.getByRole('button', { name: `Переименовать бэкап: ${original.name}`, exact: true }).click();
+    const input = row.getByRole('textbox', { name: 'Имя бэкапа', exact: true });
+    await expect(input).toBeFocused();
+    await expect(input).toHaveValue(original.name);
+    expect(await input.evaluate((element: HTMLInputElement) => [element.selectionStart, element.selectionEnd])).toEqual([0, original.name.length]);
+    await input.fill(draft);
+    await input.press('Enter');
+    const saved = panel.getByRole('listitem', { name, exact: true });
+    await expect(saved.getByRole('button', { name: `Переименовать бэкап: ${name}`, exact: true })).toBeFocused();
+    await expect(saved.getByRole('textbox')).toHaveCount(0);
+    await expect(saved.getByRole('link', { name: `Скачать бэкап: ${name}`, exact: true })).toHaveAttribute('download', name);
+    expect(state.backups.find(entry => entry.id === id)).toEqual({ ...original, name });
+  }
+  expect(state.nameChanges).toEqual(renamed.map(({ id, name }) => ({ id, name })));
+  expect(state.autoUpdateChanges).toEqual([]);
+  expect(state.restored).toEqual([]);
+  await page.reload();
+  ({ panel } = await openBackups(page));
+  for (const { name } of renamed) await expect(panel.getByRole('listitem', { name, exact: true })).toBeVisible();
+  const selected = panel.getByRole('listitem', { name: 'Рабочая копия.sqlite', exact: true });
+  await expect(selected.getByText('Выбран', { exact: true })).toBeVisible();
+  await expect(selected.getByRole('checkbox', { name: 'Автообновление бэкапа', exact: true })).toBeChecked();
+  await expect(selected.getByRole('button', { name: 'Удалить бэкап: Рабочая копия.sqlite', exact: true })).toBeDisabled();
+  const update = panel.getByRole('listitem', { name: 'Перед выпуском', exact: true });
+  await expect(update.getByText('Перед обновлением', { exact: true })).toBeVisible();
+  await expect(panel.getByRole('listitem', { name: 'Архив проекта.sqlite', exact: true }).getByText('Загружен', { exact: true })).toBeVisible();
+  const [download] = await Promise.all([
+    page.waitForEvent('download'), selected.getByRole('link', { name: 'Скачать бэкап: Рабочая копия.sqlite', exact: true }).click(),
+  ]);
+  expect(download.suggestedFilename()).toBe('Рабочая копия.sqlite');
+  expect(new URL(download.url()).pathname).toBe('/api/backups/current/download');
+});
+
+test('renaming preserves rejected drafts, supports retry and cancel, and protects pending saves across tabs', async ({ page }) => {
+  const state = await fixtureApi(page);
+  await page.goto('/');
+  const { dialog, panel } = await openBackups(page);
+  let row = panel.getByRole('listitem', { name: 'before-update.sqlite', exact: true });
+  await row.getByRole('button', { name: 'Выбрать бэкап: before-update.sqlite', exact: true }).click();
+  await row.getByRole('button', { name: 'Переименовать бэкап: before-update.sqlite', exact: true }).click();
+  await expect(panel.getByRole('button', { name: 'Восстановить данные', exact: true })).toHaveCount(0);
+  let input = row.getByRole('textbox', { name: 'Имя бэкапа', exact: true });
+  await input.fill('   ');
+  await input.press('Enter');
+  await expect(row.getByRole('alert')).toContainText('Введите имя бэкапа.');
+  await expect(input).toBeFocused();
+  expect(state.nameChanges).toEqual([]);
+  await input.fill('Копия выпуска.sqlite');
+  state.mutationError = 'Не удалось сохранить имя. Повторите попытку.';
+  await row.getByRole('button', { name: 'Сохранить имя', exact: true }).click();
+  await expect(row.getByRole('alert')).toContainText(state.mutationError);
+  await expect(input).toHaveValue('Копия выпуска.sqlite');
+  await expect(input).toHaveAttribute('aria-invalid', 'true');
+  await dialog.getByRole('tab', { name: 'Общие', exact: true }).click();
+  await dialog.getByRole('tab', { name: 'Бэкапы', exact: true }).click();
+  await expect(input).toHaveValue('Копия выпуска.sqlite');
+  await expect(row.getByRole('alert')).toContainText(state.mutationError);
+  state.mutationError = '';
+  await row.getByRole('button', { name: 'Сохранить имя', exact: true }).click();
+  row = panel.getByRole('listitem', { name: 'Копия выпуска.sqlite', exact: true });
+  const renameButton = row.getByRole('button', { name: 'Переименовать бэкап: Копия выпуска.sqlite', exact: true });
+  await expect(renameButton).toBeFocused();
+  await renameButton.click();
+  input = row.getByRole('textbox', { name: 'Имя бэкапа', exact: true });
+  await input.fill('Не сохранять');
+  await input.press('Escape');
+  await expect(dialog).toBeVisible();
+  await expect(input).toHaveCount(0);
+  await expect(renameButton).toBeFocused();
+  await renameButton.click();
+  await expect(input).toHaveValue('Копия выпуска.sqlite');
+  await input.fill('Другой черновик');
+  await row.getByRole('button', { name: 'Отмена переименования', exact: true }).click();
+  await expect(renameButton).toBeFocused();
+  expect(state.nameChanges).toEqual([{ id: 'update', name: 'Копия выпуска.sqlite' }]);
+  await row.getByRole('button', { name: 'Удалить бэкап: Копия выпуска.sqlite', exact: true }).click();
+  await renameButton.click();
+  await expect(panel.getByRole('button', { name: 'Удалить навсегда', exact: true })).toHaveCount(0);
+  await input.fill('Готовая копия.sqlite');
+  let release!: () => void;
+  state.pendingMutation = new Promise<void>(resolve => { release = resolve; });
+  await row.getByRole('button', { name: 'Сохранить имя', exact: true }).click();
+  try {
+    await expect(panel.getByRole('status')).toContainText('Переименовываем бэкап');
+    await expect(input).toBeDisabled();
+    await expect(row.getByRole('button', { name: 'Отмена переименования', exact: true })).toBeDisabled();
+    await expect(panel.getByRole('button', { name: 'Создать бэкап', exact: true })).toBeDisabled();
+    await expect(panel.getByRole('checkbox', { name: 'Автообновление бэкапа', exact: true })).toBeDisabled();
+    await expect(dialog.getByRole('button', { name: 'Закрыть настройки', exact: true })).toBeDisabled();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('tab', { name: 'Общие', exact: true }).click();
+    await expect(dialog.getByRole('button', { name: 'Закрыть настройки', exact: true })).toBeDisabled();
+    await dialog.getByRole('tab', { name: 'Бэкапы', exact: true }).click();
+    await expect(input).toHaveValue('Готовая копия.sqlite');
+    await expect(input).toBeDisabled();
+  } finally { release(); }
+  await expect(panel.getByRole('listitem', { name: 'Готовая копия.sqlite', exact: true }).getByRole('button', { name: 'Переименовать бэкап: Готовая копия.sqlite', exact: true })).toBeFocused();
+  await expect(dialog.getByRole('button', { name: 'Закрыть настройки', exact: true })).toBeEnabled();
+  expect(state.nameChanges).toEqual([{ id: 'update', name: 'Копия выпуска.sqlite' }, { id: 'update', name: 'Готовая копия.sqlite' }]);
+});
+
 test('backup tab works with keyboard navigation and fits narrow screens with large text in a dark theme', async ({ page }, testInfo) => {
   await fixtureApi(page, [{ id: 'long', name: 'Очень длинное имя бэкапа проекта-'.repeat(7) + '.sqlite', source: 'update', createdAt: date, updatedAt: date + 6_000, size: 16384, selected: true, autoUpdate: true }]);
   await page.setViewportSize({ width: 320, height: 740 });
@@ -339,6 +465,8 @@ test('backup tab works with keyboard navigation and fits narrow screens with lar
   await expect(dialog.getByRole('tab', { name: 'Бэкапы', exact: true })).toBeFocused();
   const panel = dialog.getByRole('tabpanel', { name: 'Бэкапы', exact: true });
   await expect(panel.getByText('Перед обновлением', { exact: true })).toBeVisible();
+  await panel.getByRole('button', { name: /^Переименовать бэкап: / }).click();
+  await expect(panel.getByRole('textbox', { name: 'Имя бэкапа', exact: true })).toBeFocused();
   const size = await page.evaluate(() => ({ viewport: document.documentElement.clientWidth, document: document.documentElement.scrollWidth, dialog: document.querySelector('.settings-dialog')!.clientWidth, content: document.querySelector('.settings-dialog')!.scrollWidth }));
   expect(size.document).toBeLessThanOrEqual(size.viewport + 1);
   expect(size.content).toBeLessThanOrEqual(size.dialog + 1);

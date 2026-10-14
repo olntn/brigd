@@ -200,6 +200,19 @@ export class BackupManager {
     return this.replaceWithSnapshot(state.selectedId, state, true);
   }
 
+  rename(id: string, value: unknown): BackupEntry {
+    const name = backupName(value);
+    const state = this.readState();
+    const entry = this.entry(id, state);
+    if (entry.name === name) return entry;
+    try { this.commitState(state, { ...state, names: { ...state.names, [id]: name } }); }
+    catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError('Не удалось переименовать бэкап. Попробуйте ещё раз.', 500);
+    }
+    return { ...entry, name };
+  }
+
   delete(id: string): void {
     const state = this.readState();
     if (state.selectedId === id) throw new AppError('Текущий выбранный бэкап удалить нельзя', 409);

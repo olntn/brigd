@@ -125,8 +125,10 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         }
         if (!action && method === 'PATCH') {
           const value = await body(req);
-          if (Object.keys(value).length !== 1 || !Object.hasOwn(value, 'autoUpdate')) throw new AppError('Укажите только поле autoUpdate');
-          return json(manager.setAutoUpdate(id, value.autoUpdate));
+          if (Object.keys(value).length !== 1 || (!Object.hasOwn(value, 'autoUpdate') && !Object.hasOwn(value, 'name'))) {
+            throw new AppError('Укажите одно поле: name или autoUpdate');
+          }
+          return json(Object.hasOwn(value, 'name') ? manager.rename(id, value.name) : manager.setAutoUpdate(id, value.autoUpdate));
         }
         if (action === 'select' && method === 'POST') {
           const value = await body(req);

@@ -222,7 +222,7 @@ test('auto update PATCH validates selected backup and payload and resets for a d
   const other = await app.json<BackupEntry>('/api/backups', 'POST');
   expect((await app.request(`/api/backups/${first.id}`, 'PATCH', { autoUpdate: true })).status).toBe(409);
   await app.json(`/api/backups/${first.id}/select`, 'POST');
-  for (const value of [{}, { autoUpdate: 'true' }, { autoUpdate: null }, { autoUpdate: true, extra: true }]) {
+  for (const value of [{}, { autoUpdate: 'true' }, { autoUpdate: null }, { autoUpdate: true, extra: true }, { name: 'new.sqlite', autoUpdate: true }]) {
     expect((await app.request(`/api/backups/${first.id}`, 'PATCH', value)).status).toBe(400);
   }
   expect((await app.request(`/api/backups/${other.id}`, 'PATCH', { autoUpdate: true })).status).toBe(409);
@@ -234,3 +234,40 @@ test('auto update PATCH validates selected backup and payload and resets for a d
   expect(overview.selectedId).toBe(other.id);
   expect(overview.backups.every(entry => entry.autoUpdate === false)).toBe(true);
 }, 15_000);
+
+test('renamed backups download with the new name and keep it through restore, automatic refresh and restart', async () => {
+  const app = await start();
+  await app.task('Original task');
+  const manual = await app.json<BackupEntry>('/api/backups', 'POST');
+  const original = new Uint8Array(await (await app.request(`/api/backups/${manual.id}/download`)).arrayBuffer());
+  const uploaded: BackupEntry = await (await app.upload(original, 'import.sqlite')).json();
+  writeFileSync(join(app.updateBackupDir, `${Date.now()}-before-update.sqlite`), original);
+  const update = (await app.json<BackupOverview>('/api/backups')).backups.find(entry => entry.source === 'update')!;
+  await app.json(`/api/backups/${manual.id}/select`, 'POST');
+  const ids = [manual.id, uploaded.id, update.id];
+  const renamed = new Map<string, string>();
+  const entries = (await app.json<BackupOverview>('/api/backups')).backups.filter(entry => ids.includes(entry.id));
+  for (const entry of entries) {
+    const name = `Резервная копия ${entry.source}.sqlite`;
+    const before = new Uint8Array(await (await app.request(`/api/backups/${encodeURIComponent(entry.id)}/download`)).arrayBuffer());
+    const saved = await app.json<BackupEntry>(`/api/backups/${encodeURIComponent(entry.id)}`, 'PATCH', { name: `  ${name}  ` });
+    expect(saved).toEqual({ ...entry, name });
+    const download = await app.request(`/api/backups/${encodeURIComponent(entry.id)}/download`);
+    expect(download.headers.get('content-disposition')).toContain(encodeURIComponent(name));
+    expect(new Uint8Array(await download.arrayBuffer())).toEqual(before);
+    renamed.set(entry.id, name);
+  }
+  expect((await app.request(`/api/backups/${manual.id}`, 'DELETE')).status).toBe(409);
+  await app.json(`/api/backups/${manual.id}`, 'PATCH', { autoUpdate: true });
+  await app.task('After renaming');
+  const refreshed = await app.json<BackupEntry>(`/api/backups/${manual.id}`, 'PATCH', { autoUpdate: true });
+  expect(refreshed.name).toBe(renamed.get(manual.id)!);
+  await app.json(`/api/backups/${manual.id}/select`, 'POST');
+  expect((await app.json<Task[]>('/api/tasks')).map(task => task.title).sort()).toEqual(['After renaming', 'Original task']);
+  app.child.kill('SIGTERM');
+  await app.child.exited;
+  const restarted = await start(app.folder);
+  const overview = await restarted.json<BackupOverview>('/api/backups');
+  for (const [id, name] of renamed) expect(overview.backups.find(entry => entry.id === id)?.name).toBe(name);
+  expect(overview.backups.find(entry => entry.id === manual.id)).toMatchObject({ selected: true, autoUpdate: true });
+}, 20_000);
