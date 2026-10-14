@@ -5,13 +5,14 @@ import { AppError, Store, runFence, type RunFence } from './store';
 import { validateEnvelope, validateSessionId } from './protocol';
 import { workflowContext } from './workflows';
 import { createTaskBridge } from './task-mcp';
+import type { TaskAppAccess } from './task-mcp-app';
 import { dirname, join, resolve } from 'node:path';
 import { DirectWorkspaces, GitWorkspaces, WorkspaceError, type RepositoryLocation, type WorkspaceProvider } from './workspaces';
 import { GitIntegrator, type Integrator } from './integration';
 import { RunCodeDiffs } from './code-diff';
 
 export type AgentFactory = (input: AgentInput, callbacks: AgentCallbacks) => AgentHandle;
-export type TaskBridgeFactory = (store: Store, run: Run, fence: RunFence) => ReturnType<typeof createTaskBridge>;
+export type TaskBridgeFactory = (store: Store, run: Run, fence: RunFence, appAccess?: TaskAppAccess) => ReturnType<typeof createTaskBridge>;
 export interface EngineOptions { workspaces?: WorkspaceProvider; maxParallel?: number; maxPerRepository?: number; integrator?: Integrator; integrationChecks?: string[][]; cliAccess?: CliAccessMode;
   /** Hand every merge conflict to the built-in integrator without waiting for a click. */
   autoReconcile?: boolean; }
@@ -31,6 +32,7 @@ export class Engine {
   private readonly configuredCliAccess: CliAccessMode;
   private readonly requiresIntegrationChecks: boolean;
   private integrationHandles = new Map<string, { abort: AbortController; settled: Promise<void> }>();
+  private taskAppAccess?: TaskAppAccess;
   /** Repository identity per task folder, so a busy pool does not spawn Git every second. */
   private locations = new Map<string, { location: RepositoryLocation; at: number }>();
   constructor(readonly store: Store, readonly mock = false, private factory: AgentFactory = startAgent, private bridgeFactory?: TaskBridgeFactory, options: EngineOptions = {}) {
@@ -48,6 +50,9 @@ export class Engine {
   }
   private integrationChecks(): string[][] | undefined {
     return this.store.getIntegrationChecks() ?? this.environmentChecks;
+  }
+  setTaskAppAccess(access: TaskAppAccess): void {
+    this.taskAppAccess = access;
   }
   getCliAccessSettings(): CliAccessSettings {
     return { mode: this.store.getCliAccessMode() ?? this.configuredCliAccess };
@@ -329,7 +334,7 @@ export class Engine {
       // Mock and injected factories need no transport or filesystem authority.
       // An explicit bridge factory lets integration tests exercise the lifecycle.
       if (!run.mock && (this.factory === startAgent || this.bridgeFactory)) {
-        launch.bridge = (this.bridgeFactory ?? createTaskBridge)(this.store, { ...run, cwd: run.workspace?.cwd ?? run.cwd }, fence);
+        launch.bridge = (this.bridgeFactory ?? createTaskBridge)(this.store, { ...run, cwd: run.workspace?.cwd ?? run.cwd }, fence, this.taskAppAccess);
       }
       const input: AgentInput = { provider: run.provider, cwd: run.workspace?.cwd ?? run.cwd, instruction: run.instruction, instructions: run.instructions,
         ...(this.getCliAccessSettings().mode === 'full' ? { cliAccess: 'full' as const } : {}),

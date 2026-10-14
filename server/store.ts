@@ -402,6 +402,9 @@ export class Store {
         CREATE TABLE IF NOT EXISTS attachment_publications (
           key TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), fingerprint TEXT NOT NULL, result_id TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS task_tool_operations (
+          key TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), fingerprint TEXT NOT NULL, result TEXT
+        );
         CREATE TRIGGER IF NOT EXISTS attachments_immutable BEFORE UPDATE ON attachments
           WHEN OLD.task_id IS NOT NULL OR NEW.id IS NOT OLD.id OR NEW.source IS NOT OLD.source OR NEW.name IS NOT OLD.name
           OR NEW.mime IS NOT OLD.mime OR NEW.size IS NOT OLD.size OR NEW.sha256 IS NOT OLD.sha256 OR NEW.previewable IS NOT OLD.previewable
@@ -902,6 +905,25 @@ export class Store {
     if (row.fingerprint !== fingerprint) throw new AppError('requestId уже использован для другого содержимого', 409);
     return row.result_id;
   }
+  beginTaskToolOperation(runId: string, fence: RunFence, idempotencyKey: string, fingerprint: string): { key: string; result: string | null; fresh: boolean } {
+    return this.db.transaction(() => {
+      const run = this.assertPublicationRun(runId, fence);
+      const key = this.publicationKey(run, fence, idempotencyKey);
+      const previous = this.db.query('SELECT fingerprint,result FROM task_tool_operations WHERE key=?').get(key) as Row | null;
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) throw new AppError('idempotency_key уже использован для другой операции', 409);
+        return { key, result: previous.result, fresh: false };
+      }
+      // Persist intent before a side effect. An interrupted request is never
+      // executed twice, even when a new broker is opened for the same turn.
+      this.db.query('INSERT INTO task_tool_operations(key,run_id,fingerprint) VALUES (?,?,?)').run(key, runId, fingerprint);
+      return { key, result: null, fresh: true };
+    }).immediate();
+  }
+  finishTaskToolOperation(key: string, result: string): void {
+    if (Buffer.byteLength(result) > 4096) throw new AppError('Слишком большой результат операции MCP');
+    this.db.query('UPDATE task_tool_operations SET result=? WHERE key=? AND result IS NULL').run(result, key);
+  }
   publishAgentAttachment(runId: string, fence: RunFence, requestId: string, prepared: PreparedAttachment, caption?: string, now = Date.now()): Attachment {
     if (caption !== undefined && (typeof caption !== 'string' || caption.length > 16_000 || caption.includes('\0'))) throw new AppError('Подпись: не больше 16000 символов');
     const cleanCaption = caption?.trim() || null;
@@ -1025,6 +1047,20 @@ export class Store {
     const row = this.db.query('SELECT * FROM tasks WHERE id = ?').get(id) as Row | null;
     if (!row) throw new AppError('Задача не найдена', 404);
     return this.mapTask(row);
+  }
+  resolveTaskReference(reference: string): Task {
+    // Task cards show six hex characters; the task drawer shows eight. Longer
+    // references must remain a prefix of the canonical, hyphenated UUID.
+    if (typeof reference !== 'string' || reference.length < 6 || reference.length > 36 ||
+        !/^[a-f0-9-]+$/i.test(reference) || [...reference].some((character, index) =>
+          [8, 13, 18, 23].includes(index) ? character !== '-' : character === '-')) {
+      throw new AppError('Укажите ID задачи или его префикс длиной от 6 символов');
+    }
+    const exact = this.db.query('SELECT id FROM tasks WHERE id=? COLLATE NOCASE LIMIT 2').all(reference) as Row[];
+    const matches = exact.length ? exact : this.db.query('SELECT id FROM tasks WHERE id LIKE ? LIMIT 2').all(`${reference}%`) as Row[];
+    if (!matches.length) throw new AppError('Задача не найдена', 404);
+    if (matches.length > 1) throw new AppError('Префикс задачи неоднозначен. Укажите полный ID задачи.', 409);
+    return this.getTask(matches[0]!.id);
   }
   /** Archived tasks are read-only until restored; history and attachments stay readable. */
   private assertNotArchived(task: Task) {

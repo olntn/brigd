@@ -24,6 +24,8 @@ export interface HttpOptions { port: number; dev?: boolean; root?: string; start
   updateBackupDir?: string;
   backupManager?: BackupManager;
   restoreBackup?: (backups: BackupManager, id: string) => Promise<void>;
+  /** Recheck an invocation-scoped internal caller immediately before writes. */
+  authorizeMutation?: () => void;
 }
 const JSON_LIMIT = 32_768;
 const securityHeaders = {
@@ -47,7 +49,7 @@ async function readBody(req: Request, limit: number): Promise<Uint8Array> {
   }
   return Buffer.concat(chunks);
 }
-async function body(req: Request, limit = JSON_LIMIT): Promise<Record<string, unknown>> {
+async function readJsonBody(req: Request, limit = JSON_LIMIT): Promise<Record<string, unknown>> {
   if (req.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json') throw new AppError('Нужен Content-Type: application/json', 415);
   const bytes = await readBody(req, limit);
   let parsed: unknown;
@@ -57,6 +59,11 @@ async function body(req: Request, limit = JSON_LIMIT): Promise<Record<string, un
 }
 
 export function createHandler(engine: Engine, options: HttpOptions) {
+  const body = async (req: Request, limit?: number) => {
+    const value = await readJsonBody(req, limit);
+    options.authorizeMutation?.();
+    return value;
+  };
   const hostnames = new Set(options.allowedHosts ?? [`127.0.0.1:${options.port}`, `localhost:${options.port}`]);
   const origins = new Set(options.allowedOrigins ?? [...hostnames].map(host => `http://${host}`));
   if (options.dev) { origins.add('http://127.0.0.1:5173'); origins.add('http://localhost:5173'); }
@@ -262,7 +269,11 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         if (method === 'DELETE') { engine.store.deleteTag(id); return json({ ok: true }); }
       }
       if (path === '/api/tasks' && method === 'GET') return json(engine.store.listTasks(url.searchParams.get('tagId') ?? undefined));
-      if (path === '/api/tasks' && method === 'POST') return json(engine.store.createTask(await validateTask(await body(req, TASK_JSON_LIMIT))), 201);
+      if (path === '/api/tasks' && method === 'POST') {
+        const input = await validateTask(await body(req, TASK_JSON_LIMIT));
+        options.authorizeMutation?.();
+        return json(engine.store.createTask(input), 201);
+      }
       const taskMatch = path.match(/^\/api\/tasks\/([a-zA-Z0-9-]+)(?:\/(run|comments|followups|archive|restore|tags))?$/);
       if (taskMatch) {
         const [, id, action] = taskMatch;
@@ -276,7 +287,9 @@ export function createHandler(engine: Engine, options: HttpOptions) {
             if (typeof patch.paused !== 'boolean') throw new AppError('paused должен быть boolean');
             return json(engine.store.updateTask(id, { ...current, paused: patch.paused }));
           }
-          return json(engine.store.updateTask(id, await validateTask({ ...current, ...patch })));
+          const input = await validateTask({ ...current, ...patch });
+          options.authorizeMutation?.();
+          return json(engine.store.updateTask(id, input));
         }
         if (action === 'tags' && method === 'PATCH') return json(engine.store.setTaskTags(id, validateTaskTags(await body(req))));
         if (action === 'run' && method === 'POST') { await body(req); return json(engine.start(id), 201); }

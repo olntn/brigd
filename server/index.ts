@@ -2,7 +2,7 @@ import { mkdirSync, chmodSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { Store } from './store';
 import { Engine } from './engine';
-import { createHandler } from './http';
+import { createHandler, type HttpOptions } from './http';
 import { readConfig } from './config';
 import { ATTACHMENT_MAX_BYTES } from '../src/lib/attachments';
 import { GitWorkspaces } from './workspaces';
@@ -11,6 +11,7 @@ import { BACKUP_MAX_BYTES, BackupManager } from './backups';
 import { BackupAutoUpdater } from './backup-auto-update';
 import { restoreBackup } from './backup-restore';
 import { AppError } from './errors';
+import type { TaskAppAccess } from './task-mcp-app';
 
 const root = resolve(import.meta.dir, '..');
 const { mode, cliAccess, port, hostname, allowedHosts, allowedOrigins, dbPath, dev, defaultCwd, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile, cliHome, updateBackupDir } = readConfig(root);
@@ -34,7 +35,11 @@ let active = false;
 let requests = 0;
 let restoring = false;
 let restoreInFlight: Promise<void> | null = null;
-const createAppHandler = (): ReturnType<typeof createHandler> => createHandler(engine, { port, root, dev, allowedHosts, allowedOrigins, defaultCwd, cliHome, updateBackupDir, backupManager: backups,
+const internalHost = allowedHosts?.[0] ?? `127.0.0.1:${port}`;
+const internalOrigin = allowedOrigins?.[0] ?? `http://${internalHost}`;
+const createAppHandler = (): ReturnType<typeof createHandler> => {
+  const owner = engine;
+  const options: HttpOptions = { port, root, dev, allowedHosts, allowedOrigins, defaultCwd, cliHome, updateBackupDir, backupManager: backups, startedAt: Date.now(),
   async restoreBackup(backups, id) {
     if (restoring || exiting) throw new AppError('Дождитесь завершения восстановления.', 409);
     restoring = true;
@@ -89,7 +94,65 @@ const createAppHandler = (): ReturnType<typeof createHandler> => createHandler(e
     try { await operation; }
     finally { restoring = false; restoreInFlight = null; }
   },
-});
+  };
+  const appHandler = createHandler(owner, options);
+  const assertAvailable = () => {
+    if (restoring) throw new AppError('Дождитесь завершения восстановления.', 409);
+    if (exiting || !active || owner !== engine) throw new AppError('Сервис недоступен для этого вызова агента.', 503);
+  };
+  const request = async (method: string, path: string, value: Record<string, unknown> | undefined, invocation: Parameters<TaskAppAccess['request']>[3]) => {
+    const authorize = () => {
+      assertAvailable();
+      if (!invocation.isCurrent()) throw new AppError('Вызов агента уже завершён или отменён.', 409);
+    };
+    authorize();
+    const req = new Request(`${internalOrigin}${path}`, { method,
+      headers: { Host: internalHost, Origin: internalOrigin, 'Content-Type': 'application/json' },
+      ...(!['GET', 'HEAD'].includes(method) ? { body: JSON.stringify(value ?? {}) } : {}),
+    });
+    const scopedHandler = createHandler(owner, { ...options, authorizeMutation: authorize });
+    requests++;
+    try { return await scopedHandler(req); }
+    finally { requests--; }
+  };
+  const access: TaskAppAccess = { async request(method, path, value, invocation) {
+    assertAvailable();
+    if (!invocation.isCurrent()) throw new AppError('Вызов агента уже завершён или отменён.', 409);
+    const restore = method === 'POST' ? path.match(/^\/api\/backups\/([^/]+)\/select$/) : null;
+    const cancellingSelf = method === 'POST' && path === `/api/runs/${invocation.runId}/cancel`;
+    if (restore || cancellingSelf) {
+      // Stopping this invocation inline would close its private socket before
+      // the receipt and can make restore wait for its own unanswered MCP call.
+      if (restore) {
+        if (Object.keys(value ?? {}).length) throw new AppError('Ожидается пустой JSON-объект');
+        let id: string;
+        try { id = decodeURIComponent(restore[1]!); }
+        catch { throw new AppError('Бэкап не найден', 404); }
+        backups.validate(id);
+      } else {
+        const run = owner.store.getRun(invocation.runId);
+        if (run.taskId !== invocation.taskId || !['running', 'preparing', 'queued'].includes(run.status)) {
+          throw new AppError('Текущий запуск уже завершён или отменён.', 409);
+        }
+      }
+      let dispatched = false;
+      return { response: Response.json({ accepted: true, status: 'queued', action: restore ? 'restore_backup' : 'cancel_run' }, { status: 202 }),
+        afterResponse() {
+          if (dispatched) return;
+          dispatched = true;
+          void request(method, path, value, invocation).then(async response => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+          }).catch(error => {
+            console.error(`[brigd] Отложенная операция MCP ${method} ${path} не выполнена:`, error instanceof Error ? error.message : error);
+          });
+        },
+      };
+    }
+    return request(method, path, value, invocation);
+  } };
+  owner.setTaskAppAccess(access);
+  return appHandler;
+};
 let handler = createAppHandler();
 const server = Bun.serve({
   hostname, port, maxRequestBodySize: Math.max(ATTACHMENT_MAX_BYTES, BACKUP_MAX_BYTES),

@@ -4,9 +4,11 @@ import { join } from 'node:path';
 import sharp from 'sharp';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { Store, runFence } from '../server/store';
+import { AppError, Store, runFence } from '../server/store';
+import { Engine } from '../server/engine';
+import { createHandler } from '../server/http';
 import { prepareAttachment } from '../server/attachments';
-import { createTaskBridge } from '../server/task-mcp';
+import { createTaskBridge, type TaskAppAccess } from '../server/task-mcp';
 import { TASK_MCP_TOOLS, type TaskAttachmentContext } from '../server/task-mcp-protocol';
 
 // Exact production dependencies and bundled stdio helper; no provider or model calls.
@@ -28,8 +30,24 @@ try {
     schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false, attachmentIds: [image.id] });
   const noteFile = store.stageAttachment(await prepareAttachment(Buffer.from('Discussion attachment'), 'text/plain', 'note.txt'));
   const note = store.comment(task.id, null, 'user', 'Inspect the attached note and screenshot.', Date.now(), null, [noteFile.id]);
+  const reference = store.createTask({ title: 'Referenced task', instruction: 'Read this description from another task.', provider: 'codex', cwd: folder,
+    schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false });
+  const referenceFile = store.stageAttachment(await prepareAttachment(Buffer.from('Referenced comment attachment'), 'text/plain', 'reference.txt'));
+  const referenceImage = store.stageAttachment(await prepareAttachment(original, 'image/png', 'reference-screen.png'));
+  const referenceComment = store.comment(reference.id, null, 'user', 'Referenced discussion', Date.now(), null, [referenceFile.id, referenceImage.id]);
   const run = store.startManual(task.id, false);
-  bridge = createTaskBridge(store, run, runFence(run));
+  const managementEngine = new Engine(store, true);
+  const appAccess: TaskAppAccess = { async request(method, path, body, invocation) {
+    const handler = createHandler(managementEngine, { port: 4310, defaultCwd: folder, cliHome: folder,
+      updateBackupDir: join(folder, 'updates'), authorizeMutation() {
+        if (!invocation.isCurrent()) throw new AppError('Task invocation is no longer current.', 409);
+      } });
+    return handler(new Request(`http://127.0.0.1:4310${path}`, { method,
+      headers: { Host: '127.0.0.1:4310', Origin: 'http://127.0.0.1:4310', 'Content-Type': 'application/json' },
+      ...(!['GET', 'HEAD'].includes(method) ? { body: JSON.stringify(body ?? {}) } : {}),
+    }));
+  } };
+  bridge = createTaskBridge(store, run, runFence(run), appAccess);
   assert(bridge.agentConfig.args[0]?.endsWith('/dist/task-mcp-stdio.js') && existsSync(bridge.agentConfig.args[0]), 'Build and use the packaged MCP helper');
   client = new Client({ name: 'brigd-packaged-check', version: '1' });
   const transport = new StdioClientTransport({ command: bridge.agentConfig.command, args: bridge.agentConfig.args,
@@ -43,6 +61,23 @@ try {
   const visibleNote = discussion.comments.find((comment: any) => comment.id === note.id);
   assert(visibleNote?.body === note.body && visibleNote.attachments.some((file: any) => file.id === noteFile.id && file.available), 'Comment and readable attachment metadata missing over stdio');
   assert(text(await client.callTool({ name: 'read_attachment', arguments: { attachment_id: noteFile.id } })).data === 'Discussion attachment', 'Comment attachment bytes missing over stdio');
+  const referenced = text(await client.callTool({ name: 'get_task', arguments: { task_id: reference.id.slice(0, 8).toUpperCase() } }));
+  assert(referenced.task.id === reference.id && referenced.task.instruction === reference.instruction && referenced.attachment_count === 2, 'Referenced task description or files missing over stdio');
+  const referenceHistory = text(await client.callTool({ name: 'list_comments', arguments: { task_id: referenced.task.id } }));
+  assert(referenceHistory.comments.some((comment: any) => comment.id === referenceComment.id && comment.attachments.every((file: any) => file.available)), 'Referenced discussion missing over stdio');
+  const referenceRead = text(await client.callTool({ name: 'read_attachment', arguments: { task_id: reference.id, attachment_id: referenceFile.id } }));
+  assert(referenceRead.data === 'Referenced comment attachment', 'Referenced comment attachment unreadable over stdio');
+  const referencePreview = await client.callTool({ name: 'view_attachment', arguments: { task_id: reference.id, attachment_id: referenceImage.id } });
+  assert(!referencePreview.isError && (referencePreview.content as any[]).some(item => item.type === 'image'), 'Referenced image unavailable over stdio');
+  assert((await client.callTool({ name: 'read_attachment', arguments: { attachment_id: referenceFile.id } })).isError, 'Referenced file became a current-task input');
+  const createCard = { name: 'create_task', arguments: { data: { title: 'Managed card', instruction: 'Created through packaged MCP.' }, idempotency_key: 'managed_card' } };
+  const managed = text(await client.callTool(createCard));
+  assert(text(await client.callTool(createCard)).id === managed.id && store.getTask(managed.id).cwd === folder, 'Card creation defaults or durable retry failed');
+  text(await client.callTool({ name: 'archive_task', arguments: { task_id: managed.id.slice(0, 8).toUpperCase(), idempotency_key: 'archive_managed_card' } }));
+  assert(text(await client.callTool({ name: 'list_tasks', arguments: { archived: 'archived' } })).items.some((card: any) => card.id === managed.id), 'Archived card missing from management list');
+  const backupRequest = { name: 'create_backup', arguments: { idempotency_key: 'managed_backup' } };
+  const backup = text(await client.callTool(backupRequest));
+  assert(text(await client.callTool(backupRequest)).id === backup.id && text(await client.callTool({ name: 'list_backups', arguments: {} })).items.length === 1, 'Backup creation retry duplicated a snapshot');
   const viewed = await client.callTool({ name: 'view_attachment', arguments: { attachment_id: image.id } });
   assert(!viewed.isError, 'Image tool failed');
   const imageBlock = (viewed.content as any[]).find(item => item.type === 'image');
@@ -104,7 +139,7 @@ try {
   assert(store.getRun(followup.id).sessionId === 'runtime-original-session' && store.getRun(followup.id).followup?.sourceRunId === run.id, 'Follow-up lineage did not persist');
   assert(store.startFollowup(task.id, intent).run.id === followup.id, 'Follow-up retry after database reopen duplicated a run');
   assert(JSON.stringify(store.getRun(run.id)) === originalRun, 'Database reopen changed original result history');
-  console.log('PASS: packaged sharp, initialized SDK client ↔ bundled stdio ↔ private task broker, discussion history and comment files, native image, agent file/comment, idempotency, revocation, exact-session follow-up scoped inputs/output attribution and immutable history persistence. No model calls.');
+  console.log('PASS: packaged sharp, initialized SDK client ↔ bundled stdio ↔ private task broker, app card creation/archive/backups with durable retries, referenced task descriptions/discussions/files, native image, agent file/comment, revocation, exact-session follow-up and immutable history persistence. No model calls.');
 } finally {
   await client?.close();
   bridge?.close();

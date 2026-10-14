@@ -101,7 +101,7 @@ describe('current-task MCP comment reading', () => {
     for (const args of [
       { offset: -1 }, { offset: 0.5 }, { offset: '0' }, { offset: Number.MAX_SAFE_INTEGER + 1 },
       { limit: 0 }, { limit: 21 }, { limit: 1.5 }, { limit: '1' },
-      { task_id: task.id }, { run_id: run.id }, { offset: null }, [], null,
+      { task_id: 'bad-task-id' }, { run_id: run.id }, { offset: null }, [], null,
     ]) expect((await call(broker, 'list_comments', args)).isError).toBe(true);
     expect(parse(await call(broker, 'list_comments', { offset: 1, limit: 1 })).comments).toEqual(expected.slice(1, 2));
   });

@@ -4,18 +4,25 @@ import { join } from 'node:path';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Socket } from 'bun';
-import type { Attachment, Run } from '../src/lib/types';
+import type { Attachment, Run, Task } from '../src/lib/types';
 import { ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_COUNT } from '../src/lib/attachments';
 import { AppError, type RunFence, type Store } from './store';
 import { attachmentName, prepareAttachment } from './attachments';
 import { commitPaths, commitWorkspace } from './commits';
+import { createTaskAppController, type TaskAppAccess } from './task-mcp-app';
 import { MAX_TASK_IMAGE_BYTES, MAX_TASK_READ_BYTES, MAX_TASK_REQUEST_BYTES, MAX_TASK_RESULT_BYTES, MAX_TASK_RESULT_TOTAL_BYTES, MAX_TASK_TOOL_CALLS, TASK_MCP_TOOLS, type TaskAttachmentContext, type TaskBridgeConfig, type TaskBrokerRequest, type TaskToolResult } from './task-mcp-protocol';
 export type { TaskBridgeConfig } from './task-mcp-protocol';
+export type { TaskAppAccess } from './task-mcp-app';
 
 const text = (value: unknown): TaskToolResult => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
 const failure = (message: string): TaskToolResult => ({ isError: true, content: [{ type: 'text', text: message }] });
 const expired = () => failure('Task attachment capability is unavailable or expired. Stop using this task bridge.');
 const context = (a: Attachment): TaskAttachmentContext => ({ id: a.id, name: a.name, mime: a.mime, size: a.size, previewable: a.previewable });
+const taskContext = (task: Task) => ({ id: task.id, title: task.title, instruction: task.instruction, status: task.status,
+  archived: task.archivedAt !== null, createdAt: task.createdAt, updatedAt: task.updatedAt,
+  provider: task.provider, cwd: task.cwd, schedule: task.schedule, paused: task.paused, intervalMinutes: task.intervalMinutes,
+  firstRunAt: task.firstRunAt, nextRunAt: task.nextRunAt, workerId: task.workerId, tagIds: task.tagIds, steps: task.steps,
+  latestRunId: task.latestRun?.id ?? null, hasCompletedRun: task.hasCompletedRun ?? false });
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 function object(value: unknown, keys: string[]): Record<string, unknown> {
   if (!record(value) || Object.keys(value).some(key => !keys.includes(key))) throw new AppError('Invalid task tool arguments.');
@@ -116,15 +123,32 @@ export class TaskOutputDirectory {
 export interface TaskBroker {
   agentConfig: TaskBridgeConfig;
   dispatch(request: unknown): Promise<TaskToolResult>;
+  /** Run accepted self-stop/restore actions only after their receipt is delivered. */
+  flushPendingActions(result?: TaskToolResult): void;
   close(): void;
 }
 /** In-process authoritative capability broker; exported for deterministic security tests. */
-export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence): TaskBroker {
+export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence, appAccess?: TaskAppAccess): TaskBroker {
   const fence = { ...suppliedFence }, runId = run.id, taskId = run.taskId;
   if (!store.isCurrent(runId, fence)) throw new AppError('Task invocation is no longer current.', 409);
   const inputs = store.listRunAttachments(runId, fence).map(context);
   const allowed = new Set(inputs.map(a => a.id));
-  const commentSequence = store.commentCursor(taskId);
+  const currentScope = { task: taskContext(store.getTask(taskId)), commentSequence: store.commentCursor(taskId), attachments: inputs, allowed };
+  const references = new Map<string, typeof currentScope>();
+  const readScope = (value: unknown) => {
+    if (value === undefined) return currentScope;
+    const task = store.resolveTaskReference(string(value, 36, 'task ID'));
+    if (task.id === taskId) return currentScope;
+    let scope = references.get(task.id);
+    if (!scope) {
+      const attachments = store.listTaskAttachments(task.id).map(context);
+      scope = { task: taskContext(task), commentSequence: store.commentCursor(task.id), attachments, allowed: new Set(attachments.map(a => a.id)) };
+      references.set(task.id, scope);
+    }
+    return scope;
+  };
+  const scopeAttachments = (scope: typeof currentScope) => scope === currentScope
+    ? store.listRunAttachments(runId, fence).filter(a => allowed.has(a.id)).map(context) : scope.attachments;
   const output = new TaskOutputDirectory(run.cwd);
   let inputDirectory: TaskOutputDirectory | undefined;
 
@@ -137,27 +161,56 @@ export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence
     context: { taskId, runId, turn: fence.turn, stepIndex: fence.currentStepIndex, attachments: inputs, outputDirectory: output.path },
   };
   let active = true, calls = 0, resultBytes = 0, busy = false, receiptReservation = 0;
-  const close = () => { active = false; output.close(); inputDirectory?.close(); };
+  const pendingActions = new Map<TaskToolResult, (() => void)[]>();
+  let callActions: (() => void)[] = [];
+  const close = () => { active = false; pendingActions.clear(); output.close(); inputDirectory?.close(); };
   const current = () => active && store.isCurrent(runId, fence);
+  const app = createTaskAppController(store, run, fence, appAccess, current, action => callActions.push(action));
+  const flushPendingActions = (result?: TaskToolResult) => {
+    const receipts = result ? [result] : [...pendingActions.keys()];
+    for (const receipt of receipts) {
+      const actions = pendingActions.get(receipt);
+      pendingActions.delete(receipt);
+      if (current()) actions?.forEach(action => action());
+    }
+  };
   const mutationKey = (value: unknown) => {
     const key = string(value, 100, 'idempotency key');
     if (!/^[a-zA-Z0-9_-]+$/.test(key)) throw new AppError('Invalid idempotency key.');
     return key;
   };
-  const attachmentId = (value: unknown) => {
+  const attachmentId = (value: unknown, scope = currentScope) => {
     const id = string(value, 100, 'attachment ID');
-    if (!allowed.has(id)) throw new AppError('Attachment is not part of this task invocation.', 403);
+    if (!scope.allowed.has(id)) throw new AppError('Attachment is not part of the selected task snapshot.', 403);
     return id;
   };
   const execute = async (request: TaskBrokerRequest): Promise<TaskToolResult> => {
+    if (app.has(request.tool)) {
+      const result = await app.execute(request.tool, request.arguments);
+      if (!result.isError && ['update_task', 'archive_task', 'restore_task', 'set_task_tags'].includes(request.tool) && record(request.arguments)) {
+        const task = store.resolveTaskReference(request.arguments.task_id as string);
+        const scope = task.id === taskId ? currentScope : references.get(task.id);
+        if (scope) scope.task = taskContext(task);
+      }
+      return result;
+    }
     switch (request.tool) {
+      case 'get_task': {
+        const args = object(request.arguments, ['task_id']);
+        const scope = readScope(args.task_id), attachments = scopeAttachments(scope);
+        const result = text({ task: scope.task, attachments: attachments.slice(0, 20), attachment_count: attachments.length,
+          next_offset: attachments.length > 20 ? 20 : null });
+        if (Buffer.byteLength(JSON.stringify(result)) + 1 > MAX_TASK_RESULT_BYTES) throw new AppError('Task details exceed the MCP response limit. Use list_tasks for its summary.');
+        return result;
+      }
       case 'list_comments': {
-        const args = object(request.arguments, ['offset', 'limit']);
+        const args = object(request.arguments, ['task_id', 'offset', 'limit']);
+        const scope = readScope(args.task_id);
         const offset = integer(args.offset, 0, Number.MAX_SAFE_INTEGER), limit = integer(args.limit, 20, 20, 1);
-        const rows = store.listTaskComments(taskId, { offset, limit: limit + 1, throughSequence: commentSequence });
+        const rows = store.listTaskComments(scope.task.id, { offset, limit: limit + 1, throughSequence: scope.commentSequence });
         const comments = [];
         for (const comment of rows.slice(0, limit)) {
-          const item = { ...comment, attachments: (comment.attachments ?? []).map(a => ({ ...context(a), available: allowed.has(a.id) })) };
+          const item = { ...comment, attachments: (comment.attachments ?? []).map(a => ({ ...context(a), available: scope.allowed.has(a.id) })) };
           // The text result is JSON-encoded again by MCP. Measure that actual wire
           // representation so long Markdown/Unicode discussions stay readable.
           const candidate = text({ comments: [...comments, item], next_offset: Number.MAX_SAFE_INTEGER });
@@ -170,14 +223,15 @@ export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence
         return text({ comments, next_offset: rows.length > comments.length ? offset + comments.length : null });
       }
       case 'list_attachments': {
-        const args = object(request.arguments, ['offset', 'limit']);
-        const attachments = store.listRunAttachments(runId, fence).filter(a => allowed.has(a.id)).map(context);
+        const args = object(request.arguments, ['task_id', 'offset', 'limit']);
+        const attachments = scopeAttachments(readScope(args.task_id));
         const offset = integer(args.offset, 0, attachments.length), limit = integer(args.limit, 20, 20, 1);
         return text({ attachments: attachments.slice(offset, offset + limit), next_offset: offset + limit < attachments.length ? offset + limit : null });
       }
       case 'read_attachment': {
-        const args = object(request.arguments, ['attachment_id', 'offset', 'max_bytes', 'materialize']);
-        const id = attachmentId(args.attachment_id), { attachment, data } = store.readAttachment(taskId, id);
+        const args = object(request.arguments, ['task_id', 'attachment_id', 'offset', 'max_bytes', 'materialize']);
+        const scope = readScope(args.task_id);
+        const id = attachmentId(args.attachment_id, scope), { attachment, data } = store.readAttachment(scope.task.id, id);
         const offset = integer(args.offset, 0, data.byteLength), maximum = integer(args.max_bytes, MAX_TASK_READ_BYTES, MAX_TASK_READ_BYTES, 1);
         if (args.materialize !== undefined && typeof args.materialize !== 'boolean') throw new AppError('Invalid materialize flag.');
         let localPath: string | undefined;
@@ -197,8 +251,9 @@ export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence
           encoding, data: content });
       }
       case 'view_attachment': {
-        const args = object(request.arguments, ['attachment_id']);
-        const { attachment, data, mime } = store.readAttachmentPreview(taskId, attachmentId(args.attachment_id));
+        const args = object(request.arguments, ['task_id', 'attachment_id']);
+        const scope = readScope(args.task_id);
+        const { attachment, data, mime } = store.readAttachmentPreview(scope.task.id, attachmentId(args.attachment_id, scope));
         if (data.byteLength > MAX_TASK_IMAGE_BYTES || mime !== 'image/png') throw new AppError('Image preview is unavailable within the safe size limit.');
         return { content: [{ type: 'text', text: JSON.stringify({ attachment: context(attachment), preview: true }) }, { type: 'image', data: Buffer.from(data).toString('base64'), mimeType: mime }] };
       }
@@ -207,7 +262,7 @@ export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence
         const body = string(args.body, 16000, 'comment body');
         const ids = args.attachment_ids === undefined ? [] : args.attachment_ids;
         if (!Array.isArray(ids) || ids.length > ATTACHMENT_MAX_COUNT || new Set(ids).size !== ids.length) throw new AppError('Invalid comment attachments.');
-        const comment = store.publishAgentComment(runId, fence, mutationKey(args.idempotency_key), { body, attachmentIds: ids.map(attachmentId) });
+        const comment = store.publishAgentComment(runId, fence, mutationKey(args.idempotency_key), { body, attachmentIds: ids.map(id => attachmentId(id)) });
         return text({ comment_id: comment.id, published: true });
       }
       case 'add_attachment': {
@@ -246,12 +301,14 @@ export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence
     }
     // Reserve the entire bounded receipt before a mutation. Never commit a write
     // and then report failure merely because its success receipt exceeded budget.
-    const mutation = raw.tool === 'add_comment' || raw.tool === 'add_attachment' || raw.tool === 'commit_changes';
+    const mutation = raw.tool === 'add_comment' || raw.tool === 'add_attachment' || raw.tool === 'commit_changes' ||
+      typeof raw.tool === 'string' && app.has(raw.tool) && app.mutates(raw.tool);
     if (mutation && resultBytes + 4096 > MAX_TASK_RESULT_TOTAL_BYTES) {
       close(); return failure('Task attachment tool output budget exhausted before publication. Nothing was published.');
     }
     receiptReservation = mutation ? 4096 : 0;
     busy = true;
+    callActions = [];
     let result: TaskToolResult;
     try {
       if (Buffer.byteLength(JSON.stringify(raw)) > MAX_TASK_REQUEST_BYTES) throw new AppError('Task tool request exceeds the size limit.');
@@ -266,15 +323,17 @@ export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence
     const bytes = Buffer.byteLength(JSON.stringify(result)) + 1;
     if (bytes > MAX_TASK_RESULT_BYTES || resultBytes + bytes > MAX_TASK_RESULT_TOTAL_BYTES) { close(); return failure('Task attachment tool output budget exhausted.'); }
     resultBytes += bytes;
+    if (!result.isError && callActions.length) pendingActions.set(result, callActions);
+    callActions = [];
     return result;
   };
-  return { agentConfig, dispatch, close };
+  return { agentConfig, dispatch, close, flushPendingActions };
 }
 
-interface SocketState { pending: Buffer; handled: boolean; response: Buffer | null; offset: number; }
+interface SocketState { pending: Buffer; handled: boolean; response: Buffer | null; offset: number; receipt?: TaskToolResult; delivered?: boolean; }
 /** Private local transport, never added to the app's HTTP routes. */
-export function createTaskBridge(store: Store, run: Run, fence: RunFence): TaskBroker {
-  const broker = createTaskBroker(store, run, fence);
+export function createTaskBridge(store: Store, run: Run, fence: RunFence, appAccess?: TaskAppAccess): TaskBroker {
+  const broker = createTaskBroker(store, run, fence, appAccess);
   const directory = mkdtempSync(join(tmpdir(), 'brigd-task-'));
   chmodSync(directory, 0o700);
   const path = join(directory, 'broker.sock');
@@ -285,7 +344,7 @@ export function createTaskBridge(store: Store, run: Run, fence: RunFence): TaskB
     const accepted = socket.write(state.response.subarray(state.offset));
     if (accepted < 0) { socket.terminate(); return; }
     state.offset += accepted;
-    if (state.offset >= state.response.byteLength) { state.response = null; socket.end(); }
+    if (state.offset >= state.response.byteLength) { state.response = null; state.delivered = true; socket.end(); }
   };
   let listener: ReturnType<typeof Bun.listen<SocketState>>;
   try {
@@ -308,13 +367,20 @@ export function createTaskBridge(store: Store, run: Run, fence: RunFence): TaskB
         state.pending = Buffer.alloc(0);
         void broker.dispatch(request).then(result => {
           if (!sockets.has(socket)) return;
+          state.receipt = result;
           state.response = Buffer.from(JSON.stringify(result) + '\n'); flush(socket);
         }).catch(() => socket.end());
       },
       drain: flush,
       timeout(socket) { socket.end(); },
       error(socket) { sockets.delete(socket); },
-      close(socket) { sockets.delete(socket); },
+      close(socket) {
+        sockets.delete(socket);
+        const receipt = socket.data.receipt;
+        // The helper destroys its connection after consuming the complete JSON.
+        // Let its stdio response reach the CLI before stopping that same agent.
+        if (socket.data.delivered && receipt) setTimeout(() => broker.flushPendingActions(receipt), 50);
+      },
     } });
     chmodSync(path, 0o600);
   } catch {
@@ -323,7 +389,7 @@ export function createTaskBridge(store: Store, run: Run, fence: RunFence): TaskB
   }
   broker.agentConfig.env.BRIGD_TASK_SOCKET = path;
   let closed = false;
-  return { agentConfig: broker.agentConfig, dispatch: broker.dispatch, close() {
+  return { agentConfig: broker.agentConfig, dispatch: broker.dispatch, flushPendingActions: broker.flushPendingActions, close() {
     if (closed) return; closed = true;
     broker.close(); // Revoke before cleanup, including any in-flight asynchronous preparation.
     for (const socket of sockets) socket.terminate();

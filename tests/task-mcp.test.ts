@@ -31,7 +31,8 @@ describe('authoritative current-task MCP broker', () => {
     expect(parse(await call(broker, 'read_attachment', { attachment_id: a.id, offset: 1, max_bytes: 4 }))).toMatchObject({ data: 'ello', bytes: 4, next_offset: 5 });
     for (const id of [other.id, late.id, 'unknown']) expect((await call(broker, 'read_attachment', { attachment_id: id })).isError).toBe(true);
     expect((await call(broker, 'read_attachment', { attachment_id: a.id, max_bytes: MAX_TASK_READ_BYTES + 1 })).isError).toBe(true);
-    expect((await call(broker, 'read_attachment', { attachment_id: a.id, task_id: task.id })).isError).toBe(true);
+    expect(parse(await call(broker, 'read_attachment', { attachment_id: a.id, task_id: task.id })).data).toBe('hello world');
+    expect((await call(broker, 'read_attachment', { attachment_id: late.id, task_id: task.id })).isError).toBe(true);
   });
   test('invalid or non-ASCII credentials never reveal data or throw', async () => {
     const { broker } = setup();

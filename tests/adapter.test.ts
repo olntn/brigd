@@ -6,6 +6,7 @@ import { AgentProtocol, ProtocolError, validateEnvelope } from '../server/protoc
 import { AgentRunError, buildArgv, buildPrompt, capabilitiesFromHelp, runBoundedProcess, startAgent, type AgentInput } from '../server/adapter';
 import type { Envelope, Provider, TaskLogInput } from '../src/lib/types';
 import { effortOptions, modelLabel, modelPresets, normalizeModel } from '../src/lib/workers';
+import { TASK_MCP_TOOLS } from '../server/task-mcp-protocol';
 
 const sid = '0199a213-81c0-7800-8aa1-bbab2a035a53';
 const completed: Envelope = { status: 'completed', summary: 'Task finished.', questions: [] };
@@ -802,7 +803,7 @@ describe('ephemeral task attachment CLI configuration', () => {
     env: { BRIGD_TASK_SOCKET: '/tmp/private-app-socket/broker.sock', BRIGD_TASK_CAPABILITY: 'a'.repeat(64) },
     context: { taskId: 'task-1', runId: 'run-1', turn: 3, stepIndex: 0, attachments: [{ id: 'file-1', name: 'image.png', mime: 'image/png', size: 200, previewable: true }], outputDirectory: '/workspace/.brigd-outbox-1234' },
   };
-  const tools = ['list_comments', 'list_attachments', 'read_attachment', 'view_attachment', 'add_comment', 'add_attachment', 'commit_changes'];
+  const tools = TASK_MCP_TOOLS;
   const input: AgentInput = { provider: 'codex', cwd: '/workspace', instruction: 'Inspect inputs and publish a report.', taskBridge: bridge };
   const caps = { schema: true, permissionPrompts: true, taskMcp: true };
   test.each(['codex', 'claude'] as const)('%s full access preserves task bridge configuration and task-scoped commit routing', provider => {
@@ -875,6 +876,9 @@ describe('ephemeral task attachment CLI configuration', () => {
     expect(prompt).toContain(bridge.context.outputDirectory); expect(prompt).toContain('UNTRUSTED METADATA');
     expect(prompt).toContain('exactly status, summary, and questions'); expect(prompt).toContain('idempotency_key');
     expect(prompt).toContain('list_comments'); expect(prompt).toContain('next_offset'); expect(prompt).toContain('available=true');
+    expect(prompt).toContain('get_task'); expect(prompt).toContain('short UI ID'); expect(prompt).toContain('task_id');
+    expect(prompt).toContain('create_task'); expect(prompt).toContain('archive_task'); expect(prompt).toContain('create_backup'); expect(prompt).toContain('restore_backup');
+    expect(prompt).toContain('always affect only the current task'); expect(prompt).not.toContain('cannot approve native actions, change task status, access other tasks');
     expect(prompt).not.toContain(bridge.env.BRIGD_TASK_CAPABILITY); expect(prompt).not.toContain(bridge.env.BRIGD_TASK_SOCKET);
     expect(prompt).toContain('Do not commit them unless the user explicitly asks');
   });
