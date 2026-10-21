@@ -85,3 +85,26 @@ export function attachmentDisposition(name: string, inline = false): string {
   const encoded = encodeURIComponent(name).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
   return `${inline ? 'inline' : 'attachment'}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
+const VIEW_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+const views = new Map<string, { data: Uint8Array; mime: string }>();
+let viewBytes = 0;
+/** Full-size browser views are re-encoded like previews, so raw originals never render inline. */
+export async function renderAttachmentView(bytes: Uint8Array, mime: string, key: string): Promise<{ data: Uint8Array; mime: string }> {
+  const cached = views.get(key);
+  if (cached) { views.delete(key); views.set(key, cached); return cached; }
+  if (decoding >= 2) throw new AppError('Обработка изображений занята. Повторите через несколько секунд.', 429);
+  decoding++;
+  try {
+    const options = { limitInputPixels: MAX_PIXELS, failOn: 'warning' as const, animated: false, pages: 1, sequentialRead: true };
+    const image = sharp(Buffer.from(bytes), options).rotate().timeout({ seconds: 15 });
+    const jpeg = mime === 'image/jpeg';
+    const rendered = { data: new Uint8Array(await (jpeg ? image.jpeg({ quality: 92 }) : image.png({ compressionLevel: 4 })).toBuffer()), mime: jpeg ? 'image/jpeg' : 'image/png' };
+    if (rendered.data.byteLength <= VIEW_CACHE_MAX_BYTES / 4) {
+      views.set(key, rendered); viewBytes += rendered.data.byteLength;
+      for (const [staleKey, stale] of views) { if (viewBytes <= VIEW_CACHE_MAX_BYTES) break; views.delete(staleKey); viewBytes -= stale.data.byteLength; }
+    }
+    return rendered;
+  } catch (error) {
+    throw error instanceof AppError ? error : new AppError('Не удалось подготовить изображение к просмотру', 422);
+  } finally { decoding--; }
+}

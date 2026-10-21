@@ -88,6 +88,42 @@ describe('independent in-process binary HTTP boundary review', () => {
     expect(Buffer.from(await download.arrayBuffer())).toEqual(original);
   });
 
+  test('full-size views are re-encoded inline renders with metadata stripped, never the raw original', async () => {
+    const original = await sharp({ create: { width: 6, height: 4, channels: 3, background: '#2d6a4f' } }).jpeg({ quality: 60 }).withMetadata({ exif: { IFD0: { Copyright: 'camera owner' } } }).toBuffer();
+    expect((await sharp(original).metadata()).exif).toBeDefined();
+    const file = await upload(original, 'photo.jpg', 'image/jpeg');
+    const task = store.createTask(input({ attachmentIds: [file.id] }));
+    const route = `/api/tasks/${task.id}/attachments/${file.id}`;
+    const view = await request(`${route}?view=1`);
+    expect(view.status).toBe(200);
+    expect(view.headers.get('content-disposition')).toStartWith('inline;');
+    expect(view.headers.get('content-type')).toBe('image/jpeg');
+    expect(view.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(view.headers.get('content-security-policy')).toContain('sandbox');
+    const rendered = Buffer.from(await view.arrayBuffer());
+    expect(view.headers.get('content-length')).toBe(String(rendered.length));
+    expect(rendered).not.toEqual(original);
+    const metadata = await sharp(rendered).metadata();
+    expect([metadata.format, metadata.width, metadata.height]).toEqual(['jpeg', 6, 4]);
+    expect(metadata.exif).toBeUndefined();
+    const head = await request(`${route}?view=1`, 'HEAD');
+    expect(head.status).toBe(200);
+    expect(head.headers.get('content-length')).toBe(String(rendered.length));
+    expect((await head.arrayBuffer()).byteLength).toBe(0);
+    const download = await request(`${route}?view=1&download=1`);
+    expect(download.headers.get('content-disposition')).toStartWith('attachment;');
+    expect(Buffer.from(await download.arrayBuffer())).toEqual(original);
+    const active = await upload('<script>alert(1)</script>', 'active.html', 'text/html');
+    const other = store.createTask(input({ attachmentIds: [active.id] }));
+    expect((await request(`/api/tasks/${other.id}/attachments/${active.id}?view=1`)).status).toBe(415);
+    const png = await sharp({ create: { width: 3, height: 2, channels: 4, background: '#ffffff80' } }).png().toBuffer();
+    const screenshot = await upload(png, 'screen.png', 'image/png');
+    const third = store.createTask(input({ attachmentIds: [screenshot.id] }));
+    const pngView = await request(`/api/tasks/${third.id}/attachments/${screenshot.id}?view=1`);
+    expect(pngView.headers.get('content-type')).toBe('image/png');
+    expect((await sharp(Buffer.from(await pngView.arrayBuffer())).metadata()).width).toBe(3);
+  });
+
   test('staged IDs are unreadable until binding and never readable through another task', async () => {
     const file = await upload('secret task input', 'secret.txt', 'text/plain');
     const first = store.createTask(input()), second = store.createTask(input());

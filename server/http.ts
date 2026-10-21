@@ -9,7 +9,7 @@ import { MAX_AVATAR_BYTES, validateAvatar } from './avatars';
 import { textField, validateAutopilot, validateIntegratorProfile, validateTask, validateWorker } from './validation';
 import { TASK_JSON_LIMIT } from './workflows';
 import { ATTACHMENT_MAX_BYTES } from '../src/lib/attachments';
-import { attachmentIds, attachmentDisposition, prepareAttachment } from './attachments';
+import { attachmentIds, attachmentDisposition, prepareAttachment, renderAttachmentView } from './attachments';
 import { INSTRUCTION_JSON_LIMIT, validateInstruction, validateInstructionPatch } from './instructions';
 import { DOC_JSON_LIMIT } from './docs';
 import { validateModel, validateModelPatch } from './models';
@@ -172,14 +172,18 @@ export function createHandler(engine: Engine, options: HttpOptions) {
       if (attachmentMatch && (method === 'GET' || method === 'HEAD')) {
         const [, taskId, attachmentId] = attachmentMatch;
         const metadata = engine.store.getAttachment(taskId!, attachmentId!);
-        const preview = url.searchParams.get('preview') === '1' && url.searchParams.get('download') !== '1';
-        if (preview && !metadata.previewable) throw new AppError('У этого файла нет безопасного предпросмотра', 415);
-        const value = method === 'HEAD' ? null : preview ? engine.store.readAttachmentPreview(taskId!, attachmentId!) : engine.store.readAttachment(taskId!, attachmentId!);
-        const inline = preview;
+        const download = url.searchParams.get('download') === '1';
+        const preview = url.searchParams.get('preview') === '1' && !download;
+        const view = url.searchParams.get('view') === '1' && !download && !preview;
+        if ((preview || view) && !metadata.previewable) throw new AppError('У этого файла нет безопасного предпросмотра', 415);
+        // The full-size view is rendered on demand from the verified raster; like the preview it is never the raw original.
+        const rendered = view ? await renderAttachmentView(engine.store.readAttachment(taskId!, attachmentId!).data, metadata.mime, metadata.sha256) : null;
+        const value = method === 'HEAD' ? null : rendered ?? (preview ? engine.store.readAttachmentPreview(taskId!, attachmentId!) : engine.store.readAttachment(taskId!, attachmentId!));
+        const inline = preview || view;
         return new Response(method === 'HEAD' ? null : value!.data as BodyInit, { headers: {
           ...securityHeaders,
-          'Content-Type': preview ? 'image/png' : metadata.mime,
-          'Content-Length': String(preview ? method === 'HEAD' ? engine.store.attachmentPreviewSize(taskId!, attachmentId!) : value!.data.byteLength : metadata.size),
+          'Content-Type': rendered ? rendered.mime : preview ? 'image/png' : metadata.mime,
+          'Content-Length': String(rendered ? rendered.data.byteLength : preview ? method === 'HEAD' ? engine.store.attachmentPreviewSize(taskId!, attachmentId!) : value!.data.byteLength : metadata.size),
           'Content-Disposition': attachmentDisposition(metadata.name, inline),
           'Content-Security-Policy': "default-src 'none'; sandbox; frame-ancestors 'none'",
           'Cross-Origin-Resource-Policy': 'same-origin'
