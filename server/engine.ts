@@ -4,6 +4,7 @@ import { startAgent, buildPrompt, type AgentHandle, type AgentInput, type AgentC
 import { AppError, Store, runFence, type RunFence } from './store';
 import { validateEnvelope, validateSessionId } from './protocol';
 import { workflowContext } from './workflows';
+import { runUltracode } from '../src/lib/workers';
 import { createTaskBridge } from './task-mcp';
 import type { TaskAppAccess } from './task-mcp-app';
 import { dirname, join, resolve } from 'node:path';
@@ -341,7 +342,7 @@ export class Engine {
         ...(run.workspace?.mode === 'worktree' ? { workspace: run.workspace } : {}),
         ...(run.inputAttachments?.length ? { attachments: run.inputAttachments } : {}), ...(launch.bridge ? { taskBridge: launch.bridge.agentConfig } : {}),
         model: run.worker?.model ?? null, effort: run.worker?.effort ?? 'default', communicationStyle: run.worker?.communicationStyle ?? '',
-        ...(run.worker ? { ultracode: run.worker.ultracode } : {}),
+        ...(runUltracode(run) !== undefined ? { ultracode: runUltracode(run) } : {}),
         sessionId: run.sessionId ?? undefined, answer, mock: run.mock, ...(workflow ? { workflow } : {}),
         ...(run.followup ? { followup: { sourceRunId: run.followup.sourceRunId, sourceStepIndex: run.followup.sourceStepIndex, request: run.followup.request } } : {}),
         ...(run.reconcile ? { reconcile: { targetBranch: run.reconcile.targetBranch, targetCommit: run.reconcile.targetCommit, conflicts: run.reconcile.conflicts,

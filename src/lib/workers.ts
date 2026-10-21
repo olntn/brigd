@@ -1,4 +1,4 @@
-import type { Effort, IntegratorProfileInput, ModelCatalogEntry, Provider, WorkerSnapshot } from './types';
+import type { Effort, IntegratorProfileInput, ModelCatalogEntry, Provider, Run, WorkerSnapshot } from './types';
 
 export const MODEL_ID_LIMIT = 128;
 export const MODEL_LABEL_LIMIT = 80;
@@ -17,6 +17,12 @@ export function integratorSnapshot(profile: IntegratorProfileInput, source: { pr
   const custom = profile.mode === 'custom';
   return { ...INTEGRATOR_WORKER, provider: custom ? profile.provider : source.provider, model: custom ? profile.model ?? null : source.model,
     effort: custom ? profile.effort : source.effort, ultracode: false, communicationStyle: profile.communicationStyle, avatarUrl: profile.avatarUrl };
+}
+
+/** The ultra mode a run requests: the task's choice frozen at start, else the worker snapshot's profile setting,
+ * else nothing (a run without a worker keeps the CLI default). */
+export function runUltracode(run: Pick<Run, 'ultracode' | 'worker'>): boolean | undefined {
+  return run.ultracode ?? run.worker?.ultracode ?? undefined;
 }
 
 /** Optional display metadata, kept separate from executable personal instructions. */

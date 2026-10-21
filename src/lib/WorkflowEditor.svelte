@@ -7,8 +7,10 @@
   import type { Worker } from './types';
 
   type DraftStep = { key: string; workerId: string; title: string; instruction: string };
-  let { steps = $bindable<DraftStep[]>([]), workers, originalWorkerIds = [], disabled = false, loading = false, unavailableProviders = [] }: {
+  let { steps = $bindable<DraftStep[]>([]), workers, originalWorkerIds = [], disabled = false, loading = false, unavailableProviders = [], onworkerchange }: {
     steps: DraftStep[]; workers: Worker[]; originalWorkerIds?: string[]; disabled?: boolean; loading?: boolean; unavailableProviders?: string[];
+    /** Called when a person picks a different worker for a stage. */
+    onworkerchange?: () => void;
   } = $props();
   let announcement = $state('');
   let container: HTMLDivElement;
@@ -58,7 +60,7 @@
           <button type="button" class="icon-button danger-hover" aria-label={`Удалить этап ${index + 1}`} title={steps.length <= WORKFLOW_MIN_STEPS ? 'В сложной задаче минимум два этапа' : 'Удалить этап'} disabled={disabled || steps.length <= WORKFLOW_MIN_STEPS} onclick={() => remove(index)}><Icon name="close" size={16} /></button>
         </div></div>
         <label class="form-field" for={`step-title-${step.key}`}><span>Название этапа <span class="required">*</span></span><input id={`step-title-${step.key}`} name={`step-title-${index}`} bind:value={step.title} maxlength={WORKFLOW_STEP_TITLE_LIMIT} required disabled={disabled} /></label>
-        <label class="form-field"><span>Работник этапа <span class="required">*</span></span><select name={`step-worker-${index}`} bind:value={step.workerId} required disabled={disabled || loading}><option value="">Выберите работника</option>{#each workers.filter(item => canAssign(item, step)) as item (item.id)}<option value={item.id}>{item.name} · {item.provider === 'codex' ? 'Codex' : 'Claude Code'}{item.archived ? ' (в архиве)' : ''}</option>{/each}{#if step.workerId && !worker}<option value={step.workerId}>Недоступный работник</option>{/if}</select></label>
+        <label class="form-field"><span>Работник этапа <span class="required">*</span></span><select name={`step-worker-${index}`} bind:value={step.workerId} onchange={() => onworkerchange?.()} required disabled={disabled || loading}><option value="">Выберите работника</option>{#each workers.filter(item => canAssign(item, step)) as item (item.id)}<option value={item.id}>{item.name} · {item.provider === 'codex' ? 'Codex' : 'Claude Code'}{item.archived ? ' (в архиве)' : ''}</option>{/each}{#if step.workerId && !worker}<option value={step.workerId}>Недоступный работник</option>{/if}</select></label>
         {#if worker}<div class="workflow-assignment"><WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={36} /><span class="workflow-assignment-copy">{worker.name}{#if worker.description?.trim()}<small class="worker-description">{worker.description}</small>{/if}<small class="worker-model-label" title={worker.model ?? undefined}>{worker.provider === 'codex' ? 'Codex' : 'Claude Code'} · {modelLabel(worker.model)}</small><small>Усилия: {effortLabel(worker.effort)}</small></span></div>{/if}
         {#if worker?.archived}<p class="field-warning">Работник в архиве. Прежнее назначение можно сохранить; новые назначения требуют восстановления профиля.</p>{/if}
         {#if worker && unavailableProviders.includes(worker.provider)}<p class="field-warning">CLI этого работника не найден. До запуска установите и авторизуйте {worker.provider === 'codex' ? 'Codex' : 'Claude Code'}.</p>{/if}

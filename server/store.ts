@@ -59,6 +59,14 @@ function validatedUltracode(value: unknown): boolean {
   if (typeof value !== 'boolean') throw new AppError('ultracode должен быть boolean');
   return value;
 }
+/** A task's ultra choice: null follows the worker profile at launch. Stored as a nullable 0/1 column. */
+function validatedTaskUltracode(value: unknown): boolean | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'boolean') throw new AppError('ultracode должен быть true, false или null');
+  return value;
+}
+const storedFlag = (value: boolean | null | undefined): number | null => value == null ? null : +value;
+const readFlag = (value: unknown): boolean | null => value == null ? null : !!value;
 function validatedDefaultCwd(value: unknown): string {
   if (typeof value !== 'string' || !value.trim() || value.length > 4_096 || value.includes('\0')) {
     throw new AppError('Рабочая папка по умолчанию: введите от 1 до 4096 символов');
@@ -291,6 +299,9 @@ export class Store {
         ['tasks', 'archived_at', 'INTEGER'],
         ['tasks', 'doc_page_ids', "TEXT NOT NULL DEFAULT '[]'"],
         ['runs', 'docs_snapshot', "TEXT NOT NULL DEFAULT '[]'"],
+        // NULL keeps the worker profile's setting, so existing cards and runs behave exactly as before.
+        ['tasks', 'ultracode', 'INTEGER CHECK(ultracode IN (0,1))'],
+        ['runs', 'ultracode', 'INTEGER CHECK(ultracode IN (0,1))'],
       ]) {
         if (!(this.db.query(`PRAGMA table_info(${table})`).all() as Row[]).some(row => row.name === column)) {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
@@ -1292,7 +1303,7 @@ export class Store {
     const followup = followupSnapshot(row, worker as WorkerSnapshot | null);
     const reconcile = reconcileSnapshot(row, worker as WorkerSnapshot | null);
     const workspace = row.workspace_id ? this.getWorkspace(row.workspace_id) : null;
-    return { integration: this.integrationForRun(row.id), workspace, followup, reconcile, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], docs: JSON.parse(row.docs_snapshot ?? '[]') as DocReference[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
+    return { integration: this.integrationForRun(row.id), workspace, followup, reconcile, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], docs: JSON.parse(row.docs_snapshot ?? '[]') as DocReference[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, ultracode: readFlag(row.ultracode), provider: row.provider, cwd: row.cwd, instruction: row.instruction,
       trigger: row.trigger, scheduledFor: row.scheduled_for, status: row.status, sessionId: row.session_id,
       startedAt: row.started_at, updatedAt: row.updated_at, finishedAt: row.finished_at, summary: row.summary,
       error: row.error, turn: row.turn, mock: !!row.mock };
@@ -1308,7 +1319,7 @@ export class Store {
       conflict: 'merge_conflict', failed: 'merge_failed', blocked: 'merge_blocked', interrupted: 'merge_interrupted', cancelled: 'merge_blocked',
     };
     const docPageIds = JSON.parse(row.doc_page_ids ?? '[]') as string[];
-    return { tagIds: tags.map(tag => tag.id), tags, docPageIds, docPages: this.docReferences(docPageIds), hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd,
+    return { tagIds: tags.map(tag => tag.id), tags, docPageIds, docPages: this.docReferences(docPageIds), hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd, ultracode: readFlag(row.ultracode),
       schedule: row.schedule, intervalMinutes: row.interval_minutes, firstRunAt: row.first_run_at,
       nextRunAt: row.next_run_at, paused: !!row.paused, createdAt: row.created_at, updatedAt: row.updated_at, archivedAt: row.archived_at ?? null,
       status: latestRun?.integration ? integrationStatuses[latestRun.integration.status] ?? latestRun.status : latest?.status ?? 'ready', latestRun,
@@ -1397,9 +1408,10 @@ export class Store {
       const steps = this.taskSteps(input.steps);
       const worker = steps.length ? null : this.assignedWorker(input.workerId);
       const provider = steps.length ? this.getWorker(steps[0]!.workerId).provider : worker?.provider ?? input.provider;
-      this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template,doc_page_ids) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
+      const ultracode = validatedTaskUltracode(input.ultracode);
+      this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template,doc_page_ids,ultracode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
         input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt,
-        input.schedule === 'interval' ? (input.firstRunAt ?? now) : null, +input.paused, now, now, worker?.id ?? null, JSON.stringify(steps), JSON.stringify(this.taskDocPageIds(input.docPageIds ?? [])));
+        input.schedule === 'interval' ? (input.firstRunAt ?? now) : null, +input.paused, now, now, worker?.id ?? null, JSON.stringify(steps), JSON.stringify(this.taskDocPageIds(input.docPageIds ?? [])), storedFlag(ultracode));
       this.replaceTaskAttachments(id, input.attachmentIds, now);
       this.replaceTaskTags(id, input.tagIds === undefined ? [] : input.tagIds);
       return this.getTask(id);
@@ -1416,8 +1428,9 @@ export class Store {
       let next = task.nextRunAt;
       if (changedSchedule) next = input.schedule === 'interval' ? (input.firstRunAt ?? now) : null;
       const docPageIds = input.docPageIds === undefined ? task.docPageIds ?? [] : this.taskDocPageIds(input.docPageIds, task.docPageIds ?? []);
-      this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=?,doc_page_ids=? WHERE id=?`)
-        .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), JSON.stringify(docPageIds), id);
+      const ultracode = validatedTaskUltracode(input.ultracode === undefined ? task.ultracode : input.ultracode);
+      this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=?,doc_page_ids=?,ultracode=? WHERE id=?`)
+        .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), JSON.stringify(docPageIds), storedFlag(ultracode), id);
       this.replaceTaskAttachments(id, input.attachmentIds, now);
       if (input.tagIds !== undefined) this.replaceTaskTags(id, input.tagIds);
       return this.getTask(id);
@@ -1481,9 +1494,10 @@ export class Store {
     if (steps.length) beginAttempt(steps[0]!, 1, now);
     const worker = steps.length ? steps[0]!.worker : task.worker ? workerSnapshot(task.worker) : null;
     const instructions = this.enabledInstructions();
-    this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,scheduled_for,status,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,steps_snapshot,current_step_index,workflow_version,docs_snapshot) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?,?,?,?,?,?)`)
+    // The task's ultra choice is frozen beside the worker snapshots: later card edits never change this run's mode.
+    this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,scheduled_for,status,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,steps_snapshot,current_step_index,workflow_version,docs_snapshot,ultracode) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?,?,?,?,?,?,?)`)
       .run(id, task.id, worker?.provider ?? task.provider, task.cwd, task.instruction, trigger, scheduledFor, now, now, +mock, worker?.id ?? null,
-        worker ? JSON.stringify(worker) : null, JSON.stringify(instructions), JSON.stringify(steps), steps.length ? 0 : null, steps.length ? 1 : 0, JSON.stringify(this.taskDocReferences(task.id)));
+        worker ? JSON.stringify(worker) : null, JSON.stringify(instructions), JSON.stringify(steps), steps.length ? 0 : null, steps.length ? 1 : 0, JSON.stringify(this.taskDocReferences(task.id)), storedFlag(task.ultracode));
     for (const attachment of this.listTaskAttachments(task.id)) this.db.query('INSERT INTO run_attachment_inputs(run_id,turn,attachment_id) VALUES (?,1,?)').run(id, attachment.id);
     this.comment(task.id, id, 'system', mock ? 'Демо-запуск: используется тестовый агент, реальные CLI не вызываются.' : `Запуск ${worker?.provider === 'claude' || (!worker && task.provider === 'claude') ? 'Claude Code' : 'Codex'} через CLI.`, now);
     return this.getRun(id);
@@ -1537,10 +1551,10 @@ export class Store {
         workflow: selected ? { steps: source.steps, currentStepIndex: input.sourceStepIndex! } : source.followup?.workflow ?? null };
       if (followup.workflow) completedWorkflowSnapshot(followup.workflow);
       const id = crypto.randomUUID();
-      this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,status,session_id,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,followup_snapshot,docs_snapshot)
-        VALUES (?,?,?,?,?,'followup','running',?,?,?,?,?,?,?,?,?)`)
+      this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,status,session_id,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,followup_snapshot,docs_snapshot,ultracode)
+        VALUES (?,?,?,?,?,'followup','running',?,?,?,?,?,?,?,?,?,?)`)
         .run(id, taskId, worker?.provider ?? source.provider, source.cwd, source.instruction, sessionId, now, now, +source.mock,
-          storedWorkerId(worker), worker ? JSON.stringify(worker) : null, JSON.stringify(source.instructions), JSON.stringify(followup), JSON.stringify(this.taskDocReferences(taskId)));
+          storedWorkerId(worker), worker ? JSON.stringify(worker) : null, JSON.stringify(source.instructions), JSON.stringify(followup), JSON.stringify(this.taskDocReferences(taskId)), storedFlag(source.ultracode));
       this.db.query('UPDATE runs SET workspace_id=(SELECT workspace_id FROM runs WHERE id=?) WHERE id=?').run(source.id, id);
       // Freeze only the selected saved turn's inputs. No current task edits or
       // later workflow stages may leak into an earlier stage's continuation.

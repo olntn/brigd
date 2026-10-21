@@ -150,6 +150,8 @@ export interface TaskInput {
   instruction: string;
   provider: Provider;
   cwd: string;
+  /** true/false forces the provider's ultra agent mode for the task's new runs; null or omitted follows each worker's profile. */
+  ultracode?: boolean | null;
   /** auto: the autopilot starts the task when its turn comes and a slot is free. */
   schedule: 'manual' | 'interval' | 'auto';
   intervalMinutes: number | null;
@@ -216,6 +218,8 @@ export interface Run {
   docs?: DocReference[];
   workerId: string | null;
   worker: WorkerSnapshot | null;
+  /** The task's ultracode choice frozen at start; null keeps the worker snapshot's own setting (or the CLI default without a worker). */
+  ultracode?: boolean | null;
   id: string;
   taskId: string;
   provider: Provider;
