@@ -54,7 +54,7 @@ brigd запускает небольшой MCP-помощник через stdi
 
 ## Управление приложением через MCP
 
-Можно поставить агенту задачу «создай карточки по плану, назначь работников, заархивируй старые и сделай бэкап». Для этого доступны 57 дополнительных инструментов:
+Можно поставить агенту задачу «создай карточки по плану, назначь работников, заархивируй старые и сделай бэкап». Для этого доступны 63 дополнительных инструмента:
 
 | Раздел | Инструменты |
 | --- | --- |
@@ -64,8 +64,9 @@ brigd запускает небольшой MCP-помощник через stdi
 | Инструкции, теги, модели | `list_*`, `get_*`, `create_*`, `update_*`, `delete_*` для `instructions`/`instruction`, `tags`/`tag` и `models`/`model` |
 | Настройки | `get_app_info`, `get_general_settings`, `update_general_settings`, `get_permission_settings`, `update_permission_settings`, `get_autopilot_settings`, `update_autopilot_settings`, `get_autopilot`, `update_autopilot`, `get_integrator`, `update_integrator`, `get_cli_config`, `configure_cli` |
 | Бэкапы | `list_backups`, `create_backup`, `rename_backup`, `set_backup_auto_update`, `delete_backup`, `restore_backup` |
+| Документация | `list_doc_pages`, `search_doc_pages`, `get_doc_page`, `create_doc_page`, `update_doc_page`, `delete_doc_page` |
 
-Списки управления принимают `offset` и `limit` (до 20), возвращают `items`, `total` и `next_offset`. `list_tasks` дополнительно принимает `query`, `tag_id` и `archived`: `active`, `archived` или `all`. Списки содержат краткие записи; описание карточки и полные профили читаются отдельными инструментами. `get_autopilot` также принимает `offset` и `limit`, возвращает краткие массивы `pool` и `attempts`, их размеры `pool_count`/`attempt_count` и смещения `pool_next_offset`/`attempts_next_offset`.
+Списки управления принимают `offset` и `limit` (до 20), возвращают `items`, `total` и `next_offset`. `search_doc_pages` принимает `query` и возвращает до 20 страниц с фрагментом текста, где совпадения заключены в квадратные скобки. `get_doc_page` отдаёт страницу в Markdown вместе с `childIds`; `create_doc_page` и `update_doc_page` принимают `data.title`, `data.parentId` и `data.markdown`, при этом `update_doc_page` заменяет содержимое целиком. `list_tasks` дополнительно принимает `query`, `tag_id` и `archived`: `active`, `archived` или `all`. Списки содержат краткие записи; описание карточки и полные профили читаются отдельными инструментами. `get_autopilot` также принимает `offset` и `limit`, возвращает краткие массивы `pool` и `attempts`, их размеры `pool_count`/`attempt_count` и смещения `pool_next_offset`/`attempts_next_offset`.
 
 Каждая команда изменения требует `idempotency_key`. Поля создаваемой или редактируемой сущности передаются в `data`, идентификатор — в `task_id`, `run_id`, `worker_id` и т. п. Например:
 

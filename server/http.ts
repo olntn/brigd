@@ -261,15 +261,37 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         if (method === 'DELETE') { engine.store.deleteInstruction(id); return json({ ok: true }); }
       }
       if (path === '/api/docs' && method === 'GET') return json(engine.store.listDocPages());
-      if (path === '/api/docs' && method === 'POST') return json(engine.store.createDocPage(await body(req)), 201);
+      if (path === '/api/docs' && method === 'POST') return json(engine.store.createDocPage(await body(req, DOC_JSON_LIMIT)), 201);
       if (path === '/api/docs/trash' && method === 'GET') return json(engine.store.listDeletedDocPages());
-      const docMatch = path.match(/^\/api\/docs\/([a-zA-Z0-9-]+)(?:\/(restore|purge))?$/);
+      if (path === '/api/docs/search' && method === 'GET') return json(engine.store.searchDocPages(url.searchParams.get('q') ?? ''));
+      const docImageMatch = path.match(/^\/api\/docs\/([a-zA-Z0-9-]+)\/images(?:\/([a-zA-Z0-9-]+))?$/);
+      if (docImageMatch && !docImageMatch[2] && method === 'POST') {
+        if (uploading >= 4) throw new AppError('Слишком много одновременных загрузок. Повторите через несколько секунд.', 429);
+        uploading++;
+        try {
+          const name = url.searchParams.get('name') ?? '';
+          const data = await readBody(req, ATTACHMENT_MAX_BYTES);
+          options.authorizeMutation?.();
+          const prepared = await prepareAttachment(data, req.headers.get('content-type') ?? 'application/octet-stream', name);
+          return json(engine.store.addDocImage(docImageMatch[1]!, prepared), 201);
+        } finally { uploading--; }
+      }
+      if (docImageMatch && docImageMatch[2] && (method === 'GET' || method === 'HEAD')) {
+        const { image, data } = engine.store.readDocImage(docImageMatch[1]!, docImageMatch[2]!);
+        // Image bytes never change for an id, so the browser may keep them for a day.
+        return new Response(method === 'HEAD' ? null : data as BodyInit, { headers: { ...securityHeaders, 'Cache-Control': 'private, max-age=86400',
+          'Content-Type': image.mime, 'Content-Length': String(image.size), 'Content-Disposition': attachmentDisposition(image.name, true),
+          'Content-Security-Policy': "default-src 'none'; sandbox; frame-ancestors 'none'", 'Cross-Origin-Resource-Policy': 'same-origin' } });
+      }
+      const docMatch = path.match(/^\/api\/docs\/([a-zA-Z0-9-]+)(?:\/(restore|purge|export|markdown))?$/);
       if (docMatch) {
         const [, id, action] = docMatch;
         if (!action && method === 'GET') return json(engine.store.getDocPage(id!));
         if (!action && method === 'PUT') return json(engine.store.saveDocPage(id!, await body(req, DOC_JSON_LIMIT) as never));
         if (!action && method === 'PATCH') return json(engine.store.moveDocPage(id!, await body(req)));
         if (!action && method === 'DELETE') { options.authorizeMutation?.(); engine.store.deleteDocPage(id!); return json({ ok: true }); }
+        if (action === 'export' && method === 'GET') return json(engine.store.exportDocPage(id!));
+        if (action === 'markdown' && method === 'PUT') return json(engine.store.saveDocPageMarkdown(id!, await body(req, DOC_JSON_LIMIT)));
         if (action === 'restore' && method === 'POST') { await body(req); return json(engine.store.restoreDocPage(id!)); }
         if (action === 'purge' && method === 'POST') { await body(req); engine.store.purgeDocPage(id!); return json({ ok: true }); }
       }

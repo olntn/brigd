@@ -477,3 +477,39 @@ describe('official SDK management over stdio', () => {
     } finally { await client.close(); }
   });
 });
+
+describe('documentation tools', () => {
+  test('agents list, search, read, create, update and trash documentation pages and link them to cards', async () => {
+    const { broker } = setup();
+    const root = await mutate(broker, 'create_doc_page', { data: { title: 'Guide', markdown: '# Setup\n\nRun **bun install**.' } });
+    expect(root).toMatchObject({ title: 'Guide', parentId: null, position: 0 });
+    const child = await mutate(broker, 'create_doc_page', { data: { title: 'Child', parentId: root.id, markdown: '- item' } });
+    expect(child).toMatchObject({ title: 'Child', parentId: root.id, position: 0 });
+    const list = parse(await call(broker, 'list_doc_pages', {}));
+    expect(list).toMatchObject({ total: 2, next_offset: null });
+    expect(list.items).toEqual([expect.objectContaining({ id: root.id, parentId: null, position: 0, title: 'Guide' }), expect.objectContaining({ id: child.id, parentId: root.id, position: 0, title: 'Child' })]);
+    const page = parse(await call(broker, 'get_doc_page', { doc_page_id: root.id }));
+    expect(page).toMatchObject({ id: root.id, parentId: null, title: 'Guide', childIds: [child.id], markdown: '# Setup\n\nRun **bun install**.\n' });
+    const found = parse(await call(broker, 'search_doc_pages', { query: 'install' }));
+    expect(found.total).toBe(1);
+    expect(found.items[0]).toMatchObject({ id: root.id, title: 'Guide', parentId: null });
+    expect(found.items[0].snippet).toContain('[install]');
+    expect(parse(await call(broker, 'search_doc_pages', { query: 'nothing here' })).items).toEqual([]);
+    await mutate(broker, 'update_doc_page', { doc_page_id: root.id, data: { markdown: '## Changed' } });
+    expect(store.getDocPage(root.id)).toMatchObject({ version: 2, blocks: [expect.objectContaining({ type: 'heading2', text: 'Changed' })] });
+    await mutate(broker, 'update_doc_page', { doc_page_id: root.id, data: { title: 'Guide v2' } });
+    expect(store.getDocPage(root.id)).toMatchObject({ title: 'Guide v2', version: 3 });
+    expect((await call(broker, 'update_doc_page', { doc_page_id: root.id, data: {}, idempotency_key: 'empty-update' })).isError).toBe(true);
+    expect((await call(broker, 'get_doc_page', { doc_page_id: 'missing-page' })).isError).toBe(true);
+    expect((await call(broker, 'create_doc_page', { data: { title: 'Deep', parentId: 'missing-page', markdown: 'x' }, idempotency_key: 'missing-parent' })).isError).toBe(true);
+    expect(store.listDocPages()).toHaveLength(2);
+    await mutate(broker, 'delete_doc_page', { doc_page_id: child.id });
+    expect(store.getDocPage(child.id).deletedAt).not.toBeNull();
+    expect(parse(await call(broker, 'list_doc_pages', {})).total).toBe(1);
+    const card = await createCard(broker, 'Documented card', crypto.randomUUID(), { docPageIds: [root.id] });
+    expect(store.getTask(card.id).docPages).toEqual([{ id: root.id, title: 'Guide v2' }]);
+    expect((await call(broker, 'create_task', { data: { title: 'Bad link', instruction: 'x', docPageIds: [child.id] }, idempotency_key: 'trashed-doc-link' })).isError).toBe(true);
+    const run = store.startManual(card.id, true);
+    expect(run.docs).toEqual([{ id: root.id, title: 'Guide v2' }]);
+  });
+});

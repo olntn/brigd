@@ -141,6 +141,8 @@ export interface RunStep extends TaskStepInput {
 }
 export interface TaskInput {
   tagIds?: string[];
+  /** Documentation pages the agent should read as reference material. */
+  docPageIds?: string[];
   attachmentIds?: string[];
   steps?: TaskStepInput[];
   workerId?: string | null;
@@ -157,6 +159,8 @@ export interface TaskInput {
 export interface Task extends TaskInput {
   tagIds: string[];
   tags: Tag[];
+  /** Live titles of the attached pages; pages in the trash are left out. */
+  docPages?: DocReference[];
   /** Once completed, new work continues a saved session instead of rerunning. */
   hasCompletedRun?: boolean;
   attachments?: Attachment[];
@@ -208,6 +212,8 @@ export interface Run {
   steps: RunStep[];
   currentStepIndex: number | null;
   instructions: InstructionSnapshot[];
+  /** Pages attached to the task when the run started. */
+  docs?: DocReference[];
   workerId: string | null;
   worker: WorkerSnapshot | null;
   id: string;
@@ -337,19 +343,51 @@ export interface AutopilotOverview extends AutopilotState {
   attempts: Run[];
 }
 
-export type DocBlockType = 'paragraph' | 'heading1' | 'heading2' | 'heading3' | 'bulleted' | 'numbered' | 'todo' | 'quote' | 'code' | 'divider';
-/** One editable unit of a documentation page. Text is inline Markdown; code blocks keep raw text. */
+export type DocBlockType = 'paragraph' | 'heading1' | 'heading2' | 'heading3' | 'bulleted' | 'numbered' | 'todo' | 'quote' | 'code' | 'divider'
+  | 'callout' | 'toggle' | 'table' | 'image' | 'toc' | 'task';
+export type DocCalloutColor = 'gray' | 'blue' | 'green' | 'yellow' | 'red';
+/** One editable unit of a documentation page. Text is inline Markdown; code blocks keep raw text; an image's text is its caption. */
 export interface DocBlock {
   id: string;
   type: DocBlockType;
   text: string;
+  /** Nesting level from 0; a collapsed toggle hides the deeper blocks that follow it. Omitted when 0. */
+  indent?: number;
   /** todo only. */
   checked?: boolean;
   /** code only: a display hint, never executed. */
   language?: string;
-  /** List items only: nesting level starting at 0. */
-  indent?: number;
+  /** callout only. */
+  icon?: string;
+  color?: DocCalloutColor;
+  /** toggle only. */
+  collapsed?: boolean;
+  /** table only: rows of inline Markdown cells, every row the same length. */
+  rows?: string[][];
+  header?: boolean;
+  /** image only: a stored page image, or null until the upload finishes. */
+  imageId?: string | null;
+  /** task only: a task card by full ID, or null until one is chosen. */
+  taskId?: string | null;
 }
+/** Metadata of an image stored with a documentation page; bytes are served by their own route. */
+export interface DocImage {
+  id: string;
+  pageId: string;
+  name: string;
+  mime: string;
+  size: number;
+  createdAt: number;
+}
+export interface DocSearchHit {
+  id: string;
+  parentId: string | null;
+  title: string;
+  /** Matched fragment with the hits wrapped in square brackets. */
+  snippet: string;
+}
+/** A page attached to a task; the run keeps the id and the title at start, the agent reads the live content. */
+export interface DocReference { id: string; title: string; }
 export interface DocPageSummary {
   id: string;
   parentId: string | null;
@@ -365,7 +403,11 @@ export interface DocPage extends DocPageSummary {
   /** Grows with every content save; a save carrying an older version is rejected. */
   version: number;
 }
-export interface DocPageCreateInput { title?: string; parentId?: string | null; }
+export interface DocPageCreateInput { title?: string; parentId?: string | null; /** Initial content for API callers; the UI starts empty. */ markdown?: string; }
 export interface DocPageContentInput { title: string; blocks: DocBlock[]; version: number; }
 /** Reorders among siblings or moves under another page; omitted fields keep their value. */
 export interface DocPageMoveInput { parentId?: string | null; position?: number; }
+/** Markdown export of a page for agents and files. */
+export interface DocPageExport { id: string; parentId: string | null; title: string; childIds: string[]; updatedAt: number; markdown: string; }
+/** Whole-content replacement from Markdown; omitted fields keep their value. */
+export interface DocPageMarkdownInput { title?: string; markdown?: string; }

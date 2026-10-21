@@ -5,9 +5,9 @@
   import DocEditor from './DocEditor.svelte';
   import { buildDocTree, docPageTitle, DOC_PAGE_LIMIT, type DocHeading } from './docs';
   import { docsFailureMessage, docsRequest } from './docs-client';
-  import type { DocPage, DocPageMoveInput, DocPageSummary } from './types';
+  import type { DocPage, DocPageMoveInput, DocPageSummary, DocSearchHit } from './types';
 
-  let { notify }: { notify: (message: string, type?: 'success' | 'error') => void } = $props();
+  let { notify, onopentask }: { notify: (message: string, type?: 'success' | 'error') => void; onopentask?: (id: string) => void } = $props();
   let pages = $state<DocPageSummary[]>([]);
   let trash = $state<DocPageSummary[]>([]);
   let loading = $state(true);
@@ -17,6 +17,11 @@
   let pending = $state(false);
   let trashOpen = $state(false);
   let createdId = $state<string | null>(null);
+  let search = $state('');
+  let results = $state<DocSearchHit[] | null>(null);
+  let searching = $state(false);
+  let searchSequence = 0;
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let deleting = $state<{ page: DocPageSummary; permanent: boolean } | null>(null);
   let deleteError = $state('');
   let removing = $state(false);
@@ -26,6 +31,30 @@
   let tree = $derived(buildDocTree(pages));
   let total = $derived(pages.length + trash.length);
   let selectedTrashed = $derived(selectedId !== null && !loading && !pages.some(page => page.id === selectedId));
+  // Search runs a moment after typing stops; stale answers are dropped.
+  $effect(() => {
+    const query = search.trim();
+    clearTimeout(searchTimer);
+    const sequence = ++searchSequence;
+    if (!query) { results = null; searching = false; return; }
+    searching = true;
+    searchTimer = setTimeout(async () => {
+      try {
+        const hits = await docsRequest<DocSearchHit[]>(`/api/docs/search?q=${encodeURIComponent(query)}`);
+        if (alive && sequence === searchSequence) results = hits;
+      } catch (failure) {
+        if (alive && sequence === searchSequence) { results = []; notify(docsFailureMessage(failure), 'error'); }
+      } finally { if (alive && sequence === searchSequence) searching = false; }
+    }, 250);
+  });
+  /** Snippets wrap hits in square brackets; render those as highlights without trusting the text as HTML. */
+  function snippetParts(snippet: string): { text: string; hit: boolean }[] {
+    return snippet.split(/(\[[^\[\]]*\])/).filter(Boolean).map(part => part.startsWith('[') && part.endsWith(']') ? { text: part.slice(1, -1), hit: true } : { text: part, hit: false });
+  }
+  function pickResult(id: string) {
+    search = '';
+    select(id);
+  }
 
   function readHash(): string | null {
     return location.hash.match(/^#\/docs\/([a-zA-Z0-9-]+)$/)?.[1] ?? null;
@@ -154,7 +183,15 @@
   <aside class="docs-nav" aria-label="Оглавление документации">
     <div class="docs-nav-inner">
     <p class="docs-nav-heading">ОГЛАВЛЕНИЕ</p>
-    {#if loading}
+    <div class="docs-search"><Icon name="search" size={15} /><input type="search" aria-label="Поиск по документации" placeholder="Поиск по страницам…" bind:value={search} onkeydown={(event) => { if (event.key === 'Escape') { event.preventDefault(); search = ''; } }} />{#if search}<button type="button" aria-label="Очистить поиск" onclick={() => search = ''}><Icon name="close" size={14} /></button>{/if}</div>
+    {#if search.trim()}
+      {#if searching && !results}<div class="detail-loading" role="status"><Icon name="refresh" class="spin" />Ищем…</div>
+      {:else if results?.length}
+        <ul class="docs-search-results" aria-label="Результаты поиска">
+          {#each results as hit (hit.id)}<li><button type="button" aria-current={hit.id === selectedId ? 'page' : undefined} onclick={() => pickResult(hit.id)}><strong>{docPageTitle(hit)}</strong><small>{#each snippetParts(hit.snippet) as part, index (index)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</small></button></li>{/each}
+        </ul>
+      {:else}<p class="docs-search-empty" role="status">Ничего не найдено. Ищутся названия и текст блоков.</p>{/if}
+    {:else if loading}
       <div class="detail-loading" role="status"><Icon name="refresh" class="spin" />Загружаем страницы…</div>
     {:else}
       <DocsTree nodes={tree} {selectedId} {headings} disabled={pending} onselect={select} oncreate={(id) => { void create(id); }} onmove={move} ondelete={(id) => { void askDelete(id, false); }} onheading={scrollToHeading} />
@@ -179,7 +216,7 @@
   </aside>
   <div class="docs-panel">
     {#if selectedId}
-      {#key selectedId}<DocEditor pageId={selectedId} autofocusTitle={createdId === selectedId} trashed={selectedTrashed} {notify} onchanged={pageChanged} onheadings={(items) => headings = items} />{/key}
+      {#key selectedId}<DocEditor pageId={selectedId} autofocusTitle={createdId === selectedId} trashed={selectedTrashed} {notify} {onopentask} onchanged={pageChanged} onheadings={(items) => headings = items} />{/key}
     {:else if !loading && !pages.length}
       <div class="no-results docs-empty"><span class="empty-icon"><Icon name="book" size={27} /></span><h2>Документация рядом с задачами</h2><p>Опишите проект, соглашения и процессы. Страницы вкладываются друг в друга, а тип блока меняется через «/».</p><button class="button primary" disabled={pending || loading} onclick={() => { void create(null); }}><Icon name="plus" size={16} />Создать первую страницу</button></div>
     {:else if !loading}

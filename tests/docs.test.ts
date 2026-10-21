@@ -119,7 +119,7 @@ describe('documentation pages', () => {
     expect(saved).toMatchObject({ id: page.id, title: 'Renamed', version: 2, createdAt: BASE });
     expect(saved.blocks).toEqual([
       { id: 'h', type: 'heading1', text: 'Title' }, { id: 'p', type: 'paragraph', text: 'Body **bold**' },
-      { id: 't', type: 'todo', text: 'Task', checked: false, indent: 0 }, { id: 'l', type: 'bulleted', text: 'Item', indent: 2 },
+      { id: 't', type: 'todo', text: 'Task', checked: false }, { id: 'l', type: 'bulleted', text: 'Item', indent: 2 },
       { id: 'c', type: 'code', text: 'bun test', language: '' }, { id: 'd', type: 'divider', text: '' },
     ]);
     const stale = await request(`/api/docs/${page.id}`, 'PUT', { title: 'Stale', blocks: [], version: 1 });
@@ -138,12 +138,12 @@ describe('documentation pages', () => {
     {}, { title: 'A' }, { title: 'A', blocks: [] }, { blocks: [], version: 1 }, { title: 'A', blocks: [], version: 0 }, { title: 'A', blocks: [], version: '1' },
     { title: 'A', blocks: {}, version: 1 }, { title: 'A', blocks: [null], version: 1 }, { title: 'A', blocks: [[]], version: 1 },
     { title: 'A', blocks: [block({ id: 'bad id' })], version: 1 }, { title: 'A', blocks: [block({ id: 'same' }), block({ id: 'same' })], version: 1 },
-    { title: 'A', blocks: [block({ type: 'image' as never })], version: 1 }, { title: 'A', blocks: [block({ text: 42 as never })], version: 1 },
+    { title: 'A', blocks: [block({ type: 'video' as never })], version: 1 }, { title: 'A', blocks: [block({ text: 42 as never })], version: 1 },
     { title: 'A', blocks: [block({ text: 'a\0b' })], version: 1 }, { title: 'A', blocks: [block({ text: 'x'.repeat(DOC_BLOCK_TEXT_LIMIT + 1) })], version: 1 },
     { title: 'A', blocks: [block({ type: 'divider', text: 'line' })], version: 1 }, { title: 'A', blocks: [block({ checked: true })], version: 1 },
     { title: 'A', blocks: [block({ type: 'todo', checked: 'yes' as never })], version: 1 }, { title: 'A', blocks: [block({ language: 'ts' })], version: 1 },
     { title: 'A', blocks: [block({ type: 'code', language: 'bad lang' })], version: 1 }, { title: 'A', blocks: [block({ type: 'code', language: 'x'.repeat(41) })], version: 1 },
-    { title: 'A', blocks: [block({ indent: 1 })], version: 1 }, { title: 'A', blocks: [block({ type: 'bulleted', indent: 5 })], version: 1 },
+    { title: 'A', blocks: [block({ indent: -1 })], version: 1 }, { title: 'A', blocks: [block({ type: 'bulleted', indent: 5 })], version: 1 },
     { title: 'A', blocks: [block({ type: 'bulleted', indent: 1.5 })], version: 1 }, { title: 'A', blocks: [{ ...block(), extra: true }], version: 1 },
     { title: 'A', blocks: [], version: 1, id: 'new' }, { title: 'x'.repeat(DOC_TITLE_LIMIT + 1), blocks: [], version: 1 },
     { title: 'A', blocks: Array.from({ length: DOC_BLOCK_LIMIT + 1 }, () => block()), version: 1 },
@@ -267,9 +267,9 @@ describe('documentation block helpers', () => {
   test('retypes blocks keeping only supported properties and numbers lists per level', () => {
     const todo = retypeDocBlock({ id: 'a', type: 'bulleted', text: 'x', indent: 2 }, 'todo');
     expect(todo).toEqual({ id: 'a', type: 'todo', text: 'x', checked: false, indent: 2 });
-    expect(retypeDocBlock(todo, 'heading2')).toEqual({ id: 'a', type: 'heading2', text: 'x' });
+    expect(retypeDocBlock(todo, 'heading2')).toEqual({ id: 'a', type: 'heading2', text: 'x', indent: 2 });
     expect(retypeDocBlock({ id: 'b', type: 'paragraph', text: 'line' }, 'divider')).toEqual({ id: 'b', type: 'divider', text: '' });
-    expect(retypeDocBlock({ id: 'c', type: 'quote', text: 'q' }, 'numbered')).toEqual({ id: 'c', type: 'numbered', text: 'q', indent: 0 });
+    expect(retypeDocBlock({ id: 'c', type: 'quote', text: 'q' }, 'numbered')).toEqual({ id: 'c', type: 'numbered', text: 'q' });
     expect(createDocBlock('code', 'x')).toMatchObject({ type: 'code', text: 'x', language: '' });
     const blocks: DocBlock[] = [
       { id: '1', type: 'numbered', text: '', indent: 0 }, { id: '2', type: 'numbered', text: '', indent: 0 },

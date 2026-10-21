@@ -15,9 +15,12 @@
     ondelete: (id: string) => void;
     onheading: (id: string) => void;
   } = $props();
+  type Zone = 'before' | 'after' | 'into';
   const storageKey = 'brigd-docs-expanded';
   let expanded = $state<Set<string>>(readExpanded());
   let menuId = $state<string | null>(null);
+  let dragId = $state<string | null>(null);
+  let dropTarget = $state<{ id: string; zone: Zone } | null>(null);
   let tree = $state<HTMLElement>();
   let parents = $derived(parentMap(nodes));
 
@@ -36,9 +39,9 @@
     if (open) next.add(id); else next.delete(id);
     remember(next);
   }
-  function parentMap(items: DocTreeNode[]): Map<string, { parent: DocTreeNode | null; siblings: DocTreeNode[]; index: number }> {
-    const map = new Map<string, { parent: DocTreeNode | null; siblings: DocTreeNode[]; index: number }>();
-    const walk = (siblings: DocTreeNode[], parent: DocTreeNode | null) => siblings.forEach((node, index) => { map.set(node.page.id, { parent, siblings, index }); walk(node.children, node); });
+  function parentMap(items: DocTreeNode[]): Map<string, { node: DocTreeNode; parent: DocTreeNode | null; siblings: DocTreeNode[]; index: number }> {
+    const map = new Map<string, { node: DocTreeNode; parent: DocTreeNode | null; siblings: DocTreeNode[]; index: number }>();
+    const walk = (siblings: DocTreeNode[], parent: DocTreeNode | null) => siblings.forEach((node, index) => { map.set(node.page.id, { node, parent, siblings, index }); walk(node.children, node); });
     walk(items, null);
     return map;
   }
@@ -104,6 +107,47 @@
       else { const parent = parents.get(node.page.id)?.parent; if (parent) tree?.querySelector<HTMLButtonElement>(`[data-doc-title="${CSS.escape(parent.page.id)}"]`)?.focus(); }
     }
   }
+
+  // Dragging a title drops it before or after another page, or into it as the last subpage.
+  function isInside(targetId: string, ancestorId: string): boolean {
+    for (let entry = parents.get(targetId); entry; entry = entry.parent ? parents.get(entry.parent.page.id) : undefined) if (entry.node.page.id === ancestorId) return true;
+    return false;
+  }
+  function dragStart(event: DragEvent, id: string) {
+    if (disabled) { event.preventDefault(); return; }
+    dragId = id;
+    event.dataTransfer?.setData('text/plain', id);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  }
+  function dragOver(event: DragEvent, id: string) {
+    if (!dragId || dragId === id || isInside(id, dragId)) { dropTarget = null; return; }
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const offset = event.clientY - rect.top;
+    dropTarget = { id, zone: offset < rect.height * 0.3 ? 'before' : offset > rect.height * 0.7 ? 'after' : 'into' };
+  }
+  function drop(event: DragEvent) {
+    event.preventDefault();
+    const id = dragId;
+    const target = dropTarget ? parents.get(dropTarget.id) : undefined;
+    const zone = dropTarget?.zone;
+    dragId = null;
+    dropTarget = null;
+    if (!id || !target || !zone) return;
+    if (zone === 'into') {
+      setExpanded(target.node.page.id, true);
+      onmove(id, { parentId: target.node.page.id, position: target.node.children.length });
+      return;
+    }
+    const siblings = target.siblings.filter(node => node.page.id !== id);
+    const position = siblings.findIndex(node => node.page.id === target.node.page.id) + (zone === 'after' ? 1 : 0);
+    const parentId = target.parent?.page.id ?? null;
+    const current = parents.get(id);
+    if (current && (current.parent?.page.id ?? null) === parentId && current.index === position) return;
+    onmove(id, { parentId, position });
+  }
+  function dragEnd() { dragId = null; dropTarget = null; }
 </script>
 
 <svelte:window onpointerdown={outside} />
@@ -114,11 +158,11 @@
   {@const entry = parents.get(id)}
   {@const open = expanded.has(id)}
   <li>
-    <div class="docs-tree-row" class:selected style:--depth={node.depth}>
+    <div class="docs-tree-row" role="group" aria-label={docPageTitle(node.page)} class:selected class:dragging={dragId === id} class:drop-before={dropTarget?.id === id && dropTarget.zone === 'before'} class:drop-after={dropTarget?.id === id && dropTarget.zone === 'after'} class:drop-into={dropTarget?.id === id && dropTarget.zone === 'into'} style:--depth={node.depth} ondragover={(event) => dragOver(event, id)} ondrop={drop}>
       {#if node.children.length}
         <button type="button" class="docs-tree-toggle" aria-expanded={open} aria-label={(open ? 'Свернуть: ' : 'Развернуть: ') + docPageTitle(node.page)} onclick={() => setExpanded(id, !open)}><Icon name={open ? 'down' : 'chevron'} size={14} /></button>
       {:else}<span class="docs-tree-toggle docs-tree-leaf" aria-hidden="true"><Icon name="file" size={13} /></span>{/if}
-      <button type="button" class="docs-tree-title" data-doc-title={id} aria-current={selected ? 'page' : undefined} onclick={() => onselect(id)} onkeydown={(event) => titleKey(event, node)}>{docPageTitle(node.page)}</button>
+      <button type="button" class="docs-tree-title" data-doc-title={id} aria-current={selected ? 'page' : undefined} draggable={!disabled} title="Перетащите, чтобы переместить" onclick={() => onselect(id)} onkeydown={(event) => titleKey(event, node)} ondragstart={(event) => dragStart(event, id)} ondragend={dragEnd}>{docPageTitle(node.page)}</button>
       <button type="button" class="docs-tree-menu-button icon-button" data-doc-menu={id} aria-label={'Действия: ' + docPageTitle(node.page)} aria-haspopup="menu" aria-expanded={menuId === id} {disabled} onclick={() => openMenu(id)}><Icon name="dots" size={15} /></button>
       {#if menuId === id}
         <div class="docs-menu" role="menu" tabindex="-1" aria-label={'Действия со страницей: ' + docPageTitle(node.page)} onkeydown={menuKey}>

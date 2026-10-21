@@ -53,7 +53,7 @@ function summary(value: unknown): unknown {
   if (!record(value)) return value;
   const fields = ['id', 'taskId', 'runId', 'title', 'name', 'provider', 'modelId', 'model', 'label', 'enabled', 'archived', 'archivedAt',
     'status', 'trigger', 'schedule', 'paused', 'nextRunAt', 'startedAt', 'finishedAt', 'workerId', 'kind', 'createdAt', 'updatedAt',
-    'selected', 'autoUpdate', 'size', 'source', 'color', 'mode', 'defaultSchedule', 'ok', 'accepted', 'action'];
+    'selected', 'autoUpdate', 'size', 'source', 'color', 'mode', 'defaultSchedule', 'ok', 'accepted', 'action', 'parentId', 'position', 'snippet'];
   const result = Object.fromEntries(fields.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
   return Object.keys(result).length ? result : { updated: true };
 }
@@ -84,6 +84,11 @@ export function createTaskAppController(store: Store, run: Run, fence: RunFence,
       if (operation.target) {
         const id = operation.target === 'task_id' ? store.resolveTaskReference(args.task_id as string).id : args[operation.target] as string;
         path = path.replace('{id}', encodeURIComponent(id));
+      }
+      if (operation.query) {
+        const params = new URLSearchParams();
+        for (const [argument, parameter] of Object.entries(operation.query)) if (args[argument] !== undefined) params.set(parameter, String(args[argument]));
+        if ([...params].length) path += `?${params}`;
       }
       const offset = args.offset as number | undefined ?? 0, limit = args.limit as number | undefined ?? 20;
       // Page SQL first: do not load every card, run, attachment or frozen worker

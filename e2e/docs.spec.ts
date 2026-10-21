@@ -51,7 +51,7 @@ test('writes a page with shortcuts and the slash menu, autosaves, deep links and
   await page.keyboard.press('Enter');
   await page.keyboard.type('/');
   const menu = page.getByRole('listbox', { name: 'Тип блока' });
-  await expect(menu.getByRole('option')).toHaveCount(10);
+  await expect(menu.getByRole('option')).toHaveCount(16);
   await page.keyboard.type('цит');
   await expect(menu.getByRole('option')).toHaveCount(1);
   await page.keyboard.press('Enter');
