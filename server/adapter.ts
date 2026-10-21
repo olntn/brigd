@@ -282,7 +282,7 @@ export function buildArgv(input: AgentInput, binary: string, capabilities: CliCa
     throw new AgentRunError('UNSUPPORTED', `Installed ${input.provider === 'codex' ? 'Codex' : 'Claude Code'} CLI cannot safely apply requested model "${model}" on new and resumed runs. Update the CLI or choose the default model.`);
   }
   if (input.ultracode && !capabilities.ultracode) {
-    throw new AgentRunError('UNSUPPORTED', `Installed ${input.provider === 'codex' ? 'Codex' : 'Claude Code'} CLI cannot safely enable ultra mode. Update the CLI${input.provider === 'claude' ? ' to 2.1.284 or later' : ''} or disable ultracode in the worker profile.`);
+    throw new AgentRunError('UNSUPPORTED', `Installed ${input.provider === 'codex' ? 'Codex' : 'Claude Code'} CLI cannot safely enable ultra mode. Update the CLI${input.provider === 'claude' ? ' to 2.1.284 or later' : ''} or disable ultracode in the task card or the worker profile.`);
   }
   if (effort !== 'default' && effort !== 'ultra' && !capabilities.efforts?.includes(effort)) {
     throw new AgentRunError('UNSUPPORTED', `Installed ${input.provider === 'codex' ? 'Codex' : 'Claude Code'} CLI cannot safely apply requested effort "${effort}". Update the CLI or choose default effort.`);
@@ -505,7 +505,7 @@ export function startAgent(input: AgentInput, callbacks: AgentCallbacks): AgentH
     callbacks.onLog?.({ kind: 'lifecycle', summary: `${input.sessionId ? 'Продолжение сессии' : 'Запуск'} ${input.provider === 'codex' ? 'Codex' : 'Claude Code'}`, details: [
       `Рабочая папка: ${input.cwd}`,
       `Модель: ${model ?? 'по умолчанию'}; уровень рассуждений: ${effectiveEffort}.`,
-      ...(input.ultracode !== undefined ? [`Режим ultra: ${input.ultracode ? 'запрошен профилем' : 'не запрошен профилем'}.`] : []),
+      ...(input.ultracode !== undefined ? [`Режим ultra: ${input.ultracode ? 'запрошен' : 'не запрошен'} (карточкой задачи или профилем работника).`] : []),
       `Входные вложения: ${input.attachments?.length ?? 0}; общие инструкции: ${input.instructions?.length ?? 0}.`,
       input.cliAccess === 'full' ? 'Полный доступ: подтверждения и песочница CLI отключены.' : 'Применяются штатные правила разрешений CLI.',
     ] });
