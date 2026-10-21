@@ -82,7 +82,7 @@
   let provider = $state<'all' | Provider>('all');
   let scope = $state<Scope>('all');
   let view = $state<View>('board');
-  let showOtherStatuses = $state(true);
+  let showProblems = $state(true);
   let archiveSearch = $state('');
   let selectedId = $state<string | null>(null);
   let detail = $state<TaskDetail | null>(null);
@@ -168,7 +168,8 @@
   ];
   const activeStatuses: TaskStatus[] = ['queued', 'preparing', 'running', 'waiting_input', 'interrupted', 'cancelling', 'awaiting_merge', 'integrating', 'merge_interrupted'];
   const attentionStatuses: TaskStatus[] = ['waiting_input', 'interrupted', 'failed', 'blocked', 'merge_conflict', 'merge_failed', 'merge_blocked', 'merge_interrupted'];
-  const otherStatuses: TaskStatus[] = ['failed', 'blocked', 'cancelled', 'interrupted', 'merge_conflict', 'merge_failed', 'merge_blocked', 'merge_interrupted'];
+  // Board columns have no place for these statuses; the problem panel above the board shows them, most urgent first.
+  const problemStatuses: TaskStatus[] = ['failed', 'blocked', 'merge_conflict', 'merge_failed', 'merge_blocked', 'interrupted', 'merge_interrupted', 'cancelled'];
   let activeTasks = $derived(tasks.filter(task => task.archivedAt === null));
   let archivedTasks = $derived(tasks.filter(task => task.archivedAt !== null).sort((a, b) => b.archivedAt! - a.archivedAt!));
   let archiveResults = $derived(archivedTasks.filter(task => {
@@ -182,7 +183,7 @@
       && (scope === 'all' || (scope === 'scheduled' && task.schedule === 'interval') || (scope === 'attention' && attentionStatuses.includes(task.status)) || (scope === 'completed' && task.status === 'completed') || (scope === 'autopilot' && task.schedule === 'auto'))
       && (!query || `${task.title} ${task.instruction} ${task.cwd} ${task.worker?.name ?? ''} ${task.latestRun?.worker?.name ?? ''} ${(task.steps ?? []).map(step => `${step.title} ${workers.find(worker => worker.id === step.workerId)?.name ?? ''}`).join(' ')} ${(task.latestRun?.steps ?? []).map(step => `${step.title} ${step.worker.name}`).join(' ')}`.toLocaleLowerCase().includes(query));
   }));
-  let otherStatusTasks = $derived(filtered.filter(task => otherStatuses.includes(task.status)));
+  let problemTasks = $derived(filtered.filter(task => problemStatuses.includes(task.status)).sort((a, b) => problemStatuses.indexOf(a.status) - problemStatuses.indexOf(b.status)));
   let selectedTask = $derived(detail?.task ?? tasks.find(task => task.id === selectedId) ?? null);
   let currentRun = $derived(selectedTask?.latestRun ?? null);
   let completedTargets = $derived(followupTargets(detail?.runs ?? []));
@@ -877,7 +878,7 @@
   }
   function matchesTag(task: Task, value: string) { return value === 'all' || (value === 'untagged' ? !(task.tagIds ?? []).length : (task.tagIds ?? []).includes(value)); }
   function resetFilters() { search = ''; provider = 'all'; tagFilter = 'all'; setScope('all'); }
-  function setScope(value: Scope) { scope = value; showOtherStatuses = true; }
+  function setScope(value: Scope) { scope = value; showProblems = true; }
   function globalKey(event: KeyboardEvent) {
     if (event.key === 'Escape' && followupRecipientOpen) {
       event.preventDefault();
@@ -1045,6 +1046,12 @@
         {/if}
 
         {#if view === 'board'}
+          {#if problemTasks.length}
+            <section class="problem-panel" aria-label="Проблемные задачи">
+              <button class="problem-toggle" aria-expanded={showProblems} onclick={() => showProblems = !showProblems}><span class="problem-title"><span class="problem-icon"><Icon name="alert" size={16} /></span><strong>Проблемные задачи</strong><span class="problem-count" aria-label={'Задач: ' + problemTasks.length}>{problemTasks.length}</span><small>Ошибки, блокировки, конфликты слияния, прерванные и отменённые запуски</small></span><span class="problem-chevron"><Icon name={showProblems ? 'down' : 'chevron'} size={15} /></span></button>
+              {#if showProblems}<div class="problem-grid">{#each problemTasks as task (task.id)}<div class="problem-card">{@render statusBadge(task.status)}{@render taskCard(task)}</div>{/each}</div>{/if}
+            </section>
+          {/if}
           <div class="board-grid" class:empty-board={activeTasks.length === 0}>
             {#each columnData as column}
               {@const items = filtered.filter(task => task.status === column.status || (column.status === 'ready' && task.status === 'queued') || (column.status === 'running' && ['preparing', 'cancelling', 'awaiting_merge', 'integrating'].includes(task.status)))}
@@ -1054,9 +1061,6 @@
               </section>
             {/each}
           </div>
-          {#if otherStatusTasks.length}
-            <section class="archive-section"><button class="archive-toggle" aria-expanded={showOtherStatuses} onclick={() => showOtherStatuses = !showOtherStatuses}><Icon name={showOtherStatuses ? 'down' : 'chevron'} size={15} /><Icon name="alert" size={15} /><strong>Другие статусы</strong><small>Прерванные, отменённые и задачи с ошибками</small></button>{#if showOtherStatuses}<div class="archive-grid">{#each otherStatusTasks as task (task.id)}<div class="archive-card-wrapper">{@render statusBadge(task.status)}{@render taskCard(task)}</div>{/each}</div>{/if}</section>
-          {/if}
         {:else}
           <div class="task-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>ЗАПУСК</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : task.schedule === 'auto' ? 'moon' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{shortPath(task.cwd)}</small>{@render taskTags(task)}{#if task.latestRun?.followup}<small class="list-followup-label">Дополнительный запрос{#if followupStage(task.latestRun)} · Этап {followupStage(task.latestRun)!.index + 1}{/if}</small>{/if}{#if workflowSteps(task).length}<small class="list-workflow-progress">{workflowProgress(task)}</small>{/if}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{scheduleLabel(task, true)}</span><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>Новые задачи появятся здесь</span></div>{/each}</div>
         {/if}

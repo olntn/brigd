@@ -486,7 +486,7 @@ input[type='checkbox'], input[type='radio'] { flex-shrink: 0; }
 .task-tag-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .tag-save-error { color: var(--error); font-size: .85rem; overflow-wrap: anywhere; }
 @media (max-width: 700px) { .task-tag-section { margin-inline: 20px; } }
-.board-grid, .archive-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: 24px 17px; }
+.board-grid, .problem-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: 24px 17px; }
 .board-column { min-width: 0; }
 .column-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 14px; padding: 2px 1px; min-height: 28px; }
 .column-heading h2 { font-size: .85rem; font-weight: 600; margin: 0; color: var(--secondary); overflow-wrap: anywhere; }
@@ -532,7 +532,18 @@ input[type='checkbox'], input[type='radio'] { flex-shrink: 0; }
 .art-code { top: 18px; left: 22px; color: var(--secondary);  }.art-star { right: 7px; bottom: 18px; color: var(--claude); background: var(--claude-bg);  font-size: 27px; line-height: 1; font-family: Georgia, serif; }.art-spark { position: absolute; right: 9px; top: 21px; color: var(--accent-text); font-size: 16px; }
 .welcome-copy { flex: 1 1 20rem; min-width: 0; }.welcome-copy h2 { font-size: 1.54rem; font-weight: 550; margin: 0 0 10px; color: var(--secondary); line-height: 1.4; }.welcome-copy p { font-size: .85rem; line-height: 1.9; color: var(--muted); margin: 0 0 17px; }.welcome-copy .button svg:last-child { margin-left: 7px; }
 .welcome-steps { display: grid; gap: 19px; font-size: .77rem; color: var(--muted); }.welcome-steps > div { display: flex; align-items: center; gap: 9px; }.welcome-steps span { border: 1px solid var(--line); border-radius: 50%; width: 22px; height: 22px; flex-shrink: 0; display: grid; place-items: center; font-size: .69rem; background: var(--subtle); color: var(--accent-text); }
-.archive-section { border-top: 1px solid var(--line); margin-top: 23px; padding-top: 13px; }.archive-toggle { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: .85rem; color: var(--secondary); padding: 7px 0; width: 100%; text-align: left; }.archive-toggle strong { font-weight: 500; }.archive-toggle small { font-size: .77rem; color: var(--muted); }.archive-grid { margin-top: 15px; }.archive-card-wrapper { min-width: 0; }.archive-card-wrapper > .status-badge { margin-bottom: 8px; }
+/* Problem panel: failed, blocked, merge-problem, interrupted and cancelled tasks sit above the board so they are seen first. */
+.problem-panel { border: 1px solid var(--error-line); border-radius: var(--radius-md); background: var(--error-bg); padding: 6px 14px; margin-bottom: 24px; }
+.problem-toggle { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 0; font-size: .85rem; color: var(--error); text-align: left; }
+.problem-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.problem-toggle strong { font-weight: 600; }
+.problem-icon, .problem-chevron { display: flex; flex-shrink: 0; }
+.problem-chevron { color: var(--muted); }
+.problem-count { font-size: .69rem; font-weight: 600; line-height: 1; min-width: 20px; padding: 4px 6px; border-radius: 999px; background: var(--error); color: var(--surface); text-align: center; }
+.problem-toggle small { font-size: .77rem; color: var(--secondary); }
+.problem-grid { margin: 8px 0 10px; }
+.problem-card { min-width: 0; }
+.problem-card > .status-badge { margin-bottom: 8px; background: var(--surface); }
 .task-list { container: tasks / inline-size; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
 .list-heading, .task-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) 30px; align-items: center; gap: 14px; padding: 14px 18px; }
 .list-heading { font-size: .69rem; letter-spacing: .7px; color: var(--muted); background: var(--subtle); border-bottom: 1px solid var(--line); border-radius: var(--radius-md) var(--radius-md) 0 0; }.task-row { border-bottom: 1px solid var(--line); }.task-row > * { min-width: 0; }.task-row:last-child { border: 0; }.task-row:hover { background: var(--subtle); }

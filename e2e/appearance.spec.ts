@@ -169,7 +169,7 @@ test('all task statuses live in the Tasks tab with local filters and no overview
   await expect(page.getByRole('region', { name: 'Сводка задач', exact: true })).toHaveCount(0);
   const filter = page.getByRole('combobox', { name: 'Фильтр задач', exact: true });
   await expect(filter).toHaveValue('all');
-  await expect(page.getByRole('button', { name: /Другие статусы/ })).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByRole('button', { name: /Проблемные задачи/ })).toHaveAttribute('aria-expanded', 'true');
   for (const item of tasks) {
     await expect(page.getByRole('button', { name: `Открыть задачу: ${item.title}`, exact: true })).toBeVisible();
   }

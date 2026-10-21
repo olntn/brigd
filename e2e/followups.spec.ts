@@ -47,7 +47,7 @@ async function openTask(page: Page, task: Task, navigate = true) {
   await expect(page.getByRole('button', { name: 'Новая задача', exact: true })).toBeEnabled();
   await page.getByLabel('Поиск задач', { exact: true }).fill(task.title);
   if (['failed', 'blocked', 'interrupted', 'cancelled'].includes(task.status)) {
-    const otherStatuses = page.getByRole('button', { name: /Другие статусы/ });
+    const otherStatuses = page.getByRole('button', { name: /Проблемные задачи/ });
     if (await otherStatuses.getAttribute('aria-expanded') === 'false') await otherStatuses.click();
   }
   await page.getByRole('button', { name: `Открыть задачу: ${task.title}`, exact: true }).click();
