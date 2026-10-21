@@ -961,7 +961,7 @@
 {#snippet taskCard(task: Task)}
   <article class="task-card {task.status}" class:paused-card={task.paused}>
     <button class="card-main" onclick={() => openTask(task)} aria-label={'Открыть задачу: ' + task.title}>
-      <div class="card-top">{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}{#if visibleUltracode(task)}<span class="ultracode-badge" title="Запуски в режиме ultracode">ultracode</span>{/if}<span class="task-ref">{task.id.slice(0, 6).toUpperCase()}</span></div>
+      <div class="card-top">{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}{#if visibleUltracode(task)}<span class="ultracode-badge" title="Режим ultracode">ultracode</span>{/if}<span class="task-ref">{task.id.slice(0, 6).toUpperCase()}</span></div>
       <h3>{task.title}</h3>
       <p class="card-description">{task.latestRun?.summary || task.instruction}</p>
       {@render taskTags(task)}
@@ -1088,7 +1088,7 @@
   <div class="drawer-content">
     <header class="drawer-topbar">
       <span class="drawer-task-ref"><Icon name="terminal" size={16} />Задача <span class="detail-ref">{selectedId?.slice(0, 8).toUpperCase()}</span></span>
-      {#if selectedTask}<div class="drawer-badges">{@render statusBadge(selectedTask.status)}{#if currentRun?.followup}<span class="followup-type-badge">Дополнительный запрос</span>{/if}{#if currentRun?.reconcile}<span class="followup-type-badge">Разрешение конфликта</span>{/if}{#if visibleWorker(selectedTask)}{@render workerBadge(visibleWorker(selectedTask)!)}{:else}{@render providerBadge(visibleProvider(selectedTask), true)}{/if}{#if visibleUltracode(selectedTask)}<span class="ultracode-badge" title="Запуски в режиме ultracode">ultracode</span>{/if}{#if selectedTask.latestRun?.mock}<span class="demo-badge">MOCK</span>{/if}{#if workflowSteps(selectedTask).length}<span class="workflow-type-badge">Сложная задача</span>{/if}</div>{/if}
+      {#if selectedTask}<div class="drawer-badges">{@render statusBadge(selectedTask.status)}{#if currentRun?.followup}<span class="followup-type-badge">Дополнительный запрос</span>{/if}{#if currentRun?.reconcile}<span class="followup-type-badge">Разрешение конфликта</span>{/if}{#if visibleWorker(selectedTask)}{@render workerBadge(visibleWorker(selectedTask)!)}{:else}{@render providerBadge(visibleProvider(selectedTask), true)}{/if}{#if visibleUltracode(selectedTask)}<span class="ultracode-badge" title="Режим ultracode">ultracode</span>{/if}{#if selectedTask.latestRun?.mock}<span class="demo-badge">MOCK</span>{/if}{#if workflowSteps(selectedTask).length}<span class="workflow-type-badge">Сложная задача</span>{/if}</div>{/if}
       <button class="icon-button" aria-label="Закрыть задачу" disabled={followupSending || tagsSaving} onclick={closeDrawer}><Icon name="close" size={20} /></button>
     </header>
     {#if selectedTask}
