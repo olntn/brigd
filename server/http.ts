@@ -11,6 +11,7 @@ import { TASK_JSON_LIMIT } from './workflows';
 import { ATTACHMENT_MAX_BYTES } from '../src/lib/attachments';
 import { attachmentIds, attachmentDisposition, prepareAttachment } from './attachments';
 import { INSTRUCTION_JSON_LIMIT, validateInstruction, validateInstructionPatch } from './instructions';
+import { DOC_JSON_LIMIT } from './docs';
 import { validateModel, validateModelPatch } from './models';
 import { validateFollowup } from './followups';
 import { validateTag, validateTagPatch, validateTaskTags } from './tags';
@@ -258,6 +259,19 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         if (method === 'GET') return json(engine.store.getInstruction(id));
         if (method === 'PATCH') return json(engine.store.updateInstruction(id, validateInstructionPatch(await body(req, INSTRUCTION_JSON_LIMIT))));
         if (method === 'DELETE') { engine.store.deleteInstruction(id); return json({ ok: true }); }
+      }
+      if (path === '/api/docs' && method === 'GET') return json(engine.store.listDocPages());
+      if (path === '/api/docs' && method === 'POST') return json(engine.store.createDocPage(await body(req)), 201);
+      if (path === '/api/docs/trash' && method === 'GET') return json(engine.store.listDeletedDocPages());
+      const docMatch = path.match(/^\/api\/docs\/([a-zA-Z0-9-]+)(?:\/(restore|purge))?$/);
+      if (docMatch) {
+        const [, id, action] = docMatch;
+        if (!action && method === 'GET') return json(engine.store.getDocPage(id!));
+        if (!action && method === 'PUT') return json(engine.store.saveDocPage(id!, await body(req, DOC_JSON_LIMIT) as never));
+        if (!action && method === 'PATCH') return json(engine.store.moveDocPage(id!, await body(req)));
+        if (!action && method === 'DELETE') { options.authorizeMutation?.(); engine.store.deleteDocPage(id!); return json({ ok: true }); }
+        if (action === 'restore' && method === 'POST') { await body(req); return json(engine.store.restoreDocPage(id!)); }
+        if (action === 'purge' && method === 'POST') { await body(req); engine.store.purgeDocPage(id!); return json({ ok: true }); }
       }
       if (path === '/api/tags' && method === 'GET') return json(engine.store.listTags());
       if (path === '/api/tags' && method === 'POST') return json(engine.store.createTag(validateTag(await body(req))), 201);

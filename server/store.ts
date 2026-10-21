@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CliAccessMode, Comment, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
+import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CliAccessMode, Comment, DocBlock, DocPage, DocPageContentInput, DocPageCreateInput, DocPageMoveInput, DocPageSummary, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { AUTOPILOT_FAILURE_LIMIT } from '../src/lib/autopilot';
@@ -10,6 +10,8 @@ import { validateIntegrationChecks } from '../src/lib/integration-checks';
 import { DEFAULT_TAG_COLOR, TAG_COUNT_LIMIT } from '../src/lib/tags';
 import { tagNameKey, validateTag, validateTagIds, validateTagPatch } from './tags';
 import { validateInstruction, validateInstructionPatch, validateInstructionSnapshots } from './instructions';
+import { validateDocPageContent, validateDocPageCreate, validateDocPageMove } from './docs';
+import { DOC_DEPTH_LIMIT, DOC_PAGE_LIMIT } from '../src/lib/docs';
 import { AppError } from './errors';
 import { validateWorkflowSteps } from './workflows';
 import { validateSessionId } from './protocol';
@@ -336,6 +338,13 @@ export class Store {
     this.db.exec(`CREATE TABLE IF NOT EXISTS autopilot_settings (
       singleton INTEGER PRIMARY KEY CHECK(singleton=1), integration_checks TEXT
     ); INSERT OR IGNORE INTO autopilot_settings (singleton,integration_checks) VALUES (1,NULL)`);
+    // Documentation pages: a global tree with the page content as one JSON array of blocks.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS doc_pages (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+      parent_id TEXT REFERENCES doc_pages(id) ON DELETE CASCADE, position INTEGER NOT NULL DEFAULT 0,
+      title TEXT NOT NULL DEFAULT '', blocks TEXT NOT NULL DEFAULT '[]', version INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER
+    ); CREATE INDEX IF NOT EXISTS doc_page_siblings ON doc_pages(parent_id, position)`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS cli_access_settings (
       singleton INTEGER PRIMARY KEY CHECK(singleton=1), mode TEXT CHECK(mode IN ('standard','full'))
     ); INSERT OR IGNORE INTO cli_access_settings (singleton,mode) VALUES (1,NULL)`);
@@ -571,6 +580,136 @@ export class Store {
   deleteInstruction(id: string): void {
     const result = this.db.query('DELETE FROM instructions WHERE id=?').run(id);
     if (!result.changes) throw new AppError('Инструкция не найдена', 404);
+  }
+  private mapDocSummary(row: Row): DocPageSummary {
+    return { id: row.id, parentId: row.parent_id ?? null, position: row.position, title: row.title,
+      createdAt: row.created_at, updatedAt: row.updated_at, deletedAt: row.deleted_at ?? null };
+  }
+  private docRow(id: string): Row {
+    const row = this.db.query('SELECT * FROM doc_pages WHERE id=?').get(id) as Row | null;
+    if (!row) throw new AppError('Страница не найдена', 404);
+    return row;
+  }
+  /** The page and every descendant, trashed ones included, with their distance from the page. */
+  private docSubtree(id: string): { id: string; depth: number }[] {
+    return this.db.query(`WITH RECURSIVE sub(id, depth) AS (
+      SELECT id, 0 FROM doc_pages WHERE id=? UNION ALL SELECT p.id, sub.depth + 1 FROM doc_pages p JOIN sub ON p.parent_id = sub.id
+    ) SELECT id, depth FROM sub`).all(id) as { id: string; depth: number }[];
+  }
+  /** 1 for a root page. */
+  private docDepth(id: string): number {
+    const row = this.db.query(`WITH RECURSIVE up(id, parent_id, depth) AS (
+      SELECT id, parent_id, 1 FROM doc_pages WHERE id=? UNION ALL SELECT p.id, p.parent_id, up.depth + 1 FROM doc_pages p JOIN up ON p.id = up.parent_id
+    ) SELECT max(depth) AS depth FROM up`).get(id) as Row;
+    return row.depth ?? 0;
+  }
+  private docSiblings(parentId: string | null, except?: string): string[] {
+    return (this.db.query('SELECT id FROM doc_pages WHERE parent_id IS ? AND deleted_at IS NULL ORDER BY position, seq').all(parentId) as Row[])
+      .map(row => row.id as string).filter(id => id !== except);
+  }
+  private renumberDocSiblings(parentId: string | null): void {
+    this.docSiblings(parentId).forEach((id, position) => { this.db.query('UPDATE doc_pages SET position=? WHERE id=? AND position!=?').run(position, id, position); });
+  }
+  private docParent(parentId: string | null): Row | null {
+    if (parentId === null) return null;
+    const parent = this.db.query('SELECT * FROM doc_pages WHERE id=?').get(parentId) as Row | null;
+    if (!parent || parent.deleted_at !== null) throw new AppError('Родительская страница не найдена', 404);
+    return parent;
+  }
+  listDocPages(): DocPageSummary[] {
+    return (this.db.query('SELECT id,parent_id,position,title,created_at,updated_at,deleted_at FROM doc_pages WHERE deleted_at IS NULL ORDER BY parent_id IS NOT NULL, position, seq').all() as Row[])
+      .map(row => this.mapDocSummary(row));
+  }
+  /** Roots of trashed subtrees: pages whose parent is live, missing, or was trashed separately. */
+  listDeletedDocPages(): DocPageSummary[] {
+    return (this.db.query(`SELECT p.id,p.parent_id,p.position,p.title,p.created_at,p.updated_at,p.deleted_at FROM doc_pages p LEFT JOIN doc_pages q ON q.id = p.parent_id
+      WHERE p.deleted_at IS NOT NULL AND (q.id IS NULL OR q.deleted_at IS NULL OR q.deleted_at != p.deleted_at) ORDER BY p.deleted_at DESC, p.seq`).all() as Row[])
+      .map(row => this.mapDocSummary(row));
+  }
+  getDocPage(id: string): DocPage {
+    const row = this.docRow(id);
+    return { ...this.mapDocSummary(row), blocks: JSON.parse(row.blocks) as DocBlock[], version: row.version };
+  }
+  createDocPage(value: DocPageCreateInput, now = Date.now()): DocPage {
+    const input = validateDocPageCreate(value);
+    return this.db.transaction(() => {
+      if ((this.db.query('SELECT count(*) AS n FROM doc_pages').get() as Row).n >= DOC_PAGE_LIMIT) {
+        throw new AppError(`Можно сохранить не больше ${DOC_PAGE_LIMIT} страниц. Удалите ненужные страницы из корзины.`);
+      }
+      const parentId = input.parentId ?? null;
+      if (this.docParent(parentId) && this.docDepth(parentId!) >= DOC_DEPTH_LIMIT) {
+        throw new AppError(`Вложенность страниц ограничена ${DOC_DEPTH_LIMIT} уровнями`);
+      }
+      const id = crypto.randomUUID();
+      this.db.query('INSERT INTO doc_pages (id,parent_id,position,title,blocks,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
+        .run(id, parentId, this.docSiblings(parentId).length, input.title ?? '', '[]', 1, now, now);
+      return this.getDocPage(id);
+    }).immediate();
+  }
+  /** Content saves are optimistic: the caller's version must match, so a stale tab never overwrites newer text. */
+  saveDocPage(id: string, value: DocPageContentInput, now = Date.now()): DocPage {
+    const input = validateDocPageContent(value);
+    return this.db.transaction(() => {
+      const row = this.docRow(id);
+      if (row.deleted_at !== null) throw new AppError('Страница в корзине. Восстановите её, чтобы редактировать.', 409);
+      if (row.version !== input.version) throw new AppError('Страница изменена в другом окне. Загрузите новую версию, чтобы продолжить.', 409);
+      this.db.query('UPDATE doc_pages SET title=?,blocks=?,version=version+1,updated_at=? WHERE id=?').run(input.title, JSON.stringify(input.blocks), now, id);
+      return this.getDocPage(id);
+    }).immediate();
+  }
+  moveDocPage(id: string, value: DocPageMoveInput, now = Date.now()): DocPageSummary {
+    const input = validateDocPageMove(value);
+    return this.db.transaction(() => {
+      const row = this.docRow(id);
+      if (row.deleted_at !== null) throw new AppError('Страница в корзине. Сначала восстановите её.', 409);
+      const parentId = input.parentId === undefined ? row.parent_id ?? null : input.parentId;
+      const subtree = this.docSubtree(id);
+      if (parentId !== null) {
+        this.docParent(parentId);
+        if (subtree.some(node => node.id === parentId)) throw new AppError('Нельзя вложить страницу в саму себя или в её подстраницу');
+        if (this.docDepth(parentId) + 1 + Math.max(...subtree.map(node => node.depth)) > DOC_DEPTH_LIMIT) {
+          throw new AppError(`Вложенность страниц ограничена ${DOC_DEPTH_LIMIT} уровнями`);
+        }
+      }
+      const siblings = this.docSiblings(parentId, id);
+      const position = Math.min(input.position ?? (parentId === (row.parent_id ?? null) ? row.position : siblings.length), siblings.length);
+      siblings.splice(position, 0, id);
+      siblings.forEach((sibling, index) => { this.db.query('UPDATE doc_pages SET position=? WHERE id=?').run(index, sibling); });
+      this.db.query('UPDATE doc_pages SET parent_id=?,updated_at=? WHERE id=?').run(parentId, now, id);
+      if (parentId !== (row.parent_id ?? null)) this.renumberDocSiblings(row.parent_id ?? null);
+      return this.mapDocSummary(this.docRow(id));
+    }).immediate();
+  }
+  /** Moves the page and its live descendants to the trash under one stamp so they come back together. */
+  deleteDocPage(id: string, now = Date.now()): void {
+    this.db.transaction(() => {
+      const row = this.docRow(id);
+      if (row.deleted_at !== null) return;
+      const latest = (this.db.query('SELECT max(deleted_at) AS stamp FROM doc_pages').get() as Row).stamp as number | null;
+      const stamp = Math.max(now, (latest ?? 0) + 1);
+      for (const node of this.docSubtree(id)) this.db.query('UPDATE doc_pages SET deleted_at=?,updated_at=? WHERE id=? AND deleted_at IS NULL').run(stamp, now, node.id);
+      this.renumberDocSiblings(row.parent_id ?? null);
+    }).immediate();
+  }
+  /** Restores the subtree trashed together with the page; a page whose parent is still trashed returns to the root level. */
+  restoreDocPage(id: string, now = Date.now()): DocPageSummary {
+    return this.db.transaction(() => {
+      const row = this.docRow(id);
+      if (row.deleted_at === null) return this.mapDocSummary(row);
+      const parent = row.parent_id ? this.db.query('SELECT deleted_at FROM doc_pages WHERE id=?').get(row.parent_id) as Row | null : null;
+      const parentId = parent && parent.deleted_at === null ? row.parent_id as string : null;
+      for (const node of this.docSubtree(id)) this.db.query('UPDATE doc_pages SET deleted_at=NULL,updated_at=? WHERE id=? AND deleted_at=?').run(now, node.id, row.deleted_at);
+      this.db.query('UPDATE doc_pages SET parent_id=?,position=? WHERE id=?').run(parentId, this.docSiblings(parentId, id).length, id);
+      return this.mapDocSummary(this.docRow(id));
+    }).immediate();
+  }
+  /** Permanently removes a trashed page with everything under it, including pages trashed separately. */
+  purgeDocPage(id: string): void {
+    this.db.transaction(() => {
+      const row = this.docRow(id);
+      if (row.deleted_at === null) throw new AppError('Сначала переместите страницу в корзину', 409);
+      this.db.query('DELETE FROM doc_pages WHERE id=?').run(id);
+    }).immediate();
   }
   private mapTag(row: Row): Tag {
     return { id: row.id, name: row.name, color: row.color ?? DEFAULT_TAG_COLOR, createdAt: row.created_at, updatedAt: row.updated_at };

@@ -7,6 +7,7 @@
   import AutopilotSettings from './lib/AutopilotSettings.svelte';
   import Backups from './lib/Backups.svelte';
   import Instructions from './lib/Instructions.svelte';
+  import Docs from './lib/Docs.svelte';
   import Autopilot from './lib/Autopilot.svelte';
   import CliSetup from './lib/CliSetup.svelte';
   import { TASK_STATUS_LABELS } from './lib/status';
@@ -34,7 +35,7 @@
   type View = 'board' | 'list';
   let info = $state<AppInfo | null>(null);
   let tasks = $state<Task[]>([]);
-  let page = $state<'tasks' | 'autopilot' | 'workers' | 'instructions' | 'tags' | 'archive'>('tasks');
+  let page = $state<'tasks' | 'autopilot' | 'workers' | 'instructions' | 'docs' | 'tags' | 'archive'>(location.hash.startsWith('#/docs') ? 'docs' : 'tasks');
   let tags = $state<Tag[]>([]);
   let tagsLoading = $state(true);
   let tagsError = $state('');
@@ -461,6 +462,9 @@
       }
     };
     window.addEventListener('storage', onThemeStorage);
+    // Documentation links carry a hash; the other pages keep the plain URL.
+    const onHash = () => { if (location.hash.startsWith('#/docs') && page !== 'docs') page = 'docs'; };
+    window.addEventListener('hashchange', onHash);
     void loadInfo();
     void refresh();
     const interval = setInterval(() => {
@@ -468,8 +472,9 @@
     }, 2000);
     const onVisible = () => { if (document.visibilityState === 'visible') void refresh(); };
     document.addEventListener('visibilitychange', onVisible);
-    return () => { clearInterval(interval); clearTimeout(toastTimer); document.removeEventListener('visibilitychange', onVisible); window.removeEventListener('storage', onThemeStorage); };
+    return () => { clearInterval(interval); clearTimeout(toastTimer); document.removeEventListener('visibilitychange', onVisible); window.removeEventListener('storage', onThemeStorage); window.removeEventListener('hashchange', onHash); };
   });
+  $effect(() => { if (page !== 'docs' && location.hash.startsWith('#/docs')) history.replaceState(null, '', location.pathname + location.search); });
 
   function openSettings(section?: (typeof settingsSections)[number]['id']) {
     if (section) settingsSection = section;
@@ -941,6 +946,7 @@
       <button class:active={page === 'autopilot'} aria-label="Автопилот" onclick={() => { page = 'autopilot'; }}><Icon name="moon" /><span>Автопилот</span></button>
       <button class:active={page === 'workers'} aria-label="Работники" onclick={() => { page = 'workers'; void loadWorkers(); }}><Icon name="spark" /><span>Работники</span></button>
       <button class:active={page === 'instructions'} aria-label="Инструкции" onclick={() => { page = 'instructions'; }}><Icon name="list" /><span>Инструкции</span></button>
+      <button class:active={page === 'docs'} aria-label="Документация" onclick={() => { page = 'docs'; }}><Icon name="book" /><span>Документация</span></button>
       <button class:active={page === 'tags'} aria-label="Теги" onclick={() => { page = 'tags'; void loadTags(); }}><Icon name="tag" /><span>Теги</span></button>
     </nav>
     <div class="sidebar-bottom">
@@ -953,6 +959,8 @@
     <div class="workspace-content">
       {#if page === 'instructions'}
         <Instructions {notify} />
+      {:else if page === 'docs'}
+        <Docs {notify} />
       {:else if page === 'autopilot'}
         <Autopilot {tasks} {notify} settings={autopilotSettings} checksRequired={info?.mode !== 'mock'} onopen={openTask} onchanged={taskChanged} onsettings={openSettings} />
       {:else if page === 'tags'}

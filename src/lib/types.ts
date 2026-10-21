@@ -336,3 +336,36 @@ export interface AutopilotOverview extends AutopilotState {
   /** Runs the autopilot started in the current or last session. */
   attempts: Run[];
 }
+
+export type DocBlockType = 'paragraph' | 'heading1' | 'heading2' | 'heading3' | 'bulleted' | 'numbered' | 'todo' | 'quote' | 'code' | 'divider';
+/** One editable unit of a documentation page. Text is inline Markdown; code blocks keep raw text. */
+export interface DocBlock {
+  id: string;
+  type: DocBlockType;
+  text: string;
+  /** todo only. */
+  checked?: boolean;
+  /** code only: a display hint, never executed. */
+  language?: string;
+  /** List items only: nesting level starting at 0. */
+  indent?: number;
+}
+export interface DocPageSummary {
+  id: string;
+  parentId: string | null;
+  position: number;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  /** Set while the page sits in the trash together with the subtree deleted with it. */
+  deletedAt: number | null;
+}
+export interface DocPage extends DocPageSummary {
+  blocks: DocBlock[];
+  /** Grows with every content save; a save carrying an older version is rejected. */
+  version: number;
+}
+export interface DocPageCreateInput { title?: string; parentId?: string | null; }
+export interface DocPageContentInput { title: string; blocks: DocBlock[]; version: number; }
+/** Reorders among siblings or moves under another page; omitted fields keep their value. */
+export interface DocPageMoveInput { parentId?: string | null; position?: number; }

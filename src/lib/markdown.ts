@@ -25,3 +25,8 @@ markdown.renderer.rules.table_close = () => '</table></div>\n';
 export function renderCommentMarkdown(body: string): string {
   return markdown.render(body);
 }
+
+/** Inline-only rendering for documentation blocks: no block elements, same hardening as comments. */
+export function renderInlineMarkdown(text: string): string {
+  return markdown.renderInline(text);
+}
