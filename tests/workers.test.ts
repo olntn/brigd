@@ -867,3 +867,39 @@ describe('built-in integrator profile', () => {
     expect(store.getIntegratorProfile()).toEqual(before);
   });
 });
+
+describe('replacement worker for exhausted limits', () => {
+  test('profiles save, return, keep, clear and validate the replacement; run snapshots never carry it', async () => {
+    const claude = await createWorker({ name: 'Opus', provider: 'claude' });
+    const codex = await createWorker({ name: 'Sol', fallbackWorkerId: claude.id });
+    expect(codex.fallbackWorkerId).toBe(claude.id);
+    expect(claude.fallbackWorkerId).toBeNull();
+    expect(await (await request(`/api/workers/${codex.id}`)).json()).toMatchObject({ fallbackWorkerId: claude.id });
+    expect(await (await request(`/api/workers/${codex.id}`, 'PATCH', { name: 'Sol 6.1' })).json()).toMatchObject({ name: 'Sol 6.1', fallbackWorkerId: claude.id });
+    await reopen();
+    expect(store.getWorker(codex.id).fallbackWorkerId).toBe(claude.id);
+    expect((await request(`/api/workers/${codex.id}`, 'PATCH', { fallbackWorkerId: codex.id })).status).toBe(400);
+    expect((await request(`/api/workers/${codex.id}`, 'PATCH', { fallbackWorkerId: 'missing-worker' })).status).toBe(404);
+    expect((await request('/api/workers', 'POST', { ...workerInput(), fallbackWorkerId: 'missing-worker' })).status).toBe(404);
+    expect(store.listWorkers()).toHaveLength(2);
+    expect(store.getWorker(codex.id).fallbackWorkerId).toBe(claude.id);
+    expect((await request(`/api/workers/${claude.id}`, 'DELETE')).status).toBe(200);
+    expect(await (await request(`/api/workers/${codex.id}`, 'PATCH', { effort: 'high' })).json()).toMatchObject({ effort: 'high', fallbackWorkerId: claude.id });
+    const other = await createWorker({ name: 'Another' });
+    expect((await request(`/api/workers/${other.id}`, 'PATCH', { fallbackWorkerId: claude.id })).status).toBe(409);
+    expect((await request('/api/workers', 'POST', { ...workerInput(), fallbackWorkerId: claude.id })).status).toBe(409);
+    expect(await (await request(`/api/workers/${codex.id}`, 'PATCH', { fallbackWorkerId: null })).json()).toMatchObject({ fallbackWorkerId: null });
+    expect(store.getWorker(codex.id).fallbackWorkerId).toBeNull();
+    expect(store.updateWorker(other.id, workerInput({ name: 'Direct', fallbackWorkerId: codex.id })).fallbackWorkerId).toBe(codex.id);
+    expectAppError(() => store.createWorker(workerInput({ fallbackWorkerId: 'missing-worker' })), 404);
+    const task = await createTask({ workerId: other.id });
+    const run = store.startManual(task.id, true);
+    expect(run.worker).toEqual(snapshot(store.getWorker(other.id)));
+    expect(run.worker).not.toHaveProperty('fallbackWorkerId');
+  });
+
+  test.each([['fallbackWorkerId', 12], ['fallbackWorkerId', ''], ['fallbackWorkerId', 'bad id!'], ['fallbackWorkerId', {}], ['fallbackWorkerId', 'x'.repeat(101)]])('rejects invalid %s replacement %p', async (field, value) => {
+    expect((await request('/api/workers', 'POST', { ...workerInput(), [field]: value })).status).toBe(400);
+    expect(store.listWorkers()).toEqual([]);
+  });
+});

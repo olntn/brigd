@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 import type { Attachment, CliAccessMode, Effort, Envelope, DocReference, InstructionSnapshot, Provider, RunFollowup, RunReconcile, TaskLogInput, WorkspaceSnapshot } from '../src/lib/types';
 import { effortOptions, normalizeModel } from '../src/lib/workers';
 import schema from './envelope.schema.json';
-import { AgentProtocol, ProtocolError, validateSessionId } from './protocol';
+import { AgentProtocol, ProtocolError, UsageLimitError, validateSessionId } from './protocol';
 import type { WorkflowContext } from './workflows';
 import { validateInstructionSnapshots } from './instructions';
 import { DOC_TASK_PAGE_LIMIT, DOC_TITLE_LIMIT } from '../src/lib/docs';
@@ -473,6 +473,9 @@ async function runMock(input: AgentInput, callbacks: AgentCallbacks, signal: Abo
   });
   const instruction = input.followup?.request ?? input.workflow?.instruction ?? input.instruction;
   if (instruction.includes('[fail]')) throw new AgentRunError('MOCK_FAILURE', 'Mock: simulated CLI failure.');
+  // [limit] exhausts every provider; [limit:codex] or [limit:claude] only the named one, so a replacement worker can finish.
+  const limit = /\[limit(?::(codex|claude))?\]/.exec(instruction);
+  if (limit && (!limit[1] || limit[1] === input.provider)) throw new UsageLimitError(input.provider, `Mock: simulated ${input.provider === 'codex' ? 'Codex' : 'Claude Code'} usage limit.`);
   if (instruction.includes('[blocked]') || (input.followup && instruction.includes('[block]'))) return {
     sessionId, envelope: { status: 'blocked', summary: 'Mock: native tool approval is required. Task comments cannot approve it.', questions: [] },
   };
@@ -517,14 +520,15 @@ export function startAgent(input: AgentInput, callbacks: AgentCallbacks): AgentH
           protocol.push(chunk);
           if (protocol.permissionBlocked) throw nativeApprovalStop;
         },
-        // Stderr is not collected. The protocol retains filtered failed-tool diagnostics,
-        // never successful tool output, reasoning, or full process arguments.
+        // Stderr is not collected: the protocol only looks for an exhausted-limit line in it.
+        // It retains filtered failed-tool diagnostics, never successful tool output, reasoning, or full process arguments.
+        onStderr: chunk => protocol.noteStderr(chunk),
       });
       try { return protocol.finish(exitCode); }
       catch (error) {
         // Keep provider stderr private, but give a useful diagnostic when an
         // installed model/account rejects a requested (CLI-supported) level.
-        if ((model || effort !== 'default' || input.ultracode) && error instanceof ProtocolError) {
+        if ((model || effort !== 'default' || input.ultracode) && error instanceof ProtocolError && !(error instanceof UsageLimitError)) {
           const requested = [model ? `Requested ${input.provider} model: ${model}.` : '', effectiveEffort !== 'default' ? `Requested ${input.provider} effort: ${effectiveEffort}.` : '', input.ultracode ? `Requested ${input.provider} ultra mode.` : ''].filter(Boolean).join(' ');
           throw new ProtocolError(`${error.message} ${requested} Check the selected model/account supports these settings, or choose default model and effort${input.ultracode ? ' and disable ultracode' : ''}. brigd did not substitute the requested model. Native permissions still apply.`);
         }

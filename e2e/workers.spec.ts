@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Locator } from '@playwright/test';
-import type { ModelCatalogEntry, Worker, Task, TaskDetail } from '../src/lib/types';
+import type { GeneralSettings, ModelCatalogEntry, Worker, Task, TaskDetail } from '../src/lib/types';
 
 const unique = (label: string) => `${label} ${crypto.randomUUID().slice(0, 8)}`;
 const origin = { Origin: 'http://127.0.0.1:4318' };
@@ -548,3 +548,63 @@ for (const theme of ['light', 'dark'] as const) {
     });
   }
 }
+
+test('a worker whose CLI ran out of limits is replaced by the worker chosen in its profile or in the general settings', async ({ page, request }) => {
+  const codexName = unique('Sol');
+  const claudeName = unique('Opus');
+  const info = await (await request.get('/api/info')).json();
+  const claude = await (await request.post('/api/workers', { headers: origin, data: { name: claudeName, provider: 'claude', model: 'claude-opus-5-5', effort: 'high', communicationStyle: '', avatarUrl: null } })).json() as Worker;
+  const codex = await (await request.post('/api/workers', { headers: origin, data: { name: codexName, provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', communicationStyle: '', avatarUrl: null } })).json() as Worker;
+  expect(codex.fallbackWorkerId).toBeNull();
+  await openWorkers(page);
+  await page.getByRole('button', { name: `Изменить работника: ${codexName}`, exact: true }).click();
+  const profile = page.getByRole('dialog', { name: 'Редактировать работника', exact: true });
+  const fallback = profile.getByRole('combobox', { name: 'Замена при лимитах', exact: true });
+  await expect(fallback).toHaveValue('');
+  await expect(profile.locator(`select[name="workerFallback"] option[value="${codex.id}"]`)).toHaveCount(0);
+  await fallback.selectOption(claude.id);
+  await expect(profile.getByText(`${claudeName} (Claude Code) подхватит новую сессию`)).toBeVisible();
+  await profile.getByRole('button', { name: 'Сохранить профиль', exact: true }).click();
+  await expect(profile).not.toBeVisible();
+  await expect(page.getByRole('article', { name: `Работник: ${codexName}`, exact: true })).toContainText(`Замена при лимитах: ${claudeName}`);
+  expect((await (await request.get(`/api/workers/${codex.id}`)).json() as Worker).fallbackWorkerId).toBe(claude.id);
+
+  await page.getByRole('button', { name: 'Настройки', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Настройки', exact: true });
+  const panel = dialog.getByRole('tabpanel', { name: 'Общие', exact: true });
+  const claudeFallback = panel.getByRole('combobox', { name: 'Если у Claude Code закончились лимиты', exact: true });
+  await expect(claudeFallback).toHaveValue('');
+  await claudeFallback.selectOption(codex.id);
+  await expect(panel.getByText(`${codexName} (Codex) подхватит новую сессию`)).toBeVisible();
+  await panel.getByRole('button', { name: 'Сохранить настройки', exact: true }).click();
+  await expect(panel.getByRole('status')).toContainText('Настройки сохранены');
+  expect((await (await request.get('/api/settings/general')).json() as GeneralSettings).fallbackWorkers).toEqual({ codex: null, claude: codex.id });
+  await page.keyboard.press('Escape');
+  await expect(dialog).not.toBeVisible();
+
+  const title = unique('Задача с лимитом');
+  const task = await (await request.post('/api/tasks', { headers: origin, data: {
+    title, instruction: 'Сводка проекта [limit:codex]', provider: 'codex', workerId: codex.id, cwd: info.cwd,
+    schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false,
+  } })).json() as Task;
+  expect((await request.post(`/api/tasks/${task.id}/run`, { headers: origin, data: {} })).status()).toBe(201);
+  await expect.poll(async () => ((await (await request.get(`/api/tasks/${task.id}`)).json()) as TaskDetail).runs[0]?.status, { timeout: 15_000 }).toBe('completed');
+  const detail = await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail;
+  expect(detail.runs[0]).toMatchObject({ provider: 'claude', workerId: claude.id, turn: 2, fallbackTurn: 2 });
+  expect(detail.task).toMatchObject({ workerId: codex.id, provider: 'codex' });
+  const handover = detail.comments.find(comment => comment.kind === 'system' && comment.body.includes('подхватывает'));
+  expect(handover?.body).toContain(`Задачу подхватывает ${claudeName} (Claude Code)`);
+  await page.getByRole('button', { name: 'Задачи', exact: true }).click();
+  await page.getByRole('button', { name: `Открыть задачу: ${title}`, exact: true }).click();
+  const drawer = page.getByRole('dialog', { name: title, exact: true });
+  // The result is signed by the replacement; the handover itself is an operational record under Логи and Запуски.
+  await expect(drawer.getByRole('tabpanel', { name: 'Комментарии', exact: true })).toContainText(claudeName);
+  await drawer.getByRole('tab', { name: 'Логи', exact: true }).click();
+  const logs = drawer.getByRole('tabpanel', { name: 'Логи', exact: true });
+  await expect(logs.getByText(`Лимиты Codex исчерпаны, задачу подхватывает ${claudeName}`).first()).toBeVisible();
+  await expect(logs.getByText(`Задачу подхватывает ${claudeName} (Claude Code)`).first()).toBeVisible();
+  await drawer.getByRole('tab', { name: 'Запуски', exact: true }).click();
+  const history = drawer.getByRole('tabpanel', { name: 'Запуски', exact: true });
+  await expect(history).toContainText(claudeName);
+  await expect(history).toContainText('Ход 2');
+});

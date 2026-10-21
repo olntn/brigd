@@ -39,11 +39,14 @@ export interface WorkerInput {
   effort: Effort;
   communicationStyle: string;
   avatarUrl: string | null;
+  /** The worker that picks up a fresh run when this one's provider reports exhausted usage limits; null follows Настройки → Общие. */
+  fallbackWorkerId?: string | null;
 }
 export interface Worker extends WorkerInput {
   model: string | null;
   description: string;
   ultracode: boolean;
+  fallbackWorkerId: string | null;
   id: string;
   archived: boolean;
   createdAt: number;
@@ -65,9 +68,12 @@ export interface IntegratorProfileInput {
 }
 export interface IntegratorProfile extends IntegratorProfileInput { model: string | null; updatedAt: number; }
 
+/** Which worker picks up a fresh run when a provider's CLI reports exhausted usage limits; null leaves the run failed. */
+export interface FallbackWorkers { codex: string | null; claude: string | null; }
 export interface GeneralSettings {
   defaultCwd: string;
   defaultSchedule: TaskInput['schedule'];
+  fallbackWorkers: FallbackWorkers;
 }
 
 export interface BackupEntry {
@@ -220,6 +226,8 @@ export interface Run {
   worker: WorkerSnapshot | null;
   /** The task's ultracode choice frozen at start; null keeps the worker snapshot's own setting (or the CLI default without a worker). */
   ultracode?: boolean | null;
+  /** The turn a replacement worker started after the previous one's usage limits ran out; null when nobody was replaced. */
+  fallbackTurn?: number | null;
   id: string;
   taskId: string;
   provider: Provider;

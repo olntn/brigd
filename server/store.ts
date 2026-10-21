@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CliAccessMode, Comment, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocReference, DocSearchHit, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
+import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CliAccessMode, Comment, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocReference, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { AUTOPILOT_FAILURE_LIMIT } from '../src/lib/autopilot';
@@ -282,6 +282,10 @@ export class Store {
         ['workers', 'model', 'TEXT'],
         ['workers', 'description', "TEXT NOT NULL DEFAULT ''"],
         ['workers', 'ultracode', 'INTEGER NOT NULL DEFAULT 0 CHECK(ultracode IN (0,1))'],
+        // The worker that picks up when this profile's provider runs out of usage limits; NULL follows the general settings.
+        ['workers', 'fallback_worker_id', 'TEXT REFERENCES workers(id)'],
+        // The turn a replacement worker started after an exhausted limit; NULL while nobody was replaced.
+        ['runs', 'fallback_turn', 'INTEGER'],
         ['tasks', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_snapshot', 'TEXT'],
@@ -374,8 +378,13 @@ export class Store {
         singleton INTEGER PRIMARY KEY CHECK(singleton=1), default_cwd TEXT,
         default_schedule TEXT NOT NULL DEFAULT 'manual' CHECK(default_schedule IN ('auto','manual','interval'))
       )`);
-      if (!(this.db.query('PRAGMA table_info(general_settings)').all() as Row[]).some(row => row.name === 'default_schedule')) {
+      const columns = (this.db.query('PRAGMA table_info(general_settings)').all() as Row[]).map(row => row.name as string);
+      if (!columns.includes('default_schedule')) {
         this.db.exec("ALTER TABLE general_settings ADD COLUMN default_schedule TEXT NOT NULL DEFAULT 'manual' CHECK(default_schedule IN ('auto','manual','interval'))");
+      }
+      // Per provider: the worker that picks up a fresh run when that CLI reports exhausted usage limits.
+      for (const column of ['fallback_codex', 'fallback_claude']) {
+        if (!columns.includes(column)) this.db.exec(`ALTER TABLE general_settings ADD COLUMN ${column} TEXT REFERENCES workers(id)`);
       }
       this.db.exec('INSERT OR IGNORE INTO general_settings (singleton,default_cwd) VALUES (1,NULL)');
     }).immediate();
@@ -474,15 +483,45 @@ export class Store {
     this.db.query('UPDATE general_settings SET default_schedule=? WHERE singleton=1').run(schedule);
     return schedule;
   }
+  /** Saved IDs as they are; an archived or missing worker is skipped at launch time, never silently rewritten. */
+  getFallbackWorkers(): FallbackWorkers {
+    const row = this.db.query('SELECT fallback_codex,fallback_claude FROM general_settings WHERE singleton=1').get() as { fallback_codex: string | null; fallback_claude: string | null };
+    return { codex: row.fallback_codex ?? null, claude: row.fallback_claude ?? null };
+  }
+  /** A replacement must be a live, active profile; null switches the substitution off. */
+  private validatedFallbackWorker(value: unknown, selfId: string | null = null, keptId: string | null = null): string | null {
+    if (value === undefined || value === null) return null;
+    if (typeof value !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(value)) throw new AppError('Замена при лимитах: выберите работника или оставьте поле пустым');
+    if (value === selfId) throw new AppError('Работник не может заменять сам себя');
+    const row = this.db.query('SELECT archived FROM workers WHERE id=?').get(value) as Row | null;
+    if (!row) throw new AppError('Работник замены не найден', 404);
+    if (row.archived && value !== keptId) throw new AppError('Работник замены в архиве. Восстановите его или выберите другого.', 409);
+    return value;
+  }
+  setFallbackWorkers(value: unknown): FallbackWorkers {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError('fallbackWorkers: ожидается объект с полями codex и claude');
+    const input = value as Record<string, unknown>;
+    if (!Object.keys(input).length || Object.keys(input).some(key => key !== 'codex' && key !== 'claude')) throw new AppError('fallbackWorkers: допустимы только поля codex и claude');
+    return this.db.transaction(() => {
+      const current = this.getFallbackWorkers();
+      const codex = Object.hasOwn(input, 'codex') ? this.validatedFallbackWorker(input.codex, null, current.codex) : current.codex;
+      const claude = Object.hasOwn(input, 'claude') ? this.validatedFallbackWorker(input.claude, null, current.claude) : current.claude;
+      this.db.query('UPDATE general_settings SET fallback_codex=?,fallback_claude=? WHERE singleton=1').run(codex, claude);
+      return this.getFallbackWorkers();
+    }).immediate();
+  }
   updateGeneralSettings(value: Record<string, unknown>): void {
     const keys = Object.keys(value);
-    if (!keys.length || keys.some(key => key !== 'defaultCwd' && key !== 'defaultSchedule')) {
-      throw new AppError('Укажите defaultCwd и/или defaultSchedule');
+    if (!keys.length || keys.some(key => key !== 'defaultCwd' && key !== 'defaultSchedule' && key !== 'fallbackWorkers')) {
+      throw new AppError('Укажите defaultCwd, defaultSchedule и/или fallbackWorkers');
     }
     const cwd = Object.hasOwn(value, 'defaultCwd') ? validatedDefaultCwd(value.defaultCwd) : null;
     const schedule = Object.hasOwn(value, 'defaultSchedule') ? validatedDefaultSchedule(value.defaultSchedule) : null;
-    this.db.query(`UPDATE general_settings SET default_cwd=COALESCE(?,default_cwd),
-      default_schedule=COALESCE(?,default_schedule) WHERE singleton=1`).run(cwd, schedule);
+    this.db.transaction(() => {
+      if (Object.hasOwn(value, 'fallbackWorkers')) this.setFallbackWorkers(value.fallbackWorkers);
+      this.db.query(`UPDATE general_settings SET default_cwd=COALESCE(?,default_cwd),
+        default_schedule=COALESCE(?,default_schedule) WHERE singleton=1`).run(cwd, schedule);
+    }).immediate();
   }
   getIntegrationChecks(): string[][] | null {
     const row = this.db.query('SELECT integration_checks FROM autopilot_settings WHERE singleton=1').get() as { integration_checks: string | null };
@@ -925,7 +964,7 @@ export class Store {
   }
   private mapWorker(row: Row): Worker {
     return { id: row.id, name: row.name, description: validatedDescription(row.description), provider: row.provider, model: validatedModel(row.model), effort: row.effort,
-      ultracode: !!row.ultracode, communicationStyle: row.communication_style, avatarUrl: row.avatar_url, archived: !!row.archived,
+      ultracode: !!row.ultracode, communicationStyle: row.communication_style, avatarUrl: row.avatar_url, fallbackWorkerId: row.fallback_worker_id ?? null, archived: !!row.archived,
       createdAt: row.created_at, updatedAt: row.updated_at };
   }
   listWorkers(): Worker[] {
@@ -946,20 +985,60 @@ export class Store {
     const description = validatedDescription(input.description);
     const ultracode = validatedUltracode(input.ultracode);
     this.assertAvatar(input.avatarUrl);
-    const id = crypto.randomUUID();
-    this.db.query(`INSERT INTO workers (id,name,description,provider,model,ultracode,effort,communication_style,avatar_url,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(id, input.name, description, input.provider, model, +ultracode, input.effort, input.communicationStyle, input.avatarUrl, now, now);
-    return this.getWorker(id);
+    return this.db.transaction(() => {
+      const fallback = this.validatedFallbackWorker(input.fallbackWorkerId);
+      const id = crypto.randomUUID();
+      this.db.query(`INSERT INTO workers (id,name,description,provider,model,ultracode,effort,communication_style,avatar_url,fallback_worker_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, input.name, description, input.provider, model, +ultracode, input.effort, input.communicationStyle, input.avatarUrl, fallback, now, now);
+      return this.getWorker(id);
+    }).immediate();
   }
   updateWorker(id: string, input: WorkerInput & { archived?: boolean }, now = Date.now()): Worker {
-    const current = this.getWorker(id);
-    const model = validatedModel(input.model === undefined && input.provider === current.provider ? current.model : input.model);
-    const description = validatedDescription(input.description === undefined ? current.description : input.description);
-    const ultracode = validatedUltracode(input.ultracode === undefined ? current.ultracode : input.ultracode);
-    this.assertAvatar(input.avatarUrl);
-    this.db.query('UPDATE workers SET name=?,description=?,provider=?,model=?,ultracode=?,effort=?,communication_style=?,avatar_url=?,archived=?,updated_at=? WHERE id=?')
-      .run(input.name, description, input.provider, model, +ultracode, input.effort, input.communicationStyle, input.avatarUrl, +(input.archived ?? current.archived), now, id);
-    return this.getWorker(id);
+    return this.db.transaction(() => {
+      const current = this.getWorker(id);
+      const model = validatedModel(input.model === undefined && input.provider === current.provider ? current.model : input.model);
+      const description = validatedDescription(input.description === undefined ? current.description : input.description);
+      const ultracode = validatedUltracode(input.ultracode === undefined ? current.ultracode : input.ultracode);
+      // An already saved replacement survives its own archiving until the profile picks another one.
+      const fallback = this.validatedFallbackWorker(input.fallbackWorkerId === undefined ? current.fallbackWorkerId : input.fallbackWorkerId, id, current.fallbackWorkerId);
+      this.assertAvatar(input.avatarUrl);
+      this.db.query('UPDATE workers SET name=?,description=?,provider=?,model=?,ultracode=?,effort=?,communication_style=?,avatar_url=?,fallback_worker_id=?,archived=?,updated_at=? WHERE id=?')
+        .run(input.name, description, input.provider, model, +ultracode, input.effort, input.communicationStyle, input.avatarUrl, fallback, +(input.archived ?? current.archived), now, id);
+      return this.getWorker(id);
+    }).immediate();
+  }
+  /** Who picks up a run whose provider ran out of usage limits: the worker profile's own choice, else the general setting for that provider. */
+  fallbackWorkerFor(run: Pick<Run, 'provider' | 'worker'>): { worker: Worker | null; reason: string } {
+    const own = run.worker && !isBuiltinWorker(run.worker.id) ? (this.db.query('SELECT fallback_worker_id FROM workers WHERE id=?').get(run.worker.id) as Row | null)?.fallback_worker_id ?? null : null;
+    const id = own ?? this.getFallbackWorkers()[run.provider];
+    const source = own ? 'в профиле работника' : 'в Настройки → Общие';
+    if (!id) return { worker: null, reason: 'Замена при лимитах не настроена: выберите работника в профиле или в Настройки → Общие.' };
+    const row = this.db.query('SELECT * FROM workers WHERE id=?').get(id) as Row | null;
+    if (!row) return { worker: null, reason: `Работник замены (${source}) не найден.` };
+    const worker = this.mapWorker(row);
+    if (worker.archived) return { worker: null, reason: `Работник замены ${worker.name} (${source}) в архиве; восстановите его или выберите другого.` };
+    if (run.worker && worker.id === run.worker.id) return { worker: null, reason: `Работник замены (${source}) совпадает с текущим работником.` };
+    return { worker, reason: '' };
+  }
+  /** Hands the current fresh turn to a replacement worker in a new session; the failed turn stays in the step history. */
+  substituteWorker(id: string, fence: RunFence, replacement: Worker, error: string, now = Date.now()): Run | null {
+    return this.db.transaction(() => {
+      const run = this.getRun(id);
+      if (run.status !== 'running' || !matchesFence(run, fence) || run.trigger === 'followup' || run.trigger === 'reconcile') return null;
+      const snapshot = workerSnapshot(replacement);
+      if (run.currentStepIndex !== null) {
+        const step = run.steps[run.currentStepIndex]!;
+        updateStep(step, { status: 'failed', error, updatedAt: now, finishedAt: now });
+        step.workerId = replacement.id;
+        step.worker = snapshot;
+        beginAttempt(step, run.turn + 1, now);
+        this.persistSteps(run);
+      }
+      this.advanceAttachmentInputs(run, run.turn + 1);
+      this.db.query(`UPDATE runs SET provider=?,worker_id=?,worker_snapshot=?,session_id=NULL,turn=turn+1,fallback_turn=turn+1,updated_at=?,summary=NULL,error=NULL,finished_at=NULL WHERE id=?`)
+        .run(snapshot.provider, replacement.id, JSON.stringify(snapshot), now, id);
+      return this.getRun(id);
+    }).immediate();
   }
   archiveWorker(id: string, now = Date.now()): Worker {
     this.getWorker(id);
@@ -1303,7 +1382,7 @@ export class Store {
     const followup = followupSnapshot(row, worker as WorkerSnapshot | null);
     const reconcile = reconcileSnapshot(row, worker as WorkerSnapshot | null);
     const workspace = row.workspace_id ? this.getWorkspace(row.workspace_id) : null;
-    return { integration: this.integrationForRun(row.id), workspace, followup, reconcile, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], docs: JSON.parse(row.docs_snapshot ?? '[]') as DocReference[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, ultracode: readFlag(row.ultracode), provider: row.provider, cwd: row.cwd, instruction: row.instruction,
+    return { integration: this.integrationForRun(row.id), workspace, followup, reconcile, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], docs: JSON.parse(row.docs_snapshot ?? '[]') as DocReference[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, ultracode: readFlag(row.ultracode), fallbackTurn: row.fallback_turn ?? null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
       trigger: row.trigger, scheduledFor: row.scheduled_for, status: row.status, sessionId: row.session_id,
       startedAt: row.started_at, updatedAt: row.updated_at, finishedAt: row.finished_at, summary: row.summary,
       error: row.error, turn: row.turn, mock: !!row.mock };

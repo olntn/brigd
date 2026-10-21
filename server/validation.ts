@@ -82,8 +82,10 @@ export function validateWorker(value: unknown): WorkerInput & { archived?: boole
   const profile = executionProfile(v, 'Личные инструкции');
   const ultracode = v.ultracode === undefined ? false : v.ultracode;
   if (typeof ultracode !== 'boolean') throw new AppError('ultracode должен быть boolean');
+  const fallbackWorkerId = v.fallbackWorkerId ?? null;
+  if (fallbackWorkerId !== null && (typeof fallbackWorkerId !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(fallbackWorkerId))) throw new AppError('Замена при лимитах: выберите работника или оставьте поле пустым');
   if ('archived' in v && typeof v.archived !== 'boolean') throw new AppError('archived должен быть boolean');
-  return { name, description, ...profile, ultracode, ...(typeof v.archived === 'boolean' ? { archived: v.archived } : {}) };
+  return { name, description, ...profile, ultracode, fallbackWorkerId, ...(typeof v.archived === 'boolean' ? { archived: v.archived } : {}) };
 }
 
 /** The built-in integrator's single profile. Inherit mode still stores CLI settings so switching back restores them. */

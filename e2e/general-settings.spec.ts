@@ -51,13 +51,13 @@ async function fixtureApi(page: Page) {
         if (state.pendingSave) await state.pendingSave;
         state.defaultCwd = body.defaultCwd;
         state.defaultSchedule = body.defaultSchedule;
-        await route.fulfill({ json: { defaultCwd: state.defaultCwd, defaultSchedule: state.defaultSchedule } });
+        await route.fulfill({ json: { defaultCwd: state.defaultCwd, defaultSchedule: state.defaultSchedule, fallbackWorkers: { codex: null, claude: null } } });
       }
     } else if (path === '/api/settings/general' && method === 'GET') {
       if (state.pendingRead) await state.pendingRead;
       await route.fulfill(state.readError
         ? { status: 503, json: { error: state.readError } }
-        : { json: { defaultCwd: state.defaultCwd, defaultSchedule: state.defaultSchedule } });
+        : { json: { defaultCwd: state.defaultCwd, defaultSchedule: state.defaultSchedule, fallbackWorkers: { codex: null, claude: null } } });
     } else if (path === '/api/tasks' && method === 'POST') {
       const body = route.request().postDataJSON() as TaskInput;
       state.taskWrites.push(body);
@@ -118,7 +118,7 @@ test('General comes first and saved working folders initialize new tasks after r
   await expect(settings.schedule).toHaveValue('auto');
   await settings.panel.getByRole('button', { name: 'Сохранить настройки', exact: true }).click();
   await expect(settings.panel.getByRole('status')).toContainText('Настройки сохранены');
-  expect(state.writes).toEqual([{ defaultCwd: '/workspace/saved-project', defaultSchedule: 'auto' }]);
+  expect(state.writes).toEqual([{ defaultCwd: '/workspace/saved-project', defaultSchedule: 'auto', fallbackWorkers: { codex: null, claude: null } }]);
 
   await settings.field.fill('/workspace/unsaved-project');
   await settings.schedule.selectOption('interval');
@@ -240,7 +240,7 @@ for (const { value, label } of launchTypes) {
     await settings.schedule.selectOption(value);
     await settings.panel.getByRole('button', { name: 'Сохранить настройки', exact: true }).click();
     await expect(settings.panel.getByRole('status')).toContainText('Настройки сохранены');
-    expect(state.writes).toEqual([{ defaultCwd: '/workspace/project', defaultSchedule: value }]);
+    expect(state.writes).toEqual([{ defaultCwd: '/workspace/project', defaultSchedule: value, fallbackWorkers: { codex: null, claude: null } }]);
 
     await page.reload();
     settings = await openSettings(page);
@@ -310,6 +310,6 @@ test('a new task can override the launch type without changing the saved default
     await page.keyboard.press('Escape');
     await expect(drawer).not.toBeVisible();
   }
-  expect(state.writes).toEqual([{ defaultCwd: '/workspace/project', defaultSchedule: 'auto' }]);
+  expect(state.writes).toEqual([{ defaultCwd: '/workspace/project', defaultSchedule: 'auto', fallbackWorkers: { codex: null, claude: null } }]);
   expect(state.tasks.filter(task => task.id.startsWith('existing-')).map(task => task.schedule)).toEqual(launchTypes.map(type => type.value));
 });

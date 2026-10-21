@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AgentProtocol, ProtocolError, validateEnvelope } from '../server/protocol';
+import { AgentProtocol, ProtocolError, UsageLimitError, isUsageLimit, validateEnvelope } from '../server/protocol';
 import { AgentRunError, buildArgv, buildPrompt, capabilitiesFromHelp, runBoundedProcess, startAgent, type AgentInput } from '../server/adapter';
 import type { Envelope, Provider, TaskLogInput } from '../src/lib/types';
 import { effortOptions, modelLabel, modelPresets, normalizeModel } from '../src/lib/workers';
@@ -920,5 +920,92 @@ describe('ephemeral task attachment CLI configuration', () => {
     protocol.push(events.map(e => JSON.stringify(e)).join('\n') + '\n');
     expect(protocol.finish(0).envelope).toEqual(completed);
     expect(JSON.stringify(callbacks.comments)).not.toContain(image.data);
+  });
+});
+
+describe('exhausted usage limits', () => {
+  const thrown = (action: () => unknown): unknown => { try { action(); } catch (error) { return error; } return undefined; };
+  test.each([
+    "You've hit your usage limit. Try again at 6:00 PM.", 'Claude AI usage limit reached|1751212800', "You've hit your limit · resets 3pm (UTC)",
+    'usage_limit_reached', 'Rate limit reached for gpt-6.1-sol', 'rate_limit_error: This request would exceed your account\'s rate limit',
+    'You exceeded your current quota, please check your plan and billing details.', 'HTTP 429 Too Many Requests', 'Your credit balance is too low to access the API.',
+    'Weekly limit has been reached', 'insufficient_quota',
+  ])('recognizes %s', text => { expect(isUsageLimit(text)).toBe(true); });
+  test.each([
+    'Authentication required', 'Server error', 'Reached max turns limit (10)', 'error_max_turns: the maximum turn limit was exceeded',
+    'CLI output exceeded the line limit.', 'Context window length limit exceeded', 'Permission for this tool use was denied', '', 12,
+  ])('ignores %s', text => { expect(isUsageLimit(text)).toBe(false); });
+
+  test('Codex limit errors become UsageLimitError with a bounded, redacted detail', () => {
+    const callbacks = capture(), parser = new AgentProtocol('codex', callbacks);
+    parser.accept({ type: 'thread.started', thread_id: sid });
+    parser.accept({ type: 'error', message: "You've hit your usage limit. Try again at 6:00 PM. token=PRIVATE_TOKEN" });
+    parser.accept({ type: 'turn.failed', error: { message: "You've hit your usage limit." } });
+    const error = thrown(() => parser.finish(1));
+    expect(error).toBeInstanceOf(UsageLimitError);
+    expect(error).toBeInstanceOf(ProtocolError);
+    expect((error as UsageLimitError).provider).toBe('codex');
+    expect((error as UsageLimitError).code).toBe('USAGE_LIMIT');
+    expect((error as UsageLimitError).detail).toBe("You've hit your usage limit. Try again at 6:00 PM. token=[скрыто]");
+    expect((error as Error).message).toContain('Codex reported that its usage limit is exhausted');
+    expect((error as Error).message).not.toContain('PRIVATE_TOKEN');
+    expect(callbacks.logs.find(log => log.error)?.error).toContain('usage limit');
+    const item = new AgentProtocol('codex', capture());
+    item.accept({ type: 'thread.started', thread_id: sid });
+    item.accept({ type: 'item.completed', item: { id: 'err', type: 'error', message: 'usage_limit_reached' } });
+    expect(thrown(() => item.finish(1))).toBeInstanceOf(UsageLimitError);
+  });
+
+  test('Claude limit results become UsageLimitError even before a session exists', () => {
+    const error = thrown(() => parse('claude', [claude()[0], { ...claude()[1], is_error: true, result: 'Claude AI usage limit reached|1751212800' }]));
+    expect(error).toBeInstanceOf(UsageLimitError);
+    expect((error as UsageLimitError)).toMatchObject({ provider: 'claude', detail: 'Claude AI usage limit reached|1751212800' });
+    const early = new AgentProtocol('claude', capture());
+    early.accept({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ["rate_limit_error: This request would exceed your account's rate limit"] });
+    expect(thrown(() => early.finish(1))).toBeInstanceOf(UsageLimitError);
+  });
+
+  test('ordinary failures, turn caps and permission denials are not limits', () => {
+    for (const error of [
+      thrown(() => parse('codex', [...codex(), { type: 'error', message: 'Authentication required' }])),
+      thrown(() => parse('claude', [claude()[0], { ...claude()[1], subtype: 'error_max_turns', is_error: true, result: 'Reached max turns limit (10)' }])),
+      thrown(() => parse('codex', [...codex(), { type: 'turn.failed', error: { message: 'Server error' } }])),
+    ]) {
+      expect(error).toBeInstanceOf(ProtocolError);
+      expect(error).not.toBeInstanceOf(UsageLimitError);
+    }
+    const denied = parse('codex', [...codex(), { type: 'error', message: 'approval policy rejected this command; usage limit of the sandbox' }]);
+    expect(denied.outcome.envelope.status).toBe('blocked');
+  });
+
+  test('stderr is consulted for a limit only when the turn fails, across chunk boundaries', () => {
+    const failed = new AgentProtocol('claude', capture());
+    failed.noteStderr('You have hit your usage limit · resets 3pm (UTC)\n');
+    const error = thrown(() => failed.finish(1));
+    expect(error).toBeInstanceOf(UsageLimitError);
+    expect((error as UsageLimitError).detail).toBe('You have hit your usage limit · resets 3pm (UTC)');
+    const fine = new AgentProtocol('claude', capture());
+    fine.noteStderr('Warning: you are near your usage limit\n');
+    for (const event of claude()) fine.accept(event);
+    expect(fine.finish(0).envelope).toEqual(completed);
+    const split = new AgentProtocol('codex', capture());
+    split.noteStderr("You've hit your usa");
+    split.noteStderr('ge limit. Try again later.');
+    expect(thrown(() => split.finish(2))).toBeInstanceOf(UsageLimitError);
+    expect(split.usageLimitDetail).toBe("You've hit your usage limit. Try again later.");
+  });
+
+  test('mock [limit:provider] exhausts only the named provider while [limit] exhausts both', async () => {
+    const base: AgentInput = { provider: 'codex', cwd: '/tmp', instruction: 'Do it [limit:codex]', mock: true };
+    const [codexLimited, claudeFine, claudeLimited] = await Promise.allSettled([
+      startAgent(base, capture()).result, startAgent({ ...base, provider: 'claude' }, capture()).result,
+      startAgent({ ...base, provider: 'claude', instruction: 'Do it [limit]' }, capture()).result,
+    ]);
+    expect(codexLimited.status).toBe('rejected');
+    expect((codexLimited as PromiseRejectedResult).reason).toBeInstanceOf(UsageLimitError);
+    expect((codexLimited as PromiseRejectedResult).reason).toMatchObject({ provider: 'codex', detail: 'Mock: simulated Codex usage limit.' });
+    expect(claudeFine.status).toBe('fulfilled');
+    expect((claudeFine as PromiseFulfilledResult<{ envelope: Envelope }>).value.envelope.status).toBe('completed');
+    expect((claudeLimited as PromiseRejectedResult).reason).toBeInstanceOf(UsageLimitError);
   });
 });

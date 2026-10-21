@@ -1248,7 +1248,7 @@
       </div>
       <!-- Inactive panels stay mounted so unsaved drafts survive switching sections. -->
       <div id="settings-general-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-general-tab" hidden={settingsSection !== 'general'}>
-        {#if settingsOpen}<GeneralSettings settings={generalSettings} loading={generalSettingsLoading} error={generalSettingsError} retry={() => { void loadGeneralSettings(); }} onchange={generalSettingsChanged} onmutation={generalSettingsMutationStarted} bind:busy={generalSettingsMutationPending} />{/if}
+        {#if settingsOpen}<GeneralSettings settings={generalSettings} loading={generalSettingsLoading} error={generalSettingsError} retry={() => { void loadGeneralSettings(); }} onchange={generalSettingsChanged} onmutation={generalSettingsMutationStarted} {workers} bind:busy={generalSettingsMutationPending} />{/if}
       </div>
       <div id="settings-appearance-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-appearance-tab" hidden={settingsSection !== 'appearance'}>
         <fieldset class="theme-settings">

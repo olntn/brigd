@@ -6,8 +6,8 @@ const timestamp = Date.UTC(2026, 9, 9, 12);
 const privateText = 'PRIVATE_AVATAR_INSTRUCTIONS: Доступны только в редакторе профиля.';
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==', 'base64');
 const workers: Worker[] = [
-  { id: 'avatar-photo-worker', name: 'Александра Проверяющая', description: 'Проверяет результат и помогает подготовить следующий шаг.', provider: 'codex', model: null, effort: 'high', ultracode: false, communicationStyle: privateText, avatarUrl: '/api/avatars/avatar-sizing-photo', archived: false, createdAt: timestamp, updatedAt: timestamp },
-  { id: 'avatar-initials-worker', name: 'Михаил Исследователь', description: 'Разбирается в исходных данных и сохраняет важные детали.', provider: 'claude', model: null, effort: 'high', ultracode: false, communicationStyle: privateText, avatarUrl: null, archived: false, createdAt: timestamp, updatedAt: timestamp },
+  { id: 'avatar-photo-worker', name: 'Александра Проверяющая', description: 'Проверяет результат и помогает подготовить следующий шаг.', provider: 'codex', model: null, effort: 'high', ultracode: false, fallbackWorkerId: null, communicationStyle: privateText, avatarUrl: '/api/avatars/avatar-sizing-photo', archived: false, createdAt: timestamp, updatedAt: timestamp },
+  { id: 'avatar-initials-worker', name: 'Михаил Исследователь', description: 'Разбирается в исходных данных и сохраняет важные детали.', provider: 'claude', model: null, effort: 'high', ultracode: false, fallbackWorkerId: null, communicationStyle: privateText, avatarUrl: null, archived: false, createdAt: timestamp, updatedAt: timestamp },
 ];
 function detailFixture(workflow: boolean): TaskDetail {
   const id = workflow ? 'avatar-workflow-task' : 'avatar-simple-task';

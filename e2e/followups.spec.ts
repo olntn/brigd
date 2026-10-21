@@ -73,7 +73,7 @@ async function noPrivateText(drawer: Locator) {
 }
 
 function fixtureDetail(status: RunStatus = 'completed', session = true, followup = false): TaskDetail {
-  const worker: Worker = { id: 'followup-worker', name: 'Сохранённый автор', description: 'Проверяет готовые результаты.', provider: 'codex', model: null, effort: 'high', ultracode: false, communicationStyle: privateText, avatarUrl: null, archived: false, createdAt: timestamp, updatedAt: timestamp };
+  const worker: Worker = { id: 'followup-worker', name: 'Сохранённый автор', description: 'Проверяет готовые результаты.', provider: 'codex', model: null, effort: 'high', ultracode: false, fallbackWorkerId: null, communicationStyle: privateText, avatarUrl: null, archived: false, createdAt: timestamp, updatedAt: timestamp };
   const original: Run = {
     id: 'followup-original-run', taskId: 'followup-fixture-task', workerId: worker.id, worker: { ...worker }, steps: [], currentStepIndex: null,
     instructions: [], provider: worker.provider, cwd: '/workspace/project', instruction: 'Исходная цель.', trigger: 'manual', scheduledFor: null,

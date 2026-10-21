@@ -13,6 +13,28 @@ export class ProtocolError extends Error {
   }
 }
 
+/** The provider refused the turn because the account's usage, rate or quota limit is exhausted: a different account may still work. */
+export class UsageLimitError extends ProtocolError {
+  readonly code = 'USAGE_LIMIT';
+  constructor(readonly provider: Provider, readonly detail: string) {
+    super(`${provider === 'claude' ? 'Claude Code' : 'Codex'} reported that its usage limit is exhausted. No successful result was accepted.${detail ? ` ${detail}` : ''}`);
+    this.name = 'UsageLimitError';
+  }
+}
+
+// Phrases both CLIs use for exhausted plans, rate limits and billing, e.g. Codex
+// "You've hit your usage limit. Try again at …" and Claude Code "Claude AI usage limit reached|<ts>".
+const STRONG_LIMIT = /usage[ _-]?limits?|rate[ _-]?limit|usage_limit|quota|too many requests|\b429\b|insufficient[ _-]credits?|credit balance|out of credits|usage cap/i;
+const WEAK_LIMIT = /(?:hit|reached|exceeded) (?:your |the |its )?(?:[\w-]+ ){0,3}limit\b|limit (?:has been |was |is )?(?:reached|exceeded|exhausted)/i;
+// Caps brigd or the CLI put on one turn are not account limits: another account would hit them too.
+const UNRELATED_LIMIT = /max(?:imum)?[ _-]?turns?|context (?:window|length)|output limit|line limit|event limit|size limit|time limit/i;
+/** Only CLI-level error text is inspected: tool failures and ordinary prose never reach this check. */
+export function isUsageLimit(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  return STRONG_LIMIT.test(value) || (WEAK_LIMIT.test(value) && !UNRELATED_LIMIT.test(value));
+}
+const USAGE_LIMIT_DETAIL_LENGTH = 500;
+
 const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -80,6 +102,9 @@ export class AgentProtocol {
   private finalResponse: unknown;
   private nativeBlock = false;
   private nativePermissionRequest = false;
+  /** The first exhausted-limit message, already redacted and bounded; null until one is seen. */
+  private usageLimit: string | null = null;
+  private stderrTail = '';
   private blockedTools = new Set<string>();
   private seenLogs = new Set<string>();
   private pendingTools = new Map<string, TaskLogInput>();
@@ -97,6 +122,21 @@ export class AgentProtocol {
   }
 
   get permissionBlocked(): boolean { return this.nativeBlock; }
+  /** The exhausted-limit message seen so far, if any. */
+  get usageLimitDetail(): string | null { return this.usageLimit; }
+
+  private noteLimit(text: string): void {
+    if (this.usageLimit !== null || !isUsageLimit(text)) return;
+    const line = text.split('\n').find(candidate => isUsageLimit(candidate)) ?? text;
+    this.usageLimit = (sanitizeLogError(line) ?? '').slice(0, USAGE_LIMIT_DETAIL_LENGTH);
+  }
+
+  /** Stderr stays private: only an exhausted-limit line is kept, and only when the turn fails anyway. */
+  noteStderr(chunk: string): void {
+    const text = this.stderrTail + chunk;
+    this.noteLimit(text);
+    this.stderrTail = text.slice(-USAGE_LIMIT_DETAIL_LENGTH);
+  }
 
   push(chunk: string): void {
     this.pending += chunk;
@@ -201,7 +241,7 @@ export class AgentProtocol {
         this.nativeBlock = true;
         if (isNativeApprovalRequired(text)) this.nativePermissionRequest = true;
       }
-      else this.failure = true;
+      else { this.failure = true; this.noteLimit(text); }
     }
 
     if (this.provider === 'codex') {
@@ -219,7 +259,7 @@ export class AgentProtocol {
         if (item.type === 'error') {
           this.log(`error:${typeof item.id === 'string' ? item.id : this.eventCount}`, { kind: 'lifecycle', summary: 'Ошибка Codex', details: [], error: sanitizeLogError(errorText(item.message)) });
           if (isPermissionDenial(errorText(item.message))) this.nativeBlock = true;
-          else this.failure = true;
+          else { this.failure = true; this.noteLimit(errorText(item.message)); }
         }
       }
     } else {
@@ -268,7 +308,7 @@ export class AgentProtocol {
             this.nativeBlock = true;
             if (isNativeApprovalRequired(details)) this.nativePermissionRequest = true;
           }
-          else this.failure = true;
+          else { this.failure = true; this.noteLimit(details); }
         }
         this.finalResponse = event.structured_output ?? event.result;
       }
@@ -278,6 +318,8 @@ export class AgentProtocol {
   finish(exitCode: number): { envelope: Envelope; sessionId: string } {
     // A native prompt is intentionally terminated mid-stream; its unfinished tail is not a result.
     if (!this.nativeBlock) this.end();
+    // An exhausted limit may stop the CLI before any session exists; a replacement account can still take the work.
+    if (this.usageLimit !== null && !this.nativeBlock && (this.failure || exitCode !== 0 || !this.terminal)) throw new UsageLimitError(this.provider, this.usageLimit);
     if (!this.sessionId) throw new ProtocolError('The CLI did not return a durable session ID.');
     if (this.failure) throw new ProtocolError('The CLI reported a failed turn. No successful result was accepted.');
     if (this.nativeBlock) return {

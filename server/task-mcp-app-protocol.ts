@@ -65,7 +65,12 @@ const profileFields: Record<string, Schema> = {
 const workerFields: Record<string, Schema> = {
   name: text(80), description: nullable({ ...text(1_000, 0), description: 'Display-only description; never passed to an agent as instructions.' }),
   ...profileFields, ultracode: flag,
+  fallbackWorkerId: { ...nullable(id), description: 'Active worker that picks up a fresh run when this worker\'s provider reports exhausted usage limits; null follows the general settings. Usually a worker of the other provider.' },
 };
+const fallbackWorkers: Schema = object({
+  codex: { ...nullable(id), description: 'Worker that picks up when Codex reports exhausted usage limits, or null.' },
+  claude: { ...nullable(id), description: 'Worker that picks up when Claude Code reports exhausted usage limits, or null.' },
+}, [], { minProperties: 1, description: 'Per provider, the active worker (usually of the other provider) that takes over a fresh run after that CLI reports exhausted usage limits. Saved sessions are never handed over.' });
 const instructionFields: Record<string, Schema> = { title: text(140), body: text(16_000), enabled: flag };
 const tagFields: Record<string, Schema> = { name: text(50), color: { type: 'string', pattern: '^#[a-fA-F0-9]{6}$', description: 'HEX colour #RRGGBB; omitted on creation uses the app default.' } };
 const modelFields: Record<string, Schema> = { provider, modelId: model, label: text(80) };
@@ -142,8 +147,8 @@ export const TASK_APP_OPERATIONS: readonly TaskAppOperation[] = [
   operation('delete_doc_page', 'Move a documentation page and its subpages to the trash, where a person can restore it.', 'DELETE', '/api/docs/{id}', { target: 'doc_page_id', destructive: true }),
 
   operation('get_app_info', 'Read brigd server mode, available providers, default directory and scheduler status.', 'GET', '/api/info'),
-  operation('get_general_settings', 'Read the default project directory and card schedule used by the app.', 'GET', '/api/settings/general'),
-  operation('update_general_settings', 'Update the app\'s default project directory and/or card schedule. Existing cards retain their own settings.', 'PATCH', '/api/settings/general', { data: object({ defaultCwd: { ...text(4_096), description: 'Existing absolute project directory.' }, defaultSchedule: schedule }, [], { minProperties: 1 }) }),
+  operation('get_general_settings', 'Read the default project directory, card schedule and the per-provider replacement workers for exhausted usage limits.', 'GET', '/api/settings/general'),
+  operation('update_general_settings', 'Update the app\'s default project directory, card schedule and/or the replacement workers that pick up fresh runs when a provider reports exhausted usage limits. Existing cards retain their own settings.', 'PATCH', '/api/settings/general', { data: object({ defaultCwd: { ...text(4_096), description: 'Existing absolute project directory.' }, defaultSchedule: schedule, fallbackWorkers }, [], { minProperties: 1 }) }),
   operation('get_permission_settings', 'Read brigd\'s CLI access mode for future agent invocations.', 'GET', '/api/settings/permissions'),
   operation('update_permission_settings', 'Set CLI access mode for future invocations: standard uses the workspace sandbox; full grants the provider\'s full access mode.', 'PATCH', '/api/settings/permissions', { data: object({ mode: { type: 'string', enum: ['standard', 'full'] } }, ['mode']) }),
   operation('get_autopilot_settings', 'Read integration check commands and whether they come from saved settings or the environment.', 'GET', '/api/settings/autopilot'),

@@ -2,7 +2,7 @@ import type { AutopilotInput, AutopilotOverview, AutopilotSettings, CliAccessMod
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
 import { startAgent, buildPrompt, type AgentHandle, type AgentInput, type AgentCallbacks } from './adapter';
 import { AppError, Store, runFence, type RunFence } from './store';
-import { validateEnvelope, validateSessionId } from './protocol';
+import { UsageLimitError, validateEnvelope, validateSessionId } from './protocol';
 import { workflowContext } from './workflows';
 import { runUltracode } from '../src/lib/workers';
 import { createTaskBridge } from './task-mcp';
@@ -327,6 +327,8 @@ export class Engine {
     if (this.closing || !this.store.isCurrent(run.id, fence)) { this.release(run, launch); return; }
     const isCurrent = () => this.store.isCurrent(run.id, fence);
     const release = () => this.release(run, launch);
+    // Only a turn that opens a new CLI session can be handed to a replacement worker; a saved session belongs to its CLI.
+    const fresh = !run.sessionId;
     let handle: AgentHandle;
     let commentCursor: number;
     try {
@@ -379,7 +381,7 @@ export class Engine {
       launch.handle = handle;
       if (launch.cancelRequested || this.closing || !isCurrent()) handle.cancel();
     } catch (error) {
-      this.fail(run, fence, error);
+      this.fail(run, fence, error, fresh);
       this.store.completeCancellation(run.id, Date.now(), fence);
       release();
       return;
@@ -410,14 +412,45 @@ export class Engine {
       // The old process has settled. Its later finally must never remove or
       // complete cancellation of a newer step/attempt occupying this same run.
       release();
-    }).catch(error => this.fail(run, fence, error)).finally(() => {
+    }).catch(error => this.fail(run, fence, error, fresh)).finally(() => {
       this.store.completeCancellation(run.id, Date.now(), fence);
       release();
     });
   }
-  private fail(run: Run, fence: RunFence, error: unknown) {
+  /** Hands a fresh turn stopped by an exhausted usage limit to the configured replacement worker.
+   * Returns null once the replacement is queued, otherwise the failure text explaining why nobody picked the work up. */
+  private substitute(run: Run, fence: RunFence, error: UsageLimitError, fresh: boolean): string | null {
+    const providerName = (provider: Run['provider']) => provider === 'claude' ? 'Claude Code' : 'Codex';
+    const limit = `${providerName(run.provider)} сообщил об исчерпании лимитов${error.detail ? `: ${error.detail}` : '.'}`;
+    const explain = (reason: string) => `${limit}\n${reason}`;
+    if (run.trigger === 'reconcile') return explain('Интегратор не заменяется другим работником. Повторите после восстановления лимитов.');
+    if (!fresh || run.trigger === 'followup') return explain('Замена работника не применяется к продолжению сохранённой сессии: другой CLI не может её открыть. Повторите позже, когда лимиты восстановятся.');
+    if (run.fallbackTurn === run.turn) return explain('Работник замены тоже исчерпал лимиты; повторная замена в этом запуске не выполняется.');
+    if (this.closing) return explain('Сервис останавливается; замена не запущена.');
+    const { worker, reason } = this.store.fallbackWorkerFor(run);
+    if (!worker) return explain(reason);
+    const now = Date.now();
+    const queued = this.store.db.transaction(() => {
+      const updated = this.store.substituteWorker(run.id, fence, worker, limit, now);
+      if (!updated) return null;
+      this.store.log(run.taskId, run.id, { kind: 'lifecycle', summary: `Лимиты ${providerName(run.provider)} исчерпаны, задачу подхватывает ${worker.name}`,
+        details: [limit, `Замена: ${worker.name} (${providerName(worker.provider)}, модель ${worker.model ?? 'по умолчанию'}).`,
+          'Начинается новая сессия; предыдущие действия этого хода не повторяются автоматически.',
+          ...(run.currentStepIndex !== null ? [`Этап: ${run.currentStepIndex + 1} из ${run.steps.length}.`] : [])],
+        ...(error.detail ? { error: error.detail } : {}) }, now, run.currentStepIndex);
+      this.store.comment(run.taskId, run.id, 'system', `${limit} Задачу подхватывает ${worker.name} (${providerName(worker.provider)}) в новой сессии.`, now, run.currentStepIndex);
+      return this.enqueue(updated);
+    }).immediate();
+    return queued ? null : explain('Запуск уже изменился; замена не выполнена.');
+  }
+  private fail(run: Run, fence: RunFence, error: unknown, fresh = false) {
     if (!this.store.isCurrent(run.id, fence)) return;
-    const message = error instanceof Error ? error.message : String(error);
+    let message = error instanceof Error ? error.message : String(error);
+    if (error instanceof UsageLimitError) {
+      const unresolved = this.substitute(run, fence, error, fresh);
+      if (unresolved === null) return;
+      message = unresolved;
+    }
     this.store.db.transaction(() => {
       if (!this.store.isCurrent(run.id, fence)) return;
       this.store.finish(run.id, 'failed', null, message.slice(0, 16_000), Date.now(), fence);

@@ -35,11 +35,11 @@ describe('general settings', () => {
   test('the effective default folder falls back to configured cwd, then process cwd', async () => {
     expect(store.getDefaultCwd()).toBeNull();
     expect(store.getDefaultSchedule()).toBe('manual');
-    expect(await (await request()).json()).toEqual({ defaultCwd: process.cwd(), defaultSchedule: 'manual' });
+    expect(await (await request()).json()).toEqual({ defaultCwd: process.cwd(), defaultSchedule: 'manual', fallbackWorkers: { codex: null, claude: null } });
     expect(await (await request('/api/info')).json()).toMatchObject({ cwd: process.cwd() });
 
     handler = createHandler(engine, { port: 4310, root: folder, defaultCwd: folder });
-    expect(await (await request()).json()).toEqual({ defaultCwd: folder, defaultSchedule: 'manual' });
+    expect(await (await request()).json()).toEqual({ defaultCwd: folder, defaultSchedule: 'manual', fallbackWorkers: { codex: null, claude: null } });
     expect(await (await request('/api/info')).json()).toMatchObject({ cwd: folder });
   });
 
@@ -58,7 +58,7 @@ describe('general settings', () => {
     engine = new Engine(store, true);
     handler = createHandler(engine, { port: 4310, root: folder, defaultCwd: folder });
     expect(store.getDefaultCwd()).toBe(cwd);
-    expect(await (await request()).json()).toEqual({ defaultCwd: cwd, defaultSchedule: 'manual' });
+    expect(await (await request()).json()).toEqual({ defaultCwd: cwd, defaultSchedule: 'manual', fallbackWorkers: { codex: null, claude: null } });
     expect(await (await request('/api/info')).json()).toMatchObject({ cwd });
   });
 
@@ -72,8 +72,8 @@ describe('general settings', () => {
 
     const saved = await request('/api/settings/general', 'PATCH', { defaultCwd: ` ${project} ` });
     expect(saved.status).toBe(200);
-    expect(await saved.json()).toEqual({ defaultCwd: cwd, defaultSchedule: 'manual' });
-    expect(await (await request()).json()).toEqual({ defaultCwd: cwd, defaultSchedule: 'manual' });
+    expect(await saved.json()).toEqual({ defaultCwd: cwd, defaultSchedule: 'manual', fallbackWorkers: { codex: null, claude: null } });
+    expect(await (await request()).json()).toEqual({ defaultCwd: cwd, defaultSchedule: 'manual', fallbackWorkers: { codex: null, claude: null } });
     expect(await (await request('/api/info')).json()).toMatchObject({ cwd });
     expect(store.getTask(task.id).cwd).toBe(folder);
 
@@ -109,7 +109,7 @@ describe('general settings', () => {
   test.each(['auto', 'manual', 'interval'] as const)('the %s default launch type persists after reopening', async schedule => {
     const saved = await request('/api/settings/general', 'PATCH', { defaultSchedule: schedule });
     expect(saved.status).toBe(200);
-    expect(await saved.json()).toEqual({ defaultCwd: process.cwd(), defaultSchedule: schedule });
+    expect(await saved.json()).toEqual({ defaultCwd: process.cwd(), defaultSchedule: schedule, fallbackWorkers: { codex: null, claude: null } });
     expect(store.getDefaultSchedule()).toBe(schedule);
     expect(store.getDefaultCwd()).toBeNull();
 
@@ -119,7 +119,7 @@ describe('general settings', () => {
     engine = new Engine(store, true);
     handler = createHandler(engine, { port: 4310, root: folder });
     expect(store.getDefaultSchedule()).toBe(schedule);
-    expect(await (await request()).json()).toEqual({ defaultCwd: process.cwd(), defaultSchedule: schedule });
+    expect(await (await request()).json()).toEqual({ defaultCwd: process.cwd(), defaultSchedule: schedule, fallbackWorkers: { codex: null, claude: null } });
   });
 
   test('partial writes preserve the other setting and combined writes save both', async () => {
@@ -130,15 +130,15 @@ describe('general settings', () => {
 
     const scheduleOnly = await request('/api/settings/general', 'PATCH', { defaultSchedule: 'auto' });
     expect(scheduleOnly.status).toBe(200);
-    expect(await scheduleOnly.json()).toEqual({ defaultCwd: realpathSync(folder), defaultSchedule: 'auto' });
+    expect(await scheduleOnly.json()).toEqual({ defaultCwd: realpathSync(folder), defaultSchedule: 'auto', fallbackWorkers: { codex: null, claude: null } });
 
     const cwdOnly = await request('/api/settings/general', 'PATCH', { defaultCwd: project });
     expect(cwdOnly.status).toBe(200);
-    expect(await cwdOnly.json()).toEqual({ defaultCwd: cwd, defaultSchedule: 'auto' });
+    expect(await cwdOnly.json()).toEqual({ defaultCwd: cwd, defaultSchedule: 'auto', fallbackWorkers: { codex: null, claude: null } });
 
     const combined = await request('/api/settings/general', 'PATCH', { defaultCwd: folder, defaultSchedule: 'interval' });
     expect(combined.status).toBe(200);
-    expect(await combined.json()).toEqual({ defaultCwd: realpathSync(folder), defaultSchedule: 'interval' });
+    expect(await combined.json()).toEqual({ defaultCwd: realpathSync(folder), defaultSchedule: 'interval', fallbackWorkers: { codex: null, claude: null } });
   });
 
   test('invalid launch types leave both settings intact, including combined patches', async () => {
@@ -198,5 +198,43 @@ describe('general settings', () => {
         migrated.setDefaultSchedule('auto');
       } finally { migrated.close(); }
     }
+  });
+});
+
+describe('replacement workers for exhausted limits', () => {
+  const profile = (name: string, provider: 'codex' | 'claude') => store.createWorker({ name, provider, effort: 'default', communicationStyle: '', avatarUrl: null });
+  test('per-provider replacements are validated, partially updatable and persisted', async () => {
+    const claude = profile('Opus', 'claude');
+    const codex = profile('Sol', 'codex');
+    expect(store.getFallbackWorkers()).toEqual({ codex: null, claude: null });
+    const saved = await request('/api/settings/general', 'PATCH', { fallbackWorkers: { codex: claude.id } });
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toEqual({ defaultCwd: process.cwd(), defaultSchedule: 'manual', fallbackWorkers: { codex: claude.id, claude: null } });
+    const both = await request('/api/settings/general', 'PATCH', { defaultSchedule: 'auto', fallbackWorkers: { claude: codex.id } });
+    expect(both.status).toBe(200);
+    expect(await both.json()).toMatchObject({ defaultSchedule: 'auto', fallbackWorkers: { codex: claude.id, claude: codex.id } });
+    for (const value of [null, [], {}, 'x', 12, { openai: codex.id }, { codex: 12 }, { codex: 'bad id!' }, { codex: '' }, { codex: codex.id, extra: true }]) {
+      const response = await request('/api/settings/general', 'PATCH', { fallbackWorkers: value });
+      expect(response.status).toBe(400);
+    }
+    expect((await request('/api/settings/general', 'PATCH', { fallbackWorkers: { codex: 'missing-worker' } })).status).toBe(404);
+    store.archiveWorker(codex.id);
+    expect((await request('/api/settings/general', 'PATCH', { fallbackWorkers: { codex: codex.id } })).status).toBe(409);
+    expect(store.getFallbackWorkers()).toEqual({ codex: claude.id, claude: codex.id });
+    // The archived saved choice survives unrelated writes; a failed combined patch changes nothing.
+    expect(await (await request('/api/settings/general', 'PATCH', { defaultSchedule: 'manual' })).json()).toMatchObject({ defaultSchedule: 'manual', fallbackWorkers: { codex: claude.id, claude: codex.id } });
+    expect((await request('/api/settings/general', 'PATCH', { defaultSchedule: 'interval', fallbackWorkers: { codex: 'missing-worker' } })).status).toBe(404);
+    expect(store.getDefaultSchedule()).toBe('manual');
+    expect(store.getFallbackWorkers()).toEqual({ codex: claude.id, claude: codex.id });
+
+    await engine.shutdown();
+    store.close();
+    store = new Store(join(folder, 'settings.sqlite'));
+    engine = new Engine(store, true);
+    handler = createHandler(engine, { port: 4310, root: folder });
+    expect(store.getFallbackWorkers()).toEqual({ codex: claude.id, claude: codex.id });
+    expect(await (await request()).json()).toMatchObject({ fallbackWorkers: { codex: claude.id, claude: codex.id } });
+    expect(await (await request('/api/settings/general', 'PATCH', { fallbackWorkers: { codex: null, claude: null } })).json()).toMatchObject({ fallbackWorkers: { codex: null, claude: null } });
+    expect(store.getFallbackWorkers()).toEqual({ codex: null, claude: null });
   });
 });

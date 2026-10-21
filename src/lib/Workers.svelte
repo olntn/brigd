@@ -24,6 +24,8 @@
   let customSelection = $state(false);
   let effort = $state<Effort>('default');
   let ultracode = $state(false);
+  // Empty string follows Настройки → Общие; otherwise the ID of the worker that picks up after exhausted limits.
+  let fallbackWorkerId = $state('');
   let communicationStyle = $state('');
   let avatarUrl = $state<string | null>(null);
   let previewUrl = $state<string | null>(null);
@@ -56,6 +58,20 @@
     if (editing && draftModel && !customSelection && !providerModels.some(option => option.modelId === draftModel)) customSelection = true;
   });
   const providerName = (value: Provider) => value === 'codex' ? 'Codex' : 'Claude Code';
+  /** Other profiles that can take over; an archived profile stays listed only while it is the saved choice. */
+  let fallbackOptions = $derived(workers.filter(worker => worker.id !== editingId && (!worker.archived || worker.id === fallbackWorkerId)));
+  let fallbackHint = $derived.by(() => {
+    const worker = workers.find(item => item.id === fallbackWorkerId);
+    if (!worker) return 'Кто начнёт новую сессию с тем же заданием, если CLI этого работника сообщит об исчерпании лимитов. Пусто: как в Настройки → Общие.';
+    if (worker.archived) return `${worker.name} в архиве: восстановите работника или выберите другого, иначе замена не сработает.`;
+    if (worker.provider === provider) return `${worker.name} тоже использует ${providerName(provider)}: лимиты аккаунта общие, выберите работника другого провайдера.`;
+    return `${worker.name} (${providerName(worker.provider)}) подхватит новую сессию вместо этого работника.`;
+  });
+  const fallbackLabel = (worker: Worker) => {
+    if (!worker.fallbackWorkerId) return '';
+    const fallback = workers.find(item => item.id === worker.fallbackWorkerId);
+    return fallback ? `${fallback.name}${fallback.archived ? ' (в архиве)' : ''}` : 'работник не найден';
+  };
   let integratorSettings = $derived(!integrator ? (integratorError ? 'Настройки недоступны' : 'Загружаем настройки…') : integrator.mode === 'inherit'
     ? 'Провайдер, модель и усилия — как у запуска, результат которого объединяется'
     : `${providerName(integrator.provider)} · ${modelLabel(integrator.model, modelsError ? undefined : models, integrator.provider)} · ${effortLabel(integrator.effort)}`);
@@ -120,6 +136,7 @@
     customSelection = !!draftModel && (modelsError !== '' || !models.some(option => option.provider === provider && option.modelId === draftModel));
     effort = worker?.effort ?? 'default';
     ultracode = worker?.ultracode ?? false;
+    fallbackWorkerId = worker?.fallbackWorkerId ?? '';
     communicationStyle = worker?.communicationStyle ?? '';
     avatarUrl = worker?.avatarUrl ?? null;
     await presentEditor('[name="workerName"]');
@@ -263,7 +280,7 @@
         integrator = await request<IntegratorProfile>('/api/integrator', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         notify('Настройки Интегратора сохранены');
       } else {
-        const payload: WorkerInput = { name: name.trim(), description: description.trim(), provider, model, effort, ultracode, communicationStyle: communicationStyle.trim(), avatarUrl };
+        const payload: WorkerInput = { name: name.trim(), description: description.trim(), provider, model, effort, ultracode, fallbackWorkerId: fallbackWorkerId || null, communicationStyle: communicationStyle.trim(), avatarUrl };
         const saved = await request<Worker>(editingId ? `/api/workers/${encodeURIComponent(editingId)}` : '/api/workers', {
           method: editingId ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
         });
@@ -299,7 +316,7 @@
 
 {#snippet workerCard(worker: Worker)}
   <article class="worker-card" class:archived-worker={worker.archived} aria-label={'Работник: ' + worker.name}>
-    <div class="worker-card-heading"><WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={64} /><div><h2>{worker.name}</h2><p class="worker-description" class:empty-description={!worker.description?.trim()}>{worker.description?.trim() || 'Описание не задано'}</p><p>{providerName(worker.provider)} <span>·</span> <span class="worker-model-label" title={worker.model ?? undefined}>{modelLabel(worker.model, models, worker.provider)}</span></p><p>Усилия: {effortLabel(worker.effort)}</p></div>{#if worker.archived}<span class="worker-archived-label">В архиве</span>{/if}</div>
+    <div class="worker-card-heading"><WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={64} /><div><h2>{worker.name}</h2><p class="worker-description" class:empty-description={!worker.description?.trim()}>{worker.description?.trim() || 'Описание не задано'}</p><p>{providerName(worker.provider)} <span>·</span> <span class="worker-model-label" title={worker.model ?? undefined}>{modelLabel(worker.model, models, worker.provider)}</span></p><p>Усилия: {effortLabel(worker.effort)}</p>{#if worker.fallbackWorkerId}<p class="worker-fallback-label">Замена при лимитах: {fallbackLabel(worker)}</p>{/if}</div>{#if worker.archived}<span class="worker-archived-label">В архиве</span>{/if}</div>
     <div class="worker-card-actions"><button class="button secondary" disabled={pending.includes(worker.id)} onclick={() => openEditor(worker)} aria-label={'Изменить работника: ' + worker.name}><Icon name="edit" size={14} />Изменить</button><button class="button text-button" disabled={pending.includes(worker.id)} onclick={() => setArchived(worker)} aria-label={(worker.archived ? 'Восстановить работника: ' : 'В архив: ') + worker.name}><Icon name={pending.includes(worker.id) ? 'refresh' : worker.archived ? 'refresh' : 'inbox'} size={14} class={pending.includes(worker.id) ? 'spin' : ''} />{worker.archived ? 'Восстановить' : 'В архив'}</button></div>
   </article>
 {/snippet}
@@ -349,6 +366,7 @@
       {/if}
       {#if !editingBuiltin}
       <div class="form-field"><label class="worker-ultracode-option"><input name="workerUltracode" type="checkbox" bind:checked={ultracode} aria-describedby="worker-ultracode-help" disabled={submitting} /><span>ultracode</span></label><small id="worker-ultracode-help">{provider === 'codex' ? 'Включает режим ultra с подагентами. Вместо выбранного уровня усилий используется ultra.' : 'Включает режим ultracode с подагентами. Выбранный уровень усилий сохраняется.'}</small></div>
+      <label class="form-field"><span>Замена при лимитах</span><select name="workerFallback" aria-label="Замена при лимитах" aria-describedby="worker-fallback-help" bind:value={fallbackWorkerId} disabled={submitting}><option value="">Как в настройках</option>{#each fallbackOptions as option (option.id)}<option value={option.id}>{option.name} · {providerName(option.provider)}{option.archived ? ' · в архиве' : ''}</option>{/each}</select><small id="worker-fallback-help">{fallbackHint}</small></label>
       {/if}
       {#if editingBuiltin}
       <label class="form-field"><span>Указания Интегратору</span><textarea name="communicationStyle" aria-label="Указания Интегратору" bind:value={communicationStyle} rows="5" maxlength="4000" disabled={submitting}></textarea><small>Передаются при разрешении конфликта: например, какие файлы не трогать или чью версию предпочитать. Показываются только здесь.</small></label>
@@ -364,4 +382,5 @@
 <style>
   .worker-ultracode-option { display: flex; align-items: center; gap: 10px; color: var(--secondary); font-size: .92rem; cursor: pointer; }
   .worker-ultracode-option input[type='checkbox'] { width: 17px; height: 17px; margin: 0; padding: 0; }
+  .worker-fallback-label { overflow-wrap: anywhere; }
 </style>

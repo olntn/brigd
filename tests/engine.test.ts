@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildPrompt, type AgentCallbacks, type AgentInput, type AgentOutcome } from '../server/adapter';
 import { Engine, type AgentFactory } from '../server/engine';
-import { ProtocolError } from '../server/protocol';
+import { ProtocolError, UsageLimitError } from '../server/protocol';
 import { AppError, Store } from '../server/store';
 import type { Envelope, TaskInput } from '../src/lib/types';
 
@@ -530,5 +530,227 @@ describe('autopilot', () => {
     store.reconcile(now + 63_000);
     expect(store.getAutopilot()).toMatchObject({ enabled: false, stopReason: 'restart' });
     expect(store.detail(second.id).runs[0]?.status).toBe('interrupted');
+  });
+});
+
+describe('replacement after exhausted usage limits', () => {
+  const limit = (provider: 'codex' | 'claude' = 'codex') => new UsageLimitError(provider, provider === 'codex' ? "You've hit your usage limit. Try again at 6:00 PM." : 'Claude AI usage limit reached|1751212800');
+  const profiles = () => {
+    const claude = store.createWorker({ name: 'Opus', provider: 'claude', model: 'claude-opus-5-5', effort: 'high', communicationStyle: 'Be brief.', avatarUrl: null });
+    const codex = store.createWorker({ name: 'Sol', provider: 'codex', model: 'gpt-6.1-sol', effort: 'xhigh', communicationStyle: 'Verify twice.', avatarUrl: null, fallbackWorkerId: claude.id });
+    return { claude, codex };
+  };
+
+  test('a fresh turn stopped by the limit continues with the profile replacement in a new session', async () => {
+    const { claude, codex } = profiles();
+    const task = store.createTask(input(folder, { workerId: codex.id }));
+    const run = engine.start(task.id);
+    agent.calls[0]!.callbacks.onSession('codex-session');
+    agent.calls[0]!.reject(limit());
+    await flush();
+    expect(agent.calls).toHaveLength(2);
+    expect(agent.calls[1]!.input).toEqual({ provider: 'claude', cwd: folder, instruction: task.instruction, instructions: [], sessionId: undefined, answer: undefined, mock: true, model: 'claude-opus-5-5', ultracode: false, effort: 'high', communicationStyle: 'Be brief.' });
+    const replaced = store.getRun(run.id);
+    expect(replaced).toMatchObject({ status: 'running', provider: 'claude', workerId: claude.id, sessionId: null, turn: 2, fallbackTurn: 2, error: null, summary: null });
+    expect(replaced.worker).toMatchObject({ id: claude.id, name: 'Opus', provider: 'claude', model: 'claude-opus-5-5' });
+    expect(store.getTask(task.id)).toMatchObject({ workerId: codex.id, provider: 'codex' });
+    // The replaced process settled: its late callbacks cannot touch the new turn.
+    agent.calls[0]!.callbacks.onComment('late codex comment');
+    agent.calls[0]!.callbacks.onSession('codex-session-again');
+    expect(store.getRun(run.id).sessionId).toBeNull();
+    agent.calls[1]!.callbacks.onSession('claude-session');
+    agent.calls[1]!.resolve(outcome('completed', 'claude-session'));
+    await flush();
+    expect(store.getRun(run.id)).toMatchObject({ status: 'completed', sessionId: 'claude-session', provider: 'claude', turn: 2, fallbackTurn: 2, summary: 'Checked repository' });
+    const comments = store.detail(task.id).comments;
+    const handover = comments.find(comment => comment.kind === 'system' && comment.body.includes('подхватывает'))!;
+    expect(handover.body).toContain('Codex сообщил об исчерпании лимитов');
+    expect(handover.body).toContain("You've hit your usage limit");
+    expect(handover.body).toContain('Opus (Claude Code)');
+    expect(comments.some(comment => comment.body === 'late codex comment')).toBe(false);
+    expect(comments.filter(comment => comment.kind === 'result')).toHaveLength(1);
+    const log = store.detail(task.id).logs!.find(entry => entry.summary.includes('подхватывает'))!;
+    expect(log).toMatchObject({ runId: run.id, kind: 'lifecycle', error: "You've hit your usage limit. Try again at 6:00 PM." });
+    expect(log.details.join('\n')).toContain('Opus (Claude Code, модель claude-opus-5-5)');
+  });
+
+  test('the general setting replaces a run without a worker, and the profile choice wins over it', async () => {
+    const { claude, codex } = profiles();
+    const sonnet = store.createWorker({ name: 'Sonnet', provider: 'claude', model: 'claude-sonnet-5-5', avatarUrl: null, effort: 'default', communicationStyle: '' });
+    expect(store.setFallbackWorkers({ codex: sonnet.id })).toEqual({ codex: sonnet.id, claude: null });
+    const plain = store.createTask(input(folder));
+    const plainRun = engine.start(plain.id);
+    agent.calls[0]!.reject(limit());
+    await flush();
+    expect(agent.calls[1]!.input).toMatchObject({ provider: 'claude', model: 'claude-sonnet-5-5', sessionId: undefined });
+    expect(store.getRun(plainRun.id)).toMatchObject({ status: 'running', workerId: sonnet.id, provider: 'claude', fallbackTurn: 2 });
+    agent.calls[1]!.resolve(outcome());
+    await flush();
+    expect(store.getRun(plainRun.id).status).toBe('completed');
+    const assigned = store.createTask(input(folder, { workerId: codex.id }));
+    const run = engine.start(assigned.id);
+    agent.calls[2]!.reject(limit());
+    await flush();
+    expect(agent.calls[3]!.input).toMatchObject({ provider: 'claude', model: 'claude-opus-5-5' });
+    expect(store.getRun(run.id).workerId).toBe(claude.id);
+  });
+
+  test('without a configured replacement the run fails and explains where to configure one', async () => {
+    const task = store.createTask(input(folder));
+    const run = engine.start(task.id);
+    agent.calls[0]!.callbacks.onSession('codex-session');
+    agent.calls[0]!.reject(limit());
+    await flush();
+    expect(agent.calls).toHaveLength(1);
+    const failed = store.getRun(run.id);
+    expect(failed).toMatchObject({ status: 'failed', sessionId: 'codex-session', turn: 1, fallbackTurn: null, provider: 'codex' });
+    expect(failed.error).toContain("Codex сообщил об исчерпании лимитов: You've hit your usage limit");
+    expect(failed.error).toContain('Настройки → Общие');
+    expect(store.detail(task.id).comments.at(-1)).toMatchObject({ kind: 'system', body: failed.error });
+    expect(store.activeRun(task.id)).toBeNull();
+  });
+
+  test('an archived replacement or one equal to the current worker is skipped with a reason', async () => {
+    const { claude, codex } = profiles();
+    store.archiveWorker(claude.id);
+    const task = store.createTask(input(folder, { workerId: codex.id }));
+    const run = engine.start(task.id);
+    agent.calls[0]!.reject(limit());
+    await flush();
+    expect(agent.calls).toHaveLength(1);
+    expect(store.getRun(run.id)).toMatchObject({ status: 'failed', provider: 'codex', fallbackTurn: null });
+    expect(store.getRun(run.id).error).toContain('Opus (в профиле работника) в архиве');
+    const self = store.createWorker({ name: 'Sol again', provider: 'codex', avatarUrl: null, effort: 'default', communicationStyle: '' });
+    store.setFallbackWorkers({ codex: self.id });
+    const own = store.createTask(input(folder, { workerId: self.id }));
+    const ownRun = engine.start(own.id);
+    agent.calls[1]!.reject(limit());
+    await flush();
+    expect(agent.calls).toHaveLength(2);
+    expect(store.getRun(ownRun.id).error).toContain('совпадает с текущим работником');
+  });
+
+  test('a replacement that also runs out of limits fails without a third attempt', async () => {
+    const { claude, codex } = profiles();
+    store.updateWorker(claude.id, { ...claude, fallbackWorkerId: codex.id });
+    const task = store.createTask(input(folder, { workerId: codex.id }));
+    const run = engine.start(task.id);
+    agent.calls[0]!.reject(limit());
+    await flush();
+    agent.calls[1]!.callbacks.onSession('claude-session');
+    agent.calls[1]!.reject(limit('claude'));
+    await flush();
+    expect(agent.calls).toHaveLength(2);
+    const failed = store.getRun(run.id);
+    expect(failed).toMatchObject({ status: 'failed', provider: 'claude', workerId: claude.id, sessionId: 'claude-session', turn: 2, fallbackTurn: 2 });
+    expect(failed.error).toContain('Claude Code сообщил об исчерпании лимитов: Claude AI usage limit reached|1751212800');
+    expect(failed.error).toContain('Работник замены тоже исчерпал лимиты');
+    expect(store.activeRun(task.id)).toBeNull();
+  });
+
+  test('a saved session is never handed over: answers and follow-ups fail with an explanation', async () => {
+    const { codex } = profiles();
+    const task = store.createTask(input(folder, { workerId: codex.id }));
+    const run = engine.start(task.id);
+    agent.calls[0]!.resolve(outcome('needs_input'));
+    await flush();
+    engine.resume(run.id, 'Use main.', false);
+    agent.calls[1]!.reject(limit());
+    await flush();
+    expect(agent.calls).toHaveLength(2);
+    expect(store.getRun(run.id)).toMatchObject({ status: 'failed', provider: 'codex', workerId: codex.id, turn: 2, fallbackTurn: null, sessionId: 'session-exact' });
+    expect(store.getRun(run.id).error).toContain('сохранённой сессии');
+    const done = store.createTask(input(folder, { workerId: codex.id }));
+    const source = engine.start(done.id);
+    agent.calls[2]!.resolve(outcome());
+    await flush();
+    const followup = engine.followup(done.id, { sourceRunId: source.id, sourceStepIndex: null, body: 'Explain more.', attachmentIds: [], requestId: 'limit-followup' });
+    agent.calls[3]!.reject(limit());
+    await flush();
+    expect(agent.calls).toHaveLength(4);
+    expect(store.getRun(followup.id)).toMatchObject({ status: 'failed', provider: 'codex', fallbackTurn: null });
+    expect(store.getRun(followup.id).error).toContain('сохранённой сессии');
+  });
+
+  test('a workflow stage hands over to the replacement while later stages keep their own workers', async () => {
+    const { claude, codex } = profiles();
+    const task = store.createTask(input(folder, { steps: [
+      { workerId: codex.id, title: 'First', instruction: 'Review first.' },
+      { workerId: codex.id, title: 'Second', instruction: 'Review second.' },
+    ] }));
+    const run = engine.start(task.id);
+    agent.calls[0]!.callbacks.onSession('codex-one');
+    agent.calls[0]!.reject(limit());
+    await flush();
+    expect(agent.calls[1]!.input).toMatchObject({ provider: 'claude', model: 'claude-opus-5-5', sessionId: undefined, workflow: { stepIndex: 0, instruction: 'Review first.' } });
+    let current = store.getRun(run.id);
+    expect(current).toMatchObject({ status: 'running', currentStepIndex: 0, provider: 'claude', workerId: claude.id, sessionId: null, turn: 2, fallbackTurn: 2 });
+    expect(current.steps[0]).toMatchObject({ workerId: claude.id, worker: { id: claude.id, provider: 'claude' }, status: 'running', sessionId: null });
+    expect(current.steps[0]!.attempts.map(attempt => [attempt.status, attempt.turn, attempt.sessionId])).toEqual([['failed', 1, 'codex-one'], ['running', 2, null]]);
+    expect(current.steps[0]!.attempts[0]!.error).toContain('Codex сообщил об исчерпании лимитов');
+    expect(current.steps[1]).toMatchObject({ workerId: codex.id, worker: { id: codex.id }, status: 'pending' });
+    agent.calls[1]!.callbacks.onSession('claude-one');
+    agent.calls[1]!.resolve(outcome('completed', 'claude-one'));
+    await flush();
+    current = store.getRun(run.id);
+    expect(current).toMatchObject({ status: 'running', currentStepIndex: 1, provider: 'codex', workerId: codex.id, turn: 3, fallbackTurn: 2 });
+    expect(current.steps[0]).toMatchObject({ status: 'completed', sessionId: 'claude-one', workerId: claude.id });
+    expect(agent.calls[2]!.input).toMatchObject({ provider: 'codex', model: 'gpt-6.1-sol', workflow: { stepIndex: 1, predecessors: [{ summary: 'Checked repository' }] } });
+    // The second stage is a different stage, so it is handed over again.
+    agent.calls[2]!.reject(limit());
+    await flush();
+    current = store.getRun(run.id);
+    expect(current).toMatchObject({ status: 'running', currentStepIndex: 1, provider: 'claude', workerId: claude.id, turn: 4, fallbackTurn: 4 });
+    expect(agent.calls[3]!.input).toMatchObject({ provider: 'claude', workflow: { stepIndex: 1 } });
+    agent.calls[3]!.resolve(outcome('completed', 'claude-two'));
+    await flush();
+    const finished = store.getRun(run.id);
+    expect(finished).toMatchObject({ status: 'completed', turn: 4 });
+    expect(finished.steps.map(step => [step.worker.id, step.status, step.sessionId])).toEqual([[claude.id, 'completed', 'claude-one'], [claude.id, 'completed', 'claude-two']]);
+    expect(store.getTask(task.id).steps.map(step => step.workerId)).toEqual([codex.id, codex.id]);
+    // A follow-up into the replaced stage continues the replacement's own session.
+    const followup = engine.followup(task.id, { sourceRunId: run.id, sourceStepIndex: 0, body: 'Explain the first stage.', attachmentIds: [], requestId: 'replaced-stage' });
+    expect(followup).toMatchObject({ provider: 'claude', workerId: claude.id, sessionId: 'claude-one' });
+    expect(agent.calls[4]!.input).toMatchObject({ provider: 'claude', model: 'claude-opus-5-5', sessionId: 'claude-one' });
+  });
+
+  test('the handover survives a restart as an interrupted turn of the replacement', async () => {
+    const { claude, codex } = profiles();
+    const task = store.createTask(input(folder, { workerId: codex.id }));
+    const run = engine.start(task.id);
+    agent.calls[0]!.reject(limit());
+    await flush();
+    expect(store.getRun(run.id)).toMatchObject({ provider: 'claude', turn: 2 });
+    // Simulate a process exit while the replacement runs: the new connection and engine reconstruct state solely from SQLite.
+    const previous = { engine, store };
+    store = new Store(join(folder, 'trackt.sqlite'));
+    engine = new Engine(store, true, agent.factory);
+    engine.startScheduler();
+    const interrupted = store.getRun(run.id);
+    expect(interrupted).toMatchObject({ status: 'interrupted', provider: 'claude', workerId: claude.id, turn: 2, fallbackTurn: 2 });
+    expect(interrupted.worker).toMatchObject({ id: claude.id, provider: 'claude' });
+    expect(agent.calls).toHaveLength(2);
+    expectStatusError(() => engine.resume(run.id, 'Continue', false), 409);
+    // The old process settles afterwards without touching the interrupted turn.
+    await previous.engine.shutdown();
+    previous.store.close();
+    expect(store.getRun(run.id)).toMatchObject({ status: 'interrupted', provider: 'claude', turn: 2 });
+  });
+
+  test('an autopilot handover does not count toward the failure breaker', async () => {
+    const { claude, codex } = profiles();
+    const now = Date.now();
+    const task = store.createTask(input(folder, { schedule: 'auto', workerId: codex.id }), now - 1);
+    engine.setAutopilot({ enabled: true, until: null }, now);
+    await flush();
+    expect(agent.calls).toHaveLength(1);
+    agent.calls[0]!.reject(limit());
+    await flush();
+    expect(store.getRun(store.detail(task.id).runs[0]!.id)).toMatchObject({ status: 'running', trigger: 'autopilot', workerId: claude.id });
+    expect(store.autopilotOverview()).toMatchObject({ enabled: true, failures: 0 });
+    agent.calls[1]!.resolve(outcome());
+    await flush();
+    expect(store.autopilotOverview()).toMatchObject({ enabled: true, failures: 0 });
+    expect(store.detail(task.id).runs[0]?.status).toBe('completed');
   });
 });
