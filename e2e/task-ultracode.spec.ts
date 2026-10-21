@@ -54,7 +54,7 @@ test('simple task: checkbox follows the worker profile until set by hand, then t
   const title = unique('Задача с ultracode');
   const { editor, checkbox, help } = await openEditor(page);
   await expect(checkbox).not.toBeChecked();
-  await expect(help).toContainText('Без работника по умолчанию выключен');
+  await expect(help).toContainText('Без работника режим ultracode определяют настройки установленного CLI');
   await editor.getByLabel('Работник', { exact: true }).selectOption(ultra.id);
   await expect(checkbox).toBeChecked();
   await expect(help).toContainText('Как в профиле работника: режим ultracode включён');
@@ -107,8 +107,15 @@ test('editing: unchecking stores false, hides the badge and survives reopening d
   await expect(checkbox).not.toBeChecked();
   await expect(checkbox).toHaveJSProperty('indeterminate', false);
   await expect(editor.locator('#task-ultracode-help')).toContainText('Задано для этой задачи');
-  await page.keyboard.press('Escape');
-  await expect(badge(drawer.locator('.drawer-badges'))).toHaveCount(0);
+  await editor.getByRole('button', { name: 'Вернуть как в профиле работника', exact: true }).click();
+  await expect(checkbox).toBeChecked();
+  await expect(editor.locator('#task-ultracode-help')).toContainText('Как в профиле работника: режим ultracode включён');
+  const reset = page.waitForResponse(response => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/tasks/${task.id}`);
+  await editor.getByRole('button', { name: 'Сохранить изменения', exact: true }).click();
+  expect((await reset).request().postDataJSON().ultracode).toBeNull();
+  await expect(editor).toBeHidden();
+  expect((await savedTask(request, title)).ultracode).toBeNull();
+  await expect(badge(drawer.locator('.drawer-badges'))).toHaveText('ultracode');
 });
 
 test('inherit path: an untouched checkbox stores null and the badge follows the worker profile', async ({ page, request }) => {
