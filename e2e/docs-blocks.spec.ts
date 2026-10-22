@@ -184,6 +184,11 @@ test('pages attach to tasks through the editor and the card links back to them',
   await page.getByRole('button', { name: `Открыть задачу: ${task.title}`, exact: true }).click();
   const drawer = page.getByRole('dialog').filter({ hasText: task.title });
   const docs = drawer.getByRole('region', { name: 'Документация задачи' });
+  const openDocs = async () => { if (!await docs.locator('details').evaluate(node => (node as HTMLDetailsElement).open)) await docs.locator('summary').click(); };
+  await expect(docs.locator('summary')).toContainText('1 страница');
+  await expect(docs.locator('.doc-page-link')).toHaveCount(1);
+  await expect(docs.locator('.doc-page-link')).toBeHidden();
+  await openDocs();
   await expect(docs.getByRole('button')).toHaveText([guide.title]);
   await drawer.getByRole('button', { name: 'Изменить', exact: true }).click();
   const picker = page.getByRole('group', { name: 'Документация для задачи' });
@@ -191,12 +196,15 @@ test('pages attach to tasks through the editor and the card links back to them',
   await picker.getByLabel('Поиск страниц документации').fill('Стиль');
   await picker.getByRole('checkbox', { name: style.title }).check();
   await page.getByRole('button', { name: 'Сохранить изменения', exact: true }).click();
+  await expect(docs.locator('summary')).toContainText('2 страницы');
+  await openDocs();
   await expect(docs.getByRole('button')).toHaveText([guide.title, style.title]);
   expect((await (await request.get(`/api/tasks/${task.id}`)).json()).task.docPageIds).toEqual([guide.id, style.id]);
   await drawer.getByRole('button', { name: 'Запустить', exact: true }).click();
   await expect(drawer.getByText('Документация на момент запуска')).toBeAttached({ timeout: 5000 });
   const detail = await (await request.get(`/api/tasks/${task.id}`)).json();
   expect(detail.runs[0].docs).toEqual([{ id: guide.id, title: guide.title }, { id: style.id, title: style.title }]);
+  await openDocs();
   await docs.getByRole('button', { name: style.title }).click();
   await expect(drawer).toBeHidden();
   await expect(page).toHaveURL(new RegExp(`#/docs/${style.id}$`));

@@ -29,6 +29,7 @@
   import { WORKFLOW_MIN_STEPS, WORKFLOW_MAX_STEPS, WORKFLOW_TEXT_LIMIT, WORKFLOW_BYTES_LIMIT } from './lib/workflows';
   import { effortLabel, modelLabel, runUltracode } from './lib/workers';
   import { tagColorStyle } from './lib/tags';
+  import { plural } from './lib/format';
   import { followupTargets, followupFingerprint, followupStage, runWorkflowSteps, taskHasCompletedRun, resolveFollowupTarget, followupSessionKey, type FollowupTarget } from './lib/followups';
   import { applyTheme, readTheme, saveTheme, themes, themeStorageKey, type Theme } from './lib/theme';
   import type { AppInfo, Attachment, AutopilotSettings as AutopilotSettingsValue, Comment, DocPageSummary, FollowupInput, GeneralSettings as GeneralSettingsValue, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
@@ -1137,8 +1138,8 @@
           <div class="assigned-task-tags" role="region" aria-label="Назначенные теги" tabindex="0">{@render taskTags(selectedTask)}</div>
         {:else}<p class="task-tags-empty">Теги не назначены</p>{/if}
       </section>
-      {#if selectedTask.docPages?.length}<section class="task-doc-pages" aria-label="Документация задачи"><h3>ДОКУМЕНТАЦИЯ</h3><ul>{#each selectedTask.docPages as doc (doc.id)}<li><button type="button" class="doc-page-link" onclick={() => openDocPage(doc.id)}><Icon name="file" size={13} />{doc.title.trim() || 'Без названия'}</button></li>{/each}</ul></section>{/if}
       <section class="instruction-section"><h3>{selectedTask.steps?.length ? 'ОБЩАЯ ЦЕЛЬ ЗАДАЧИ' : 'ЗАДАНИЕ ДЛЯ АГЕНТА'}</h3><p>{selectedTask.instruction}</p></section>
+      {#if selectedTask.docPages?.length}<section class="task-doc-pages" aria-label="Документация задачи"><details><summary><Icon name="chevron" size={15} class="task-doc-chevron" /><Icon name="book" size={14} /><span>Документация</span><span class="task-doc-count">{selectedTask.docPages.length} {plural(selectedTask.docPages.length, 'страница', 'страницы', 'страниц')}</span></summary><ul>{#each selectedTask.docPages as doc (doc.id)}<li><button type="button" class="doc-page-link" onclick={() => openDocPage(doc.id)}><Icon name="file" size={13} />{doc.title.trim() || 'Без названия'}</button></li>{/each}</ul></details></section>{/if}
       {#if selectedTask.attachments?.some(file => file.source === 'user')}<section class="task-attachments" aria-label="Файлы задачи"><h3>Файлы задачи</h3><AttachmentList attachments={selectedTask.attachments.filter(file => file.source === 'user')} taskId={selectedTask.id} author={attachmentAuthor} /></section>{/if}
       {#if detail?.attachments?.some(file => file.source === 'agent' && !file.commentId)}<section class="task-attachments" aria-label="Файлы агента"><h3>Файлы агента</h3><AttachmentList attachments={detail.attachments.filter(file => file.source === 'agent' && !file.commentId)} taskId={selectedTask.id} author={attachmentAuthor} /></section>{/if}
       {#if currentRun?.followup}
