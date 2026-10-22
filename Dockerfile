@@ -73,6 +73,6 @@ COPY scripts ./scripts
 EXPOSE 4310
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
-  CMD ["bun", "-e", "const r = await fetch('http://127.0.0.1:4310/api/info'); if (!r.ok || (await r.json()).scheduler !== 'running') process.exit(1)"]
+  CMD ["bun", "-e", "const host = (process.env.BRIGD_ALLOWED_HOSTS ?? process.env.TRACKT_ALLOWED_HOSTS ?? '127.0.0.1:4310').split(',')[0].trim(); const r = await fetch('http://127.0.0.1:4310/api/info', { headers: { Host: host } }); if (!r.ok || (await r.json()).scheduler !== 'running') process.exit(1)"]
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bun", "server/index.ts"]

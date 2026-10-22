@@ -84,6 +84,17 @@ describe('loopback request boundary', () => {
     expect(await response.json()).toEqual([]);
   });
 
+  test('default Host and Origin allowlists follow the configured port', async () => {
+    handler = createHandler(engine, { port: 4320, root: folder });
+    const other = 'http://127.0.0.1:4320';
+    const list = await handler(new Request(`${other}/api/tasks`, { headers: { host: '127.0.0.1:4320' } }));
+    expect(list.status).toBe(200);
+    expect((await request('/api/tasks')).status).toBe(403);
+    const created = await handler(new Request(`${other}/api/tasks`, { method: 'POST', body: JSON.stringify(valid()),
+      headers: { host: '127.0.0.1:4320', origin: other, 'content-type': 'application/json' } }));
+    expect(created.status).toBe(201);
+  });
+
   test.each(['evil.test:4310', '127.0.0.1.evil.test:4310', 'localhost.evil.test:4310', '127.0.0.1:99', 'localhost', '[::1]:4310', '0.0.0.0:4310'])('rejects untrusted Host %s before reading or mutating state', async host => {
     const response = await request('/api/tasks', 'POST', valid(), { host });
     expect(response.status).toBe(403);

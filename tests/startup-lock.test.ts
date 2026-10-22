@@ -159,3 +159,23 @@ test('managed real server gates HTTP and scheduling until activation', async () 
     lock.release();
   }
 });
+
+test('a busy port stops the server with a clear message and releases the database', async () => {
+  const { folder, path } = fixture();
+  const reservation = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') });
+  const port = reservation.port!;
+  try {
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('BRIGD_') && !key.startsWith('TRACKT_')));
+    Object.assign(env, { BRIGD_DB: path, BRIGD_MODE: 'mock', PORT: String(port), BRIGD_HOST: '127.0.0.1', BRIGD_CLI_HOME: folder });
+    const child = Bun.spawn([process.execPath, resolve(import.meta.dir, '../server/index.ts')], { env, stdout: 'ignore', stderr: 'pipe' });
+    children.push(child);
+    const [code, stderr] = await Promise.all([deadline(child.exited), new Response(child.stderr).text()]);
+    expect(code).toBe(1);
+    expect(stderr).toContain(`Порт ${port} уже занят`);
+    // The lease and the OS lock are released, not left for liveness checks to expire.
+    const database = new Database(path, { readonly: true });
+    try { expect(database.query('SELECT count(*) AS n FROM service_lease').get()).toEqual({ n: 0 }); }
+    finally { database.close(); }
+    acquireStartupLock(path).release();
+  } finally { reservation.stop(true); }
+});

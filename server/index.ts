@@ -162,15 +162,32 @@ const createAppHandler = (): ReturnType<typeof createHandler> => {
   return appHandler;
 };
 let handler = createAppHandler();
-const server = Bun.serve({
-  hostname, port, maxRequestBodySize: Math.max(ATTACHMENT_MAX_BYTES, BACKUP_MAX_BYTES),
-  async fetch(req) {
-    if (!active) return new Response(restoring ? 'brigd восстанавливает бэкап' : 'brigd запускается', { status: 503 });
-    requests++;
-    try { return await handler(req); }
-    finally { requests--; }
-  },
-});
+function listen() {
+  try {
+    return Bun.serve({
+      hostname, port, maxRequestBodySize: Math.max(ATTACHMENT_MAX_BYTES, BACKUP_MAX_BYTES),
+      async fetch(req) {
+        if (!active) return new Response(restoring ? 'brigd восстанавливает бэкап' : 'brigd запускается', { status: 503 });
+        requests++;
+        try { return await handler(req); }
+        finally { requests--; }
+      },
+    });
+  } catch (error) {
+    // Only the socket failed. Hand the database back right away instead of
+    // leaving a lease that the next launch must prove stale.
+    store.releaseLease(lease);
+    store.close();
+    storeOpen = false;
+    startupLock.release();
+    const busy = error instanceof Error && 'code' in error && error.code === 'EADDRINUSE';
+    console.error(busy
+      ? `[brigd] Порт ${port} уже занят другим процессом. Остановите его или запустите brigd с другим значением PORT.`
+      : `[brigd] Не удалось открыть порт ${port}: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+}
+const server = listen();
 let attachmentCleanup: ReturnType<typeof setInterval> | undefined;
 function activate() {
   if (active || exiting) return;
@@ -179,7 +196,7 @@ function activate() {
   backupAutoUpdater.start();
   attachmentCleanup = setInterval(() => store.cleanupAttachments(), 60_000);
   active = true;
-  console.log(`brigd → http://127.0.0.1:${server.port} • ${mode === 'mock' ? 'ДЕМО: реальные CLI не вызываются' : 'CLI-режим'}\nБаза: ${dbPath}`);
+  console.log(`brigd → ${internalOrigin} • ${mode === 'mock' ? 'ДЕМО: реальные CLI не вызываются' : 'CLI-режим'}\nБаза: ${dbPath}`);
   if (managed) process.send?.({ type: 'brigd:active' });
 }
 let exiting = false;
