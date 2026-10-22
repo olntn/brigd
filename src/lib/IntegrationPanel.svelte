@@ -17,6 +17,8 @@
   };
   const active = $derived(['queued', 'checking', 'merging', 'cancelling'].includes(integration.status));
   const interrupted = $derived(integration.status === 'interrupted');
+  /** The candidate folder exists only while its attempt is unfinished or kept for inspection; merged, rechecked and cancelled attempts drop it. */
+  const candidateKept = $derived(['checking', 'merging', 'cancelling', 'interrupted', 'conflict', 'failed', 'blocked'].includes(integration.status));
   $effect(() => {
     const next = `${integration.id}:${integration.attempt}:${integration.status}`;
     if (next !== acknowledgementKey) { acknowledgementKey = next; acknowledged = false; }
@@ -29,7 +31,9 @@
   {#if integration.conflicts?.length}<p>Конфликтующие файлы:</p><ul class="integration-conflicts">{#each integration.conflicts as path}<li><code>{path}</code></li>{/each}</ul>{/if}
   {#if integration.checks.length}<ul class="integration-checks">{#each integration.checks as check, index}<li>Проверка {index + 1}: {check.exitCode === 0 ? 'пройдена' : `код ${check.exitCode}`}<code>{check.argv.join(' ')}</code></li>{/each}</ul>{/if}
   {#if integration.resultCommit}<p>Коммит результата: <code>{integration.resultCommit.slice(0, 12)}</code></p>{/if}
-  {#if integration.candidatePath}<details><summary>Рабочая папка объединённого кода</summary><code class="integration-path">{integration.candidatePath}</code></details>{/if}
+  {#if integration.candidatePath && candidateKept}<details><summary>Рабочая папка объединённого кода</summary><code class="integration-path">{integration.candidatePath}</code><p class="integration-note">Папка остаётся до следующей попытки или очистки хранилища.</p></details>
+  {:else if integration.status === 'merged'}<p class="integration-note">Рабочая папка запуска и кандидат удалены после переноса; ветка запуска и история сохранены.</p>
+  {:else if integration.candidatePath}<p class="integration-note">Кандидат удалён.</p>{/if}
   {#if !historical && onaction && integration.status !== 'merged'}
     {#if interrupted}<p>После перезапуска процесс проверки мог остаться запущенным. Остановите его перед повтором или отменой.</p><label class="interruption-confirm"><input type="checkbox" bind:checked={acknowledged} disabled={busy} /><span>Я проверил(а), что предыдущие процессы проверки и слияния остановлены</span></label>{/if}
     <div class="integration-actions">

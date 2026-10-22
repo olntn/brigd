@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Engine } from '../server/engine';
 import { Store, runFence } from '../server/store';
 import { GitWorkspaces } from '../server/workspaces';
@@ -60,9 +60,16 @@ test('combined candidate is checked before a clean target receives the saved res
   expect(git(root, 'log', '-1', '--format=%an', integration.sourceCommit!)).toBe('Test');
   expect(git(root, 'log', '-1', '--format=%an <%ae>', integration.resultCommit!)).toBe('Интегратор <integrator@localhost>');
   expect(readFileSync(join(root, 'src/value.txt'), 'utf8')).toBe('worker result\n');
-  expect(git(root, 'ls-files')).not.toContain('.brigd-outbox'); expect(existsSync(join(artifacts, 'answer.txt'))).toBe(true);
+  expect(git(root, 'ls-files')).not.toContain('.brigd-outbox');
   expect(store.getTask(run.taskId).status).toBe('completed');
   expect(store.getRun(run.id).workspace!.lastIntegratedCommit).toBe(integration.sourceCommit!);
+  // The merged worktree and the checked candidate are reclaimed before the merge is reported; the branch keeps the result.
+  expect(existsSync(run.workspace!.path)).toBe(false); expect(existsSync(integration.candidatePath!)).toBe(false);
+  expect(existsSync(dirname(run.workspace!.path))).toBe(false);
+  expect(store.getRun(run.id).workspace!.removedAt).toBeGreaterThan(0);
+  expect(git(root, 'rev-parse', `brigd/run-${run.id}`)).toBe(integration.sourceCommit!);
+  expect(git(root, 'worktree', 'list', '--porcelain')).not.toContain(run.workspace!.path);
+  expect(store.detail(run.taskId).logs!.map(entry => entry.summary)).toContain('Рабочая папка запуска удалена после слияния');
 });
 
 test('failed checks preserve the target and retain the candidate with failure details', async () => {
@@ -96,6 +103,8 @@ test('a conflict is handed to the built-in integrator in the same worktree and i
   expect(integrator).toMatchObject({ trigger: 'reconcile', status: 'running', workerId: null, worker: { id: 'brigd-integrator', name: 'Интегратор', provider: 'codex', model: null },
     reconcile: { sourceRunId: run.id, targetBranch: 'main', conflicts: ['src/value.txt'], depth: 1 }, workspace: { id: run.workspace!.id } });
   expect(store.integrationForRun(run.id)).toMatchObject({ status: 'conflict', conflicts: ['src/value.txt'] });
+  const conflictedCandidate = store.integrationForRun(run.id)!.candidatePath!;
+  expect(existsSync(conflictedCandidate)).toBe(true);
   expect(store.integrationForRun(run.id)!.error).toContain('передан Интегратору');
   expect(readFileSync(join(run.workspace!.path, 'src/value.txt'), 'utf8')).toContain('<<<<<<<');
   expect(store.getTask(run.taskId).status).toBe('running');
@@ -103,15 +112,21 @@ test('a conflict is handed to the built-in integrator in the same worktree and i
   const merged = await settled(integrator);
   expect(merged.status).toBe('merged'); expect(git(root, 'rev-parse', 'HEAD')).toBe(merged.resultCommit!);
   expect(readFileSync(join(root, 'src/value.txt'), 'utf8')).toBe('resolved by integrator\n');
-  expect(git(run.workspace!.path, 'log', '-1', '--format=%P', merged.sourceCommit!).split(' ')).toHaveLength(2);
-  expect(git(run.workspace!.path, 'log', '-1', '--format=%s', merged.sourceCommit!)).toBe(`brigd: объединение main в brigd/run-${run.id}`);
+  expect(git(root, 'log', '-1', '--format=%P', merged.sourceCommit!).split(' ')).toHaveLength(2);
+  expect(git(root, 'log', '-1', '--format=%s', merged.sourceCommit!)).toBe(`brigd: объединение main в brigd/run-${run.id}`);
   expect(store.getTask(run.taskId).status).toBe('completed'); expect(store.getRun(integrator.id).sessionId).toBe('integrator-session');
   expect(store.integrationForRun(run.id)!.status).toBe('conflict');
-  // The integrator's saved session can be continued like any other completed run.
+  // The shared worktree is reclaimed once the integrator's result is merged, even though the source merge stays a conflict.
+  expect(existsSync(run.workspace!.path)).toBe(false);
+  expect(existsSync(conflictedCandidate)).toBe(false);
+  expect(git(root, 'worktree', 'list', '--porcelain')).not.toContain(conflictedCandidate);
+  expect((await engine.storageOverview()).entries).toHaveLength(0);
+  // The integrator's saved session can be continued like any other completed run; its folder comes back from the branch.
   const followup = engine.followup(run.taskId, { sourceRunId: integrator.id, sourceStepIndex: null, body: 'Keep the target version of the comment.', attachmentIds: [], requestId: crypto.randomUUID() });
   expect(followup).toMatchObject({ trigger: 'followup', workerId: null, worker: { id: 'brigd-integrator' }, sessionId: 'integrator-session' });
   await until(() => agent.calls.length === 3);
   expect(agent.calls[2]!.input).toMatchObject({ sessionId: 'integrator-session', cwd: run.workspace!.cwd });
+  expect(readFileSync(join(run.workspace!.path, 'src/value.txt'), 'utf8')).toBe('resolved by integrator\n');
 });
 
 test('manual mode keeps the conflict until the HTTP hand-over, which is refused while the integrator is busy or after success', async () => {
@@ -175,7 +190,7 @@ test('an integrator prepared after the target was repaired finishes without an a
   expect(merged.status).toBe('merged'); expect(agent.calls).toHaveLength(1);
   expect(store.getRun(integrator.id)).toMatchObject({ status: 'completed', sessionId: null });
   expect(readFileSync(join(root, 'src/value.txt'), 'utf8')).toBe('worker result\n');
-  expect(git(run.workspace!.path, 'status', '--porcelain')).toBe('');
+  expect(existsSync(run.workspace!.path)).toBe(false);
 });
 
 test('dirty target files survive a blocked transfer and explicit retry rechecks before applying', async () => {
@@ -200,6 +215,27 @@ test('a target update during checks rebuilds the candidate and reruns checks aga
   const merged = await settled(run);
   expect(merged.status).toBe('merged'); expect(merged.attempt).toBe(2); expect(merged.targetCommit).toBe(target);
   expect(readFileSync(count, 'utf8')).toBe('2'); expect(readFileSync(join(root, 'new-target.txt'), 'utf8')).toBe('new version');
+});
+
+test('a repeatedly moving target retains the final blocked candidate and removes superseded attempts', async () => {
+  const count = join(folder, 'rechecks'), entered = join(folder, 'entered-'), release = join(folder, 'release-');
+  await configure([command(`const fs=require('node:fs'); const n=fs.existsSync(${JSON.stringify(count)}) ? Number(fs.readFileSync(${JSON.stringify(count)},'utf8'))+1 : 1; fs.writeFileSync(${JSON.stringify(count)},String(n)); fs.writeFileSync(${JSON.stringify(entered)}+n,'ready'); while(!fs.existsSync(${JSON.stringify(release)}+n)) await Bun.sleep(10);`)]);
+  const run = await start(); complete(run);
+  const candidates: string[] = [];
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await until(() => existsSync(entered + attempt));
+    candidates.push(store.integrationForRun(run.id)!.candidatePath!);
+    writeFileSync(join(root, 'new-target.txt'), String(attempt));
+    git(root, 'add', '.'); git(root, 'commit', '-m', `target advanced ${attempt}`);
+    writeFileSync(release + attempt, 'continue');
+  }
+  const blocked = await settled(run);
+  expect(blocked).toMatchObject({ status: 'blocked', attempt: 3, rechecks: 3 });
+  expect(existsSync(run.workspace!.path)).toBe(true);
+  expect(candidates.map(path => existsSync(path))).toEqual([false, false, true]);
+  expect((await engine.storageOverview()).entries.find(entry => entry.path === blocked.candidatePath))
+    .toMatchObject({ retained: true, reason: 'failed', optional: true });
+  expect(readFileSync(join(root, 'src/value.txt'), 'utf8')).toBe('base\n');
 });
 
 test('checking processes can be cancelled while later repository work remains queued', async () => {

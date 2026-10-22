@@ -297,7 +297,9 @@ test('settings sections use side navigation that stacks on narrow screens', asyn
   const autopilotPanel = dialog.getByRole('tabpanel', { name: 'Автопилот', exact: true });
   const backups = sections.getByRole('tab', { name: 'Бэкапы', exact: true });
   const backupsPanel = dialog.getByRole('tabpanel', { name: 'Бэкапы', exact: true });
-  await expect(sections.getByRole('tab')).toHaveText(['Общие', 'Внешний вид', 'Модели', 'Разрешения', 'Автопилот', 'Бэкапы']);
+  const storage = sections.getByRole('tab', { name: 'Хранилище', exact: true });
+  const storagePanel = dialog.getByRole('tabpanel', { name: 'Хранилище', exact: true });
+  await expect(sections.getByRole('tab')).toHaveText(['Общие', 'Внешний вид', 'Модели', 'Разрешения', 'Автопилот', 'Хранилище', 'Бэкапы']);
   await expect(general).toHaveAttribute('aria-selected', 'true');
   await expect(generalPanel.getByRole('heading', { name: 'Общие', exact: true })).toBeVisible();
   await expect(generalPanel.getByLabel('Рабочая папка по умолчанию', { exact: true })).toBeVisible();
@@ -324,6 +326,10 @@ test('settings sections use side navigation that stacks on narrow screens', asyn
   await expect(backups).toBeFocused();
   await expect(backups).toHaveAttribute('aria-selected', 'true');
   await expect(backupsPanel.getByRole('heading', { name: 'Бэкапы', exact: true })).toBeVisible();
+  await page.keyboard.press('ArrowUp');
+  await expect(storage).toBeFocused();
+  await expect(storage).toHaveAttribute('aria-selected', 'true');
+  await expect(storagePanel.getByRole('heading', { name: 'Хранилище', exact: true })).toBeVisible();
   await page.keyboard.press('ArrowUp');
   await expect(autopilot).toBeFocused();
   await expect(autopilot).toHaveAttribute('aria-selected', 'true');

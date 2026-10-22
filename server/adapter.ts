@@ -191,6 +191,7 @@ export function buildPrompt(input: AgentInput): string {
       '', 'EXECUTION WORKSPACE (JSON-ENCODED):',
       JSON.stringify({ cwd: input.workspace.cwd, branch: input.workspace.branch, baseCommit: input.workspace.baseCommit }),
       'This work has its own Git worktree. Keep project changes in this workspace and its branch. Results remain here for review and integration. Do not modify other task branches or merge into the shared target branch. Never commit .brigd-inputs-* or .brigd-outbox-* task artifacts. This workspace grants no additional native permissions.',
+      ...(input.workspace.recreatedAt ? [`The folder was recreated from branch ${input.workspace.branch} on ${new Date(input.workspace.recreatedAt).toISOString()} after its previous copy was reclaimed. Untracked and ignored files from the earlier session (installed dependencies, .env files, build output, materialised attachments) are absent unless restored since; reinstall dependencies and re-read attachments through the task tools when needed.`] : []),
     ] : []),
     ...(instructions.length ? [
       '',

@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Run, WorkspaceSnapshot } from '../src/lib/types';
+import { gitExit, gitOutput, inside, isRegistered, ownedWorktree, removeTree } from './workspace-storage';
 
 export class WorkspaceError extends Error {}
 export interface RepositoryLocation {
@@ -81,12 +82,38 @@ export class GitWorkspaces implements WorkspaceProvider {
       throw new WorkspaceError('Исходный репозиторий изменён. Восстановите рабочее окружение перед продолжением.');
     }
     if (workspace.mode === 'direct') return;
+    if (workspace.removedAt && existsSync(workspace.path) && !isRegistered(workspace.repositoryId, workspace.path)) {
+      // Leftovers of a removal that stopped halfway: Git already forgot the folder, so it is cleared before the recreation below.
+      const debris = basename(workspace.path) === workspace.id && inside(resolve(workspace.path, '..'), workspace.path) && !lstatSync(workspace.path).isSymbolicLink() &&
+        (!existsSync(join(workspace.path, '.git')) || !!ownedWorktree(workspace.path, [workspace.repositoryId]));
+      if (!debris) throw new WorkspaceError('Сохранённый worktree изменён или относится к другому репозиторию. Восстановите рабочее окружение перед продолжением.');
+      try { removeTree(workspace.path); } catch { throw new WorkspaceError('Не удалось убрать остатки удалённой рабочей папки. Удалите её вручную и повторите.'); }
+    }
     if (!existsSync(workspace.path)) {
-      if (workspace.prepared) throw new WorkspaceError('Сохранённый worktree отсутствует. Восстановите его; продолжение в новой папке не заменяет прежнюю сессию.');
+      if (workspace.prepared && !workspace.removedAt) throw new WorkspaceError('Сохранённый worktree отсутствует. Восстановите его; продолжение в новой папке не заменяет прежнюю сессию.');
       mkdirSync(resolve(workspace.path, '..'), { recursive: true, mode: 0o700 });
-      const child = Bun.spawn(['git', '-C', workspace.repositoryRoot, 'worktree', 'add', '-b', workspace.branch!, workspace.path, workspace.baseCommit!],
-        { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore', timeout: 60_000 });
-      if (await child.exited !== 0) throw new WorkspaceError('Не удалось создать Git worktree. Проверьте место на диске и нативные разрешения Git; рабочая папка проекта сохранена.');
+      const spawnGit = async (args: string[]) => await gitExit(['-C', workspace.repositoryRoot, ...args]) === 0;
+      if (workspace.removedAt) {
+        // The folder was reclaimed after a merge: every result is committed on its branch, so the same path comes back from there.
+        // Only brigd's own stale registration is cleared; other worktrees of the repository are never pruned.
+        if (isRegistered(workspace.repositoryId, workspace.path)) await gitExit(['--git-dir', workspace.repositoryId, 'worktree', 'remove', '--force', '--force', workspace.path]);
+        const listing = gitOutput(['--git-dir', workspace.repositoryId, 'worktree', 'list', '--porcelain', '-z']) ?? '';
+        if (listing.split('\0').includes(`branch refs/heads/${workspace.branch}`)) throw new WorkspaceError(`Ветка ${workspace.branch} уже открыта в другом worktree. Закройте её там, чтобы воссоздать рабочую папку запуска.`);
+        const branchExists = gitOutput(['--git-dir', workspace.repositoryId, 'rev-parse', '--verify', '--quiet', `refs/heads/${workspace.branch}`]) !== null;
+        // A branch deleted by hand is rebuilt from the last merged commit, which was stored together with the removal.
+        const created = await spawnGit(branchExists ? ['worktree', 'add', workspace.path, workspace.branch!]
+          : ['worktree', 'add', '-b', workspace.branch!, workspace.path, workspace.lastIntegratedCommit ?? workspace.baseCommit!]);
+        if (!created) throw new WorkspaceError(`Не удалось заново создать Git worktree из ветки ${workspace.branch} после очистки. Проверьте место на диске и состояние ветки.`);
+        if (workspace.lastIntegratedCommit && git(workspace.path, ['rev-parse', '--verify', 'HEAD^{commit}']) !== workspace.lastIntegratedCommit) {
+          // The fresh folder goes again, so the next attempt re-evaluates the branch instead of resuming on the wrong tree.
+          await gitExit(['--git-dir', workspace.repositoryId, 'worktree', 'remove', '--force', '--force', workspace.path]);
+          throw new WorkspaceError(`Ветка ${workspace.branch} указывает не на перенесённый коммит ${workspace.lastIntegratedCommit.slice(0, 12)}; сохранённая сессия работала с ним. Верните ветку на этот коммит или начните новый запуск.`);
+        }
+        // The project subdirectory may hold only ignored files, which the branch cannot bring back.
+        if (inside(workspace.path, workspace.cwd)) mkdirSync(workspace.cwd, { recursive: true });
+      } else if (!await spawnGit(['worktree', 'add', '-b', workspace.branch!, workspace.path, workspace.baseCommit!])) {
+        throw new WorkspaceError('Не удалось создать Git worktree. Проверьте место на диске и нативные разрешения Git; рабочая папка проекта сохранена.');
+      }
     }
     const located = repository(workspace.path);
     if (located.repositoryId !== workspace.repositoryId || located.repositoryRoot !== canonical(workspace.path) ||

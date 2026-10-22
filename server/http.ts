@@ -239,6 +239,14 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         engine.store.updateGeneralSettings(value);
         return json(generalSettings());
       }
+      if (path === '/api/settings/storage' && method === 'GET') return json(await engine.storageOverview());
+      if (path === '/api/settings/storage/cleanup' && method === 'POST') {
+        const value = await body(req);
+        if (Object.keys(value).some(key => key !== 'includeCandidates') || (value.includeCandidates !== undefined && typeof value.includeCandidates !== 'boolean')) {
+          throw new AppError('Допускается только поле includeCandidates типа boolean');
+        }
+        return json(await engine.cleanupStorage({ includeCandidates: value.includeCandidates === true }));
+      }
       if (path === '/api/settings/autopilot' && method === 'GET') return json(engine.getAutopilotSettings());
       if (path === '/api/settings/autopilot' && method === 'PATCH') {
         const value = await body(req, 128_128);

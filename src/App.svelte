@@ -6,6 +6,7 @@
   import GeneralSettings from './lib/GeneralSettings.svelte';
   import AutopilotSettings from './lib/AutopilotSettings.svelte';
   import Backups from './lib/Backups.svelte';
+  import StorageSettings from './lib/StorageSettings.svelte';
   import Instructions from './lib/Instructions.svelte';
   import Docs from './lib/Docs.svelte';
   import DocPagePicker from './lib/DocPagePicker.svelte';
@@ -73,7 +74,8 @@
   let autopilotSettingsReadSequence: number | null = null;
   let autopilotSettingsMutationPending = $state(false);
   let backupsMutationPending = $state(false);
-  let settingsMutationPending = $derived(modelMutationPending || generalSettingsMutationPending || autopilotSettingsMutationPending || backupsMutationPending);
+  let storageMutationPending = $state(false);
+  let settingsMutationPending = $derived(modelMutationPending || generalSettingsMutationPending || autopilotSettingsMutationPending || backupsMutationPending || storageMutationPending);
   let integrationChecksMissing = $derived(info?.mode === 'cli' && !autopilotSettings?.integrationChecks?.length);
   const integrationChecksRequired = 'Сначала задайте BRIGD_INTEGRATION_CHECKS в Настройки → Автопилот.';
   let loading = $state(true);
@@ -111,6 +113,7 @@
     { id: 'models', label: 'Модели', icon: 'spark' },
     { id: 'permissions', label: 'Разрешения', icon: 'lock' },
     { id: 'autopilot', label: 'Автопилот', icon: 'moon' },
+    { id: 'storage', label: 'Хранилище', icon: 'folder' },
     { id: 'backups', label: 'Бэкапы', icon: 'archive' },
   ] as const;
   let settingsSection = $state<(typeof settingsSections)[number]['id']>('general');
@@ -938,6 +941,11 @@
   <span class="status-badge status-{status}"><span class="status-dot"></span>{labels[status]}</span>
 {/snippet}
 
+{#snippet workspaceNote(run: Run)}
+  {#if run.workspace?.mode === 'worktree' && (run.workspace.removedAt || run.workspace.recreatedAt)}
+    <p class="workspace-note">{#if run.workspace.removedAt}{run.workspace.removedBy === 'cleanup' ? 'Папка запуска удалена при очистке хранилища' : 'Папка запуска удалена после переноса результата'} {dateTime(run.workspace.removedAt)}.{#if run.status === 'completed' && run.sessionId && selectedTask?.archivedAt === null} Ветка {run.workspace.branch} сохранена; ответ или дополнительный запрос создаст папку заново без неотслеживаемых файлов прежней сессии.{/if}{:else}Папка запуска создана заново из ветки {run.workspace.branch} {dateTime(run.workspace.recreatedAt!)}; неотслеживаемые файлы прежней сессии в ней отсутствуют.{/if}</p>
+  {/if}
+{/snippet}
 {#snippet instructionSnapshot(run: Run)}
   <details class="run-instruction-snapshot">
     <summary>Общие инструкции запуска</summary>
@@ -1153,6 +1161,7 @@
         <details class="workflow-template" open={!currentRun}><summary>{currentRun && selectedTask.schedule === 'interval' ? 'План следующего запуска по расписанию' : 'План задачи'}</summary><p class="workflow-help">Все работники используют общую рабочую папку, цель задачи и общие инструкции. Этапы идут по порядку.</p><ol>{#each selectedTask.steps as step}{@const worker = workers.find(worker => worker.id === step.workerId)}<li><strong>{step.title}</strong><div class="workflow-template-worker">{#if worker}<WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={36} /><span>{worker.name}{#if worker.description?.trim()}<small class="worker-description">{worker.description}</small>{/if}</span>{:else}<span>Работник недоступен</span>{/if}</div><p>{step.instruction}</p></li>{/each}</ol></details>
       {/if}
       {#if currentRun}<div class="current-run-instructions">{@render instructionSnapshot(currentRun)}</div>{/if}
+      {#if currentRun}{@render workspaceNote(currentRun)}{/if}
       {#if currentRun?.integration}<IntegrationPanel integration={currentRun.integration} busy={taskBusy} launchBlocked={integrationChecksMissing} historical={selectedTask.archivedAt !== null} onaction={(action, acknowledgement) => integrationAction(currentRun!.id, action, acknowledgement)} />
       {:else if currentRun?.reconcile && !activeStatuses.includes(currentRun.status) && sourceIntegration}<IntegrationPanel integration={sourceIntegration} busy={taskBusy} launchBlocked={integrationChecksMissing} historical={selectedTask.archivedAt !== null} onaction={(action, acknowledgement) => integrationAction(currentRun!.reconcile!.sourceRunId, action, acknowledgement)} />{/if}
       {#if currentRun?.error}<div class="run-error"><Icon name="alert" size={17} /><div><strong>{labels[currentRun.status]}</strong><p>{currentRun.error}</p></div></div>{/if}
@@ -1185,7 +1194,7 @@
       {:else if detailTab === 'changes'}
         <div id="changes-panel" tabindex="0" role="tabpanel" aria-labelledby="changes-tab" class="changes-panel">{#key selectedTask.id}<CodeDiff runs={detail.runs} />{/key}</div>
       {:else}
-        <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name={run.followup ? "message" : run.reconcile ? "refresh" : "play"} size={14} />{run.followup ? "Дополнительный запрос" : run.reconcile ? "Разрешение конфликта" : "Запуск"} {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{#if run.worker}{@render workerBadge(run.worker, true)}{:else}{@render providerBadge(run.provider, true)}{/if}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'followup' ? 'Из обсуждения' : run.trigger === 'reconcile' ? 'Конфликт слияния' : run.trigger === 'schedule' ? 'По расписанию' : run.trigger === 'autopilot' ? 'Автопилот' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.followup}<div class="run-followup-request"><strong>Запрос{#if followupStage(run)} · Этап {followupStage(run)!.index + 1}: {followupStage(run)!.title}{/if}</strong><p>{run.followup.request || 'Запрос с вложениями'}</p></div>{:else if run.reconcile}<div class="run-followup-request"><strong>Целевая ветка: {run.reconcile.targetBranch}</strong>{#if run.reconcile.conflicts.length}<ul class="integration-conflicts">{#each run.reconcile.conflicts as path}<li><code>{path}</code></li>{/each}</ul>{/if}</div>{/if}{#if run.reconcile}<div class="run-followup-request"><strong>Целевая ветка {run.reconcile.targetBranch}{#if run.reconcile.depth > 1} · попытка {run.reconcile.depth}{/if}</strong>{#if run.reconcile.conflicts.length}<p>{run.reconcile.conflicts.join('\n')}</p>{/if}</div>{/if}{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}{#if run.steps?.length}<WorkflowChecklist {run} />{:else if run.followup?.workflow?.steps.length}<WorkflowChecklist {run} historical />{/if}{@render instructionSnapshot(run)}{#if run.integration}<IntegrationPanel integration={run.integration} historical />{/if}<div class="run-details">Ход {run.turn}{#if run.worker}<span> · Усилия: {effortLabel(run.worker.effort)}</span>{/if}{#if runUltracode(run)}<span> · ultracode</span>{/if}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
+        <div id="history-panel" tabindex="0" role="tabpanel" aria-labelledby="history-tab" class="history-panel">{#each detail.runs as run (run.id)}<article class="run-entry"><div class="run-heading"><span class="run-number"><Icon name={run.followup ? "message" : run.reconcile ? "refresh" : "play"} size={14} />{run.followup ? "Дополнительный запрос" : run.reconcile ? "Разрешение конфликта" : "Запуск"} {run.id.slice(0, 6)}</span>{@render statusBadge(run.status)}</div><div class="run-meta">{#if run.worker}{@render workerBadge(run.worker, true)}{:else}{@render providerBadge(run.provider, true)}{/if}<span>·</span><span>{dateTime(run.startedAt)}</span><span>·</span><span>{run.trigger === 'followup' ? 'Из обсуждения' : run.trigger === 'reconcile' ? 'Конфликт слияния' : run.trigger === 'schedule' ? 'По расписанию' : run.trigger === 'autopilot' ? 'Автопилот' : 'Вручную'}</span><span>·</span><span>{elapsed(run)}</span>{#if run.mock}<span class="demo-badge">MOCK</span>{/if}</div>{#if run.followup}<div class="run-followup-request"><strong>Запрос{#if followupStage(run)} · Этап {followupStage(run)!.index + 1}: {followupStage(run)!.title}{/if}</strong><p>{run.followup.request || 'Запрос с вложениями'}</p></div>{:else if run.reconcile}<div class="run-followup-request"><strong>Целевая ветка: {run.reconcile.targetBranch}</strong>{#if run.reconcile.conflicts.length}<ul class="integration-conflicts">{#each run.reconcile.conflicts as path}<li><code>{path}</code></li>{/each}</ul>{/if}</div>{/if}{#if run.reconcile}<div class="run-followup-request"><strong>Целевая ветка {run.reconcile.targetBranch}{#if run.reconcile.depth > 1} · попытка {run.reconcile.depth}{/if}</strong>{#if run.reconcile.conflicts.length}<p>{run.reconcile.conflicts.join('\n')}</p>{/if}</div>{/if}{#if run.summary}<p>{run.summary}</p>{/if}{#if run.error}<p class="run-history-error">{run.error}</p>{/if}{#if run.steps?.length}<WorkflowChecklist {run} />{:else if run.followup?.workflow?.steps.length}<WorkflowChecklist {run} historical />{/if}{@render instructionSnapshot(run)}{@render workspaceNote(run)}{#if run.integration}<IntegrationPanel integration={run.integration} historical />{/if}<div class="run-details">Ход {run.turn}{#if run.worker}<span> · Усилия: {effortLabel(run.worker.effort)}</span>{/if}{#if runUltracode(run)}<span> · ultracode</span>{/if}{#if run.sessionId}<span title={run.sessionId}> · Сессия {run.sessionId.slice(0, 14)}…</span>{/if}</div></article>{:else}<div class="conversation-empty"><Icon name="history" size={25} /><strong>Запусков пока нет</strong><p>Запустите задачу, чтобы увидеть её историю.</p></div>{/each}</div>
       {/if}
       {#if runCanResume && !interruptedWithoutSession}
         <form class="resume-panel" hidden={detailTab !== 'conversation'} onpaste={(event) => answerComposer?.handlePaste(event)} onsubmit={(event) => { event.preventDefault(); if (selectedTask && (answer.trim() || answerAttachmentCount || currentRun?.status === 'interrupted')) void act(selectedTask, 'resume', answer); }}>
@@ -1277,6 +1286,9 @@
       </div>
       <div id="settings-autopilot-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-autopilot-tab" hidden={settingsSection !== 'autopilot'}>
         {#if settingsOpen}<AutopilotSettings settings={autopilotSettings} loading={autopilotSettingsLoading} error={autopilotSettingsError} retry={() => { void loadAutopilotSettings(); }} onchange={autopilotSettingsChanged} onmutation={autopilotSettingsMutationStarted} bind:busy={autopilotSettingsMutationPending} />{/if}
+      </div>
+      <div id="settings-storage-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-storage-tab" hidden={settingsSection !== 'storage'}>
+        {#if settingsOpen}<StorageSettings active={settingsSection === 'storage'} bind:busy={storageMutationPending} />{/if}
       </div>
       <div id="settings-backups-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-backups-tab" hidden={settingsSection !== 'backups'}>
         {#if settingsOpen}<Backups active={settingsSection === 'backups'} bind:busy={backupsMutationPending} />{/if}

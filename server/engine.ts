@@ -1,7 +1,7 @@
-import type { AutopilotInput, AutopilotOverview, AutopilotSettings, CliAccessMode, CliAccessSettings, FollowupInput, Integration, Run } from '../src/lib/types';
+import type { AutopilotInput, AutopilotOverview, AutopilotSettings, CliAccessMode, CliAccessSettings, FollowupInput, Integration, Run, StorageCleanupResult, StorageOverview } from '../src/lib/types';
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
 import { startAgent, buildPrompt, type AgentHandle, type AgentInput, type AgentCallbacks } from './adapter';
-import { AppError, Store, runFence, type RunFence } from './store';
+import { AppError, INTEGRATION_RECHECK_LIMIT, Store, runFence, type RunFence } from './store';
 import { UsageLimitError, validateEnvelope, validateSessionId } from './protocol';
 import { workflowContext } from './workflows';
 import { runUltracode } from '../src/lib/workers';
@@ -11,6 +11,7 @@ import { dirname, join, resolve } from 'node:path';
 import { DirectWorkspaces, GitWorkspaces, WorkspaceError, type RepositoryLocation, type WorkspaceProvider } from './workspaces';
 import { GitIntegrator, type Integrator } from './integration';
 import { RunCodeDiffs } from './code-diff';
+import { UNAVAILABLE_STORAGE, WorkspaceStorage, type CleanupOptions } from './workspace-storage';
 
 export type AgentFactory = (input: AgentInput, callbacks: AgentCallbacks) => AgentHandle;
 export type TaskBridgeFactory = (store: Store, run: Run, fence: RunFence, appAccess?: TaskAppAccess) => ReturnType<typeof createTaskBridge>;
@@ -20,10 +21,15 @@ export interface EngineOptions { workspaces?: WorkspaceProvider; maxParallel?: n
 interface Launch { taskId: string; handle: AgentHandle | null; fence: RunFence; cancelRequested: boolean; bridge?: ReturnType<typeof createTaskBridge>; settled?: Promise<void>; }
 export class Engine {
   readonly codeDiffs: RunCodeDiffs;
+  /** Worktree and candidate folders under the workspaces root; null when no Git worktrees are created. */
+  readonly storage: WorkspaceStorage | null;
   private handles = new Map<string, Launch>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private closing = false;
   private draining = false;
+  /** While folders are being removed no queued work may claim a slot, so nothing prepares a worktree that is going away. */
+  private suspendedDrains = 0;
+  private cleaning: Promise<StorageCleanupResult> | null = null;
   private readonly workspaces: WorkspaceProvider;
   private readonly maxParallel: number;
   private readonly maxPerRepository: number;
@@ -42,6 +48,7 @@ export class Engine {
     this.configuredCliAccess = options.cliAccess ?? 'standard';
     this.workspaces = options.workspaces ?? (mock || factory !== startAgent ? new DirectWorkspaces() : new GitWorkspaces(join(dirname(resolve(store.db.filename)), 'workspaces'), () => this.integrationChecks()));
     this.requiresIntegrationChecks = !mock && this.workspaces instanceof GitWorkspaces;
+    this.storage = this.workspaces instanceof GitWorkspaces ? new WorkspaceStorage(this.workspaces.root, store) : null;
     this.maxParallel = options.maxParallel ?? 4;
     this.maxPerRepository = options.maxPerRepository ?? 1;
     this.integrator = options.integrator ?? new GitIntegrator(() => this.integrationChecks());
@@ -81,6 +88,18 @@ export class Engine {
     }
     this.store.setIntegrationChecks(input.integrationChecks);
     return this.getAutopilotSettings();
+  }
+  storageOverview(): Promise<StorageOverview> {
+    return this.storage ? this.storage.overview() : Promise.resolve({ ...UNAVAILABLE_STORAGE, scannedAt: Date.now() });
+  }
+  /** Reclaims merged, cancelled, superseded and unknown folders; one cleanup at a time, with the scheduler paused meanwhile. */
+  cleanupStorage(options: CleanupOptions = {}): Promise<StorageCleanupResult> {
+    if (this.closing) throw new AppError('Сервис останавливается', 503);
+    if (!this.storage) throw new AppError('В этом режиме отдельные worktree не создаются; очищать нечего.', 409);
+    if (this.cleaning) throw new AppError('Очистка уже выполняется. Дождитесь её завершения.', 409);
+    this.suspendedDrains++;
+    this.cleaning = this.storage.cleanup(options).finally(() => { this.cleaning = null; this.suspendedDrains--; this.drain(); });
+    return this.cleaning;
   }
   private assertIntegrationChecks(run?: Run) {
     if (!this.mock && (this.requiresIntegrationChecks || run?.workspace?.mode === 'worktree') && !this.integrationChecks()?.length) {
@@ -216,7 +235,7 @@ export class Engine {
     }
   }
   private drain() {
-    if (this.closing || this.draining) return;
+    if (this.closing || this.draining || this.suspendedDrains > 0) return;
     if (this.requiresIntegrationChecks && !this.integrationChecks()?.length) return;
     this.draining = true;
     try {
@@ -301,11 +320,33 @@ export class Engine {
   }
   private integrateJob(job: Integration) {
     const abort = new AbortController();
-    const settled = this.integrator.execute(this.store.getRun(job.runId), job, abort.signal,
-      patch => { this.store.updateIntegration(job.id, job.attempt, patch); })
-      .then(result => {
-        const finished = this.store.updateIntegration(job.id, job.attempt, result, true);
-        if (finished?.status === 'conflict' && this.autoReconcile && !this.closing) this.autoReconcileConflict(finished);
+    const storage = this.storage;
+    // Folders are reclaimed with the scheduler paused and before the final status is stored, so the repository stays reserved
+    // in the database until the removal is over; a continuation created later recreates the worktree from its branch.
+    const settled = (storage && !this.closing ? storage.discardOlderCandidates(this.store.getRun(job.runId), job).catch(() => {}) : Promise.resolve())
+      .then(() => this.integrator.execute(this.store.getRun(job.runId), job, abort.signal, patch => { this.store.updateIntegration(job.id, job.attempt, patch); }))
+      .then(async result => {
+        this.suspendedDrains++;
+        try {
+          const run = this.store.getRun(job.runId);
+          const current = this.store.integrationForRun(job.runId);
+          let released: Awaited<ReturnType<WorkspaceStorage['settleAttempt']>> = null;
+          if (storage && !this.closing && current?.attempt === job.attempt && ['checking', 'merging', 'cancelling'].includes(current.status)) {
+            // The status decided here is the one updateIntegration is about to store: a merge wins over a late cancellation,
+            // any other result overtaken by a cancellation ends cancelled, and the last recheck of a moving target ends blocked.
+            const status = result.status === 'merged' ? 'merged' : current.status === 'cancelling' ? 'cancelled'
+              : result.status === 'queued' && (current.rechecks ?? 0) + 1 >= INTEGRATION_RECHECK_LIMIT ? 'blocked' : result.status;
+            released = await storage.settleAttempt(run, { ...current, ...result, status }).catch(error => {
+              const message = error instanceof Error ? error.message : String(error);
+              console.error('[brigd] Не удалось освободить папки после слияния:', message);
+              this.store.log(run.taskId, run.id, { kind: 'integration', summary: 'Не удалось освободить рабочие папки после слияния', details: ['Папки можно удалить в настройках, раздел «Хранилище».'], error: message.slice(0, 1000) });
+              return null;
+            });
+          }
+          const finished = this.store.updateIntegration(job.id, job.attempt, result, true);
+          if (released) this.store.log(run.taskId, run.id, { kind: 'integration', ...released });
+          if (finished?.status === 'conflict' && this.autoReconcile && !this.closing) this.autoReconcileConflict(finished);
+        } finally { this.suspendedDrains--; }
       })
       .catch(error => { this.store.updateIntegration(job.id, job.attempt, { status: 'blocked', error: error instanceof Error ? error.message : 'Слияние остановлено' }, true); })
       .finally(() => { this.integrationHandles.delete(job.runId); this.drain(); });
@@ -467,6 +508,6 @@ export class Engine {
     for (const launch of launches) { launch.cancelRequested = true; launch.bridge?.close(); launch.handle?.cancel(); }
     const integrations = [...this.integrationHandles.values()];
     for (const integration of integrations) integration.abort.abort(new Error('Service stopped'));
-    await Promise.allSettled([...launches.map(launch => launch.settled ?? launch.handle?.result ?? Promise.resolve()), ...integrations.map(integration => integration.settled)]);
+    await Promise.allSettled([...launches.map(launch => launch.settled ?? launch.handle?.result ?? Promise.resolve()), ...integrations.map(integration => integration.settled), this.cleaning ?? Promise.resolve()]);
   }
 }

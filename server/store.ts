@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CliAccessMode, Comment, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocReference, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
+import type { IntegrationRecord, WorkspaceRun } from './workspace-storage';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { AUTOPILOT_FAILURE_LIMIT } from '../src/lib/autopilot';
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
@@ -28,6 +29,10 @@ const ATTACHMENT_COLUMNS = 'a.id,a.task_id,a.comment_id,a.run_id,a.step_index,a.
 const OPEN = "'queued','preparing','running','cancelling','waiting_input','interrupted'";
 const OCCUPIED = `(status IN (${OPEN}) OR (steps_snapshot != '[]' AND status IN ('failed','blocked')))`;
 export interface RunFence { turn: number; currentStepIndex: number | null; attemptId: string | null; }
+export interface WorkspaceRecord { snapshot: WorkspaceSnapshot; taskId: string | null; taskTitle: string | null; runs: WorkspaceRun[]; }
+const WORKSPACE_RECORD_SQL = `SELECT w.id, r.id AS run_id, r.task_id, r.status, r.started_at, i.state AS integration_state,
+  json_extract(i.snapshot, '$.updatedAt') AS integration_updated_at, t.title
+  FROM workspaces w LEFT JOIN runs r ON r.workspace_id=w.id LEFT JOIN integrations i ON i.run_id=r.id LEFT JOIN tasks t ON t.id=r.task_id`;
 export interface ExecutionRequest { runId: string; turn: number; answer: string | undefined; location: RepositoryLocation; }
 export function runFence(run: Run): RunFence {
   return { turn: run.turn, currentStepIndex: run.currentStepIndex,
@@ -46,6 +51,8 @@ function workerSnapshot(worker: Worker): WorkerSnapshot {
 const storedWorkerId = (worker: WorkerSnapshot | null | undefined): string | null => worker && !isBuiltinWorker(worker.id) ? worker.id : null;
 /** Resolved results that conflict again are reconciled once more; constant churn stops here for a human. */
 export const RECONCILE_DEPTH_LIMIT = 3;
+/** A candidate rebuilt this many times because the target kept moving stops for a human. */
+export const INTEGRATION_RECHECK_LIMIT = 3;
 function validatedModel(value: unknown): string | null {
   try { return normalizeModel(value); }
   catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректная модель'); }
@@ -1716,8 +1723,48 @@ export class Store {
     const value = JSON.parse(row.snapshot) as WorkspaceSnapshot;
     if (value.id !== id || !['worktree', 'direct'].includes(value.mode) || typeof value.prepared !== 'boolean' ||
         ![value.repositoryId, value.repositoryRoot, value.projectCwd, value.path, value.cwd].every(path => typeof path === 'string' && isAbsolute(path) && !path.includes('\0')) ||
-        (value.mode === 'worktree' && (typeof value.branch !== 'string' || !/^brigd\/run-[a-zA-Z0-9-]+$/.test(value.branch) || typeof value.baseCommit !== 'string' || !/^[a-f0-9]{40,64}$/.test(value.baseCommit)))) invalidSnapshot();
+        (value.mode === 'worktree' && (typeof value.branch !== 'string' || !/^brigd\/run-[a-zA-Z0-9-]+$/.test(value.branch) || typeof value.baseCommit !== 'string' || !/^[a-f0-9]{40,64}$/.test(value.baseCommit))) ||
+        [value.removedAt, value.recreatedAt].some(stamp => stamp != null && (!Number.isSafeInteger(stamp) || stamp <= 0)) ||
+        (value.removedBy != null && !['merge', 'cleanup'].includes(value.removedBy))) invalidSnapshot();
     return value;
+  }
+  /** Every saved worktree with its task and the chronological statuses of the runs sharing it; unreadable snapshots are skipped. */
+  listWorkspaceRecords(): WorkspaceRecord[] {
+    return this.workspaceRecords(this.db.query(`${WORKSPACE_RECORD_SQL} ORDER BY w.rowid, r.started_at, r.rowid`).all() as Row[]);
+  }
+  workspaceRecord(id: string): WorkspaceRecord | null {
+    return this.workspaceRecords(this.db.query(`${WORKSPACE_RECORD_SQL} WHERE w.id=? ORDER BY r.started_at, r.rowid`).all(id) as Row[])[0] ?? null;
+  }
+  private workspaceRecords(rows: Row[]): WorkspaceRecord[] {
+    const records = new Map<string, WorkspaceRecord>();
+    for (const row of rows) {
+      let record = records.get(row.id);
+      if (!record) {
+        let snapshot: WorkspaceSnapshot;
+        try { snapshot = this.getWorkspace(row.id); } catch { continue; }
+        record = { snapshot, taskId: null, taskTitle: null, runs: [] };
+        records.set(row.id, record);
+      }
+      if (!row.run_id) continue;
+      record.taskId ??= row.task_id; record.taskTitle ??= row.title ?? null;
+      record.runs.push({ id: row.run_id, status: row.status, integrationStatus: row.integration_state ?? null, integrationUpdatedAt: row.integration_updated_at ?? null, startedAt: row.started_at });
+    }
+    return [...records.values()];
+  }
+  listIntegrationRecords(): IntegrationRecord[] {
+    return (this.db.query('SELECT snapshot FROM integrations ORDER BY seq').all() as Row[]).map(row => {
+      const job = JSON.parse(row.snapshot) as Integration;
+      return { id: job.id, runId: job.runId, status: job.status, attempt: job.attempt, candidatePath: job.candidatePath ?? null, updatedAt: job.updatedAt };
+    });
+  }
+  /** Records that brigd removed (or is removing) the folder on purpose, so a later continuation may recreate it from the branch.
+   * The merged commit is stored in the same write, so a crash between the two never recreates an older tree. */
+  markWorkspaceRemoved(id: string, now = Date.now(), lastIntegratedCommit: string | null = null, removedBy: 'merge' | 'cleanup' = 'merge'): void {
+    this.db.transaction(() => {
+      let workspace: WorkspaceSnapshot;
+      try { workspace = this.getWorkspace(id); } catch { return; }
+      this.db.query('UPDATE workspaces SET snapshot=? WHERE id=?').run(JSON.stringify({ ...workspace, removedAt: now, removedBy, ...(lastIntegratedCommit ? { lastIntegratedCommit } : {}) }), id);
+    }).immediate();
   }
   enqueueExecution(run: Run, location: RepositoryLocation, answer?: string): Run {
     return this.db.transaction(() => {
@@ -1776,7 +1823,11 @@ export class Store {
     return this.db.transaction(() => {
       const run = this.getRun(runId);
       if (run.status !== 'preparing' || !matchesFence(run, fence)) return null;
-      if (run.workspace) this.db.query('UPDATE workspaces SET snapshot=? WHERE id=?').run(JSON.stringify({ ...run.workspace, prepared: true }), run.workspace.id);
+      if (run.workspace) {
+        // A folder that was reclaimed is back now; remember when, so the agent and the card can tell what is missing in it.
+        const recreated = run.workspace.removedAt ? { recreatedAt: Date.now() } : {};
+        this.db.query('UPDATE workspaces SET snapshot=? WHERE id=?').run(JSON.stringify({ ...run.workspace, prepared: true, removedAt: null, removedBy: null, ...recreated }), run.workspace.id);
+      }
       this.db.query("UPDATE execution_requests SET state='running' WHERE run_id=? AND turn=? AND state='preparing'").run(runId, fence.turn);
       this.executionStatus(run, 'running');
       return this.getRun(runId);
@@ -1854,11 +1905,12 @@ export class Store {
       const job = JSON.parse(row.snapshot) as Integration;
       if (job.attempt !== attempt || !['checking', 'merging', 'cancelling'].includes(job.status)) return job;
       if (job.status === 'cancelling' && !finish) return job;
+      // A cancellation that arrives after the target was already updated cannot undo the merge, so the merge wins.
       const next: Integration = { ...job, ...patch, id: job.id, runId: job.runId, repositoryId: job.repositoryId, attempt: job.attempt, updatedAt: Date.now(),
-        ...(job.status === 'cancelling' ? { status: 'cancelled', error: 'Слияние отменено. Уже выполненные Git-операции не откатываются.' } : {}) };
+        ...(job.status === 'cancelling' && patch.status !== 'merged' ? { status: 'cancelled', error: 'Слияние отменено. Уже выполненные Git-операции не откатываются.' } : {}) };
       if (next.status === 'queued') {
         next.rechecks = (job.rechecks ?? 0) + 1;
-        if (next.rechecks >= 3) Object.assign(next, { status: 'blocked', error: 'Целевая ветка неоднократно изменялась во время проверки. Повторите слияние после завершения изменений.' });
+        if (next.rechecks >= INTEGRATION_RECHECK_LIMIT) Object.assign(next, { status: 'blocked', error: 'Целевая ветка неоднократно изменялась во время проверки. Повторите слияние после завершения изменений.' });
       }
       this.writeIntegration(next);
       if (finish) {

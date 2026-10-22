@@ -260,6 +260,47 @@ export interface WorkspaceSnapshot {
   prepared: boolean;
   checkCommands?: string[][];
   lastIntegratedCommit?: string | null;
+  /** When brigd itself removed the worktree folder; a continuation recreates it from the branch. */
+  removedAt?: number | null;
+  /** What removed it: the merge of its result, or the storage clean-up. */
+  removedBy?: 'merge' | 'cleanup' | null;
+  /** When a continuation last recreated the folder from the branch; untracked and ignored files from before are gone. */
+  recreatedAt?: number | null;
+}
+/** Why a folder under the workspaces root is kept or may be reclaimed. */
+export type StorageReason = 'active' | 'interrupted' | 'conflict' | 'failed' | 'unmerged' | 'submodules' | 'moved' | 'foreign' | 'merged' | 'cancelled' | 'stale' | 'unknown';
+export interface StorageEntry {
+  path: string;
+  kind: 'worktree' | 'candidate' | 'unknown';
+  bytes: number;
+  files: number;
+  retained: boolean;
+  reason: StorageReason;
+  /** Retained by default, but the clean-up may take it when asked to include candidates of failed checks. */
+  optional?: boolean;
+  runId: string | null;
+  taskId: string | null;
+  taskTitle: string | null;
+  /** When the latest run of the folder started. */
+  startedAt: number | null;
+}
+export interface StorageOverview {
+  /** false in demo mode and for injected providers: no worktrees are created, nothing to reclaim. */
+  available: boolean;
+  /** Why the folder cannot be managed, when it cannot. */
+  note: string | null;
+  root: string | null;
+  totalBytes: number;
+  reclaimableBytes: number;
+  retainedBytes: number;
+  entries: StorageEntry[];
+  scannedAt: number;
+}
+export interface StorageCleanupResult {
+  removed: number;
+  freedBytes: number;
+  failures: { path: string; error: string }[];
+  overview: StorageOverview;
 }
 export type IntegrationStatus = 'queued' | 'checking' | 'merging' | 'cancelling' | 'merged' | 'conflict' | 'failed' | 'blocked' | 'interrupted' | 'cancelled';
 export interface Integration {
