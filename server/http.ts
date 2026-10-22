@@ -27,6 +27,8 @@ export interface HttpOptions { port: number; dev?: boolean; root?: string; start
   restoreBackup?: (backups: BackupManager, id: string) => Promise<void>;
   /** Recheck an invocation-scoped internal caller immediately before writes. */
   authorizeMutation?: () => void;
+  /** Authenticated external MCP, independent of task invocations. */
+  mcp?: (req: Request) => Promise<Response>;
 }
 const JSON_LIMIT = 32_768;
 const securityHeaders = {
@@ -50,7 +52,7 @@ async function readBody(req: Request, limit: number): Promise<Uint8Array> {
   }
   return Buffer.concat(chunks);
 }
-async function readJsonBody(req: Request, limit = JSON_LIMIT): Promise<Record<string, unknown>> {
+export async function readJsonBody(req: Request, limit = JSON_LIMIT): Promise<Record<string, unknown>> {
   if (req.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json') throw new AppError('Нужен Content-Type: application/json', 415);
   const bytes = await readBody(req, limit);
   let parsed: unknown;
@@ -88,6 +90,9 @@ export function createHandler(engine: Engine, options: HttpOptions) {
       const origin = req.headers.get('origin');
       if (origin && !origins.has(origin)) throw new AppError('Недопустимый Origin', 403);
       if (req.headers.get('sec-fetch-site') === 'cross-site') throw new AppError('Межсайтовые запросы запрещены', 403);
+      if (url.pathname === '/mcp' || url.pathname === '/mcp/') {
+        return options.mcp ? await options.mcp(req) : json({ error: 'Внешний MCP отключён. Задайте BRIGD_MCP_TOKEN и перезапустите brigd.' }, 404);
+      }
       if (!['GET', 'HEAD'].includes(req.method) && (!origin || !origins.has(origin))) throw new AppError('Изменения разрешены только из локального интерфейса (Origin обязателен)', 403);
       const path = url.pathname;
       const method = req.method;

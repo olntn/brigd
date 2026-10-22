@@ -45,5 +45,7 @@ export function readConfig(root: string, env: Environment = process.env) {
   const updateBackupDir = resolve(root, setting('UPDATE_BACKUP_DIR') ?? '.brigd-updates/backup');
   const integrator = setting('INTEGRATOR') ?? 'auto';
   if (!['auto', 'manual'].includes(integrator)) throw new Error('BRIGD_INTEGRATOR должен быть auto или manual');
-  return { mode, cliAccess: cliAccess as CliAccessMode, port, hostname, allowedHosts, allowedOrigins, dbPath, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile: integrator === 'auto', dev: setting('DEV') === '1', defaultCwd: setting('DEFAULT_CWD'), cliHome, updateBackupDir };
+  const mcpToken = setting('MCP_TOKEN') || undefined;
+  if (mcpToken && !/^[A-Za-z0-9_-]{32,256}$/.test(mcpToken)) throw new Error('BRIGD_MCP_TOKEN: нужны 32–256 символов A–Z, a–z, 0–9, _ или -; пустое значение отключает внешний MCP.');
+  return { mode, cliAccess: cliAccess as CliAccessMode, port, hostname, allowedHosts, allowedOrigins, dbPath, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile: integrator === 'auto', dev: setting('DEV') === '1', defaultCwd: setting('DEFAULT_CWD'), cliHome, updateBackupDir, mcpToken };
 }

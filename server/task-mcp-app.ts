@@ -4,9 +4,17 @@ import { AppError, type RunFence, type Store } from './store';
 import { TASK_APP_OPERATIONS } from './task-mcp-app-protocol';
 import { MAX_TASK_RESULT_BYTES, type TaskToolResult } from './task-mcp-protocol';
 
-export interface TaskAppAccess {
+export interface AppAccess<Invocation = { runId?: string; taskId?: string; isCurrent: () => boolean }> {
   request(method: string, path: string, body: Record<string, unknown> | undefined,
-    invocation: { runId: string; taskId: string; isCurrent: () => boolean }): Promise<Response | { response: Response; afterResponse?: () => void }>;
+    invocation: Invocation): Promise<Response | { response: Response; afterResponse?: () => void }>;
+}
+export type TaskAppAccess = AppAccess<{ runId: string; taskId: string; isCurrent: () => boolean }>;
+export interface AppToolContext {
+  runId?: string;
+  taskId?: string;
+  taskDefaults(): { cwd: string; provider: Run['provider'] };
+  beginOperation(key: string, fingerprint: string): { key: string; result: string | null; fresh: boolean };
+  finishOperation(key: string, result: string): void;
 }
 const record = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
 const text = (v: unknown): TaskToolResult => ({ content: [{ type: 'text', text: JSON.stringify(v) }] });
@@ -14,7 +22,7 @@ const errorResult = (message: string): TaskToolResult => ({ isError: true, conte
 const wireSize = (v: unknown) => Buffer.byteLength(JSON.stringify(text(v))) + 1;
 
 /** Enforce the same advertised schema even when a caller bypasses the SDK. */
-function validate(value: unknown, schema: Record<string, unknown>, path = 'arguments'): void {
+export function validateToolArguments(value: unknown, schema: Record<string, unknown>, path = 'arguments'): void {
   const types = Array.isArray(schema.type) ? schema.type : [schema.type];
   const matches = types.some(type => type === 'null' ? value === null : type === 'array' ? Array.isArray(value) :
     type === 'object' ? record(value) : type === 'integer' ? typeof value === 'number' && Number.isSafeInteger(value) :
@@ -31,7 +39,7 @@ function validate(value: unknown, schema: Record<string, unknown>, path = 'argum
     if (typeof schema.minItems === 'number' && value.length < schema.minItems ||
         typeof schema.maxItems === 'number' && value.length > schema.maxItems ||
         schema.uniqueItems === true && new Set(value.map(v => JSON.stringify(v))).size !== value.length) throw new AppError(`Invalid ${path}.`);
-    if (record(schema.items)) value.forEach((v, i) => validate(v, schema.items as Record<string, unknown>, `${path}[${i}]`));
+    if (record(schema.items)) value.forEach((v, i) => validateToolArguments(v, schema.items as Record<string, unknown>, `${path}[${i}]`));
   } else if (record(value)) {
     const properties = record(schema.properties) ? schema.properties : {};
     if (typeof schema.minProperties === 'number' && Object.keys(value).length < schema.minProperties) throw new AppError(`Empty ${path}.`);
@@ -39,7 +47,7 @@ function validate(value: unknown, schema: Record<string, unknown>, path = 'argum
     for (const key of Object.keys(value)) {
       if (!Object.hasOwn(properties, key)) {
         if (schema.additionalProperties === false) throw new AppError(`Unknown ${path}.${key}.`);
-      } else if (record(properties[key])) validate(value[key], properties[key], `${path}.${key}`);
+      } else if (record(properties[key])) validateToolArguments(value[key], properties[key], `${path}.${key}`);
     }
   }
 }
@@ -71,14 +79,27 @@ function page(values: unknown[], args: Record<string, unknown>, total = values.l
 
 export function createTaskAppController(store: Store, run: Run, fence: RunFence, access: TaskAppAccess | undefined,
   isCurrent: () => boolean, afterResponse: (action: () => void) => void) {
+  return createAppController(store, {
+    runId: run.id, taskId: run.taskId,
+    taskDefaults: () => ({ cwd: run.workspace?.projectCwd ?? run.cwd, provider: run.provider }),
+    beginOperation: (key, fingerprint) => store.beginTaskToolOperation(run.id, fence, key, fingerprint),
+    finishOperation: (key, result) => store.finishTaskToolOperation(key, result),
+  }, access ? { request: (method, path, body, invocation) => access.request(method, path, body,
+    { runId: run.id, taskId: run.taskId, isCurrent: invocation.isCurrent }) } : undefined, isCurrent, afterResponse);
+}
+
+/** Shared app operations; the caller supplies its identity and durable receipts. */
+export function createAppController(store: Store, context: AppToolContext, access: AppAccess | undefined,
+  isCurrent: () => boolean, afterResponse: (action: () => void) => void) {
   const operations = new Map(TASK_APP_OPERATIONS.map(operation => [operation.name, operation]));
   return {
     has: (name: string) => operations.has(name),
     mutates: (name: string) => operations.get(name)?.method !== 'GET',
     async execute(name: string, raw: unknown): Promise<TaskToolResult> {
+      if (!isCurrent()) throw new AppError('MCP caller is no longer available.', 409);
       const operation = operations.get(name);
       if (!operation) throw new AppError('Unknown app management tool.');
-      validate(raw, operation.inputSchema);
+      validateToolArguments(raw, operation.inputSchema);
       const args = raw as Record<string, unknown>;
       let path = operation.path;
       if (operation.target) {
@@ -120,14 +141,14 @@ export function createTaskAppController(store: Store, run: Run, fence: RunFence,
       }
       if (!access) throw new AppError('App management is unavailable in this standalone broker. Use the MCP server started by brigd.', 503);
       let body = record(args.data) ? { ...args.data } : undefined;
-      if (name === 'create_task') body = { cwd: run.workspace?.projectCwd ?? run.cwd, provider: run.provider,
+      if (name === 'create_task') body = { ...context.taskDefaults(),
         schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false, ...body };
       if (name === 'create_worker') body = { effort: 'default', communicationStyle: '', avatarUrl: null, ...body };
       const mutation = operation.method !== 'GET';
       let receipt: ReturnType<Store['beginTaskToolOperation']> | undefined;
       if (mutation) {
         const fingerprint = createHash('sha256').update(JSON.stringify(canonical([name, args]))).digest('hex');
-        receipt = store.beginTaskToolOperation(run.id, fence, args.idempotency_key as string, fingerprint);
+        receipt = context.beginOperation(args.idempotency_key as string, fingerprint);
         if (!receipt.fresh) {
           if (receipt.result !== null) return JSON.parse(receipt.result) as TaskToolResult;
           throw new AppError('This operation was already accepted but its result is unavailable. Inspect the app state before issuing a different action; do not repeat it with a new key.', 409);
@@ -137,7 +158,7 @@ export function createTaskAppController(store: Store, run: Run, fence: RunFence,
       let deferred: (() => void) | undefined;
       try {
         if (!isCurrent()) throw new AppError('Task invocation is no longer current.', 409);
-        const response = await access.request(operation.method, path, body, { runId: run.id, taskId: run.taskId, isCurrent });
+        const response = await access.request(operation.method, path, body, { runId: context.runId, taskId: context.taskId, isCurrent });
         const wrapper = response instanceof Response ? { response } : response;
         const value: unknown = await wrapper.response.json();
         if (!wrapper.response.ok) {
@@ -167,7 +188,7 @@ export function createTaskAppController(store: Store, run: Run, fence: RunFence,
       } catch (error) {
         result = errorResult((error instanceof AppError ? error.message : 'App operation did not complete. Inspect the app state before retrying.').slice(0, 500));
       }
-      if (receipt) store.finishTaskToolOperation(receipt.key, JSON.stringify(result));
+      if (receipt) context.finishOperation(receipt.key, JSON.stringify(result));
       if (deferred && !result.isError) afterResponse(deferred);
       return result;
     },

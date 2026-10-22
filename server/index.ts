@@ -11,10 +11,14 @@ import { BACKUP_MAX_BYTES, BackupManager } from './backups';
 import { BackupAutoUpdater } from './backup-auto-update';
 import { restoreBackup } from './backup-restore';
 import { AppError } from './errors';
-import type { TaskAppAccess } from './task-mcp-app';
+import type { AppAccess } from './task-mcp-app';
+import { createMcpHandler } from './mcp';
 
 const root = resolve(import.meta.dir, '..');
-const { mode, cliAccess, port, hostname, allowedHosts, allowedOrigins, dbPath, dev, defaultCwd, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile, cliHome, updateBackupDir } = readConfig(root);
+const { mode, cliAccess, port, hostname, allowedHosts, allowedOrigins, dbPath, dev, defaultCwd, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile, cliHome, updateBackupDir, mcpToken } = readConfig(root);
+// The external credential belongs to this server, not its task agents or checks.
+delete process.env.BRIGD_MCP_TOKEN;
+delete process.env.TRACKT_MCP_TOKEN;
 mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
 const managed = process.env.BRIGD_MANAGED_START === '1';
 if (managed && (!process.send || !process.env.BRIGD_STARTUP_TOKEN)) throw new Error('Управляемый запуск brigd требует скрипта запуска и IPC.');
@@ -100,7 +104,7 @@ const createAppHandler = (): ReturnType<typeof createHandler> => {
     if (restoring) throw new AppError('Дождитесь завершения восстановления.', 409);
     if (exiting || !active || owner !== engine) throw new AppError('Сервис недоступен для этого вызова агента.', 503);
   };
-  const request = async (method: string, path: string, value: Record<string, unknown> | undefined, invocation: Parameters<TaskAppAccess['request']>[3]) => {
+  const request = async (method: string, path: string, value: Record<string, unknown> | undefined, invocation: Parameters<AppAccess['request']>[3]) => {
     const authorize = () => {
       assertAvailable();
       if (!invocation.isCurrent()) throw new AppError('Вызов агента уже завершён или отменён.', 409);
@@ -115,11 +119,11 @@ const createAppHandler = (): ReturnType<typeof createHandler> => {
     try { return await scopedHandler(req); }
     finally { requests--; }
   };
-  const access: TaskAppAccess = { async request(method, path, value, invocation) {
+  const access: AppAccess = { async request(method, path, value, invocation) {
     assertAvailable();
     if (!invocation.isCurrent()) throw new AppError('Вызов агента уже завершён или отменён.', 409);
     const restore = method === 'POST' ? path.match(/^\/api\/backups\/([^/]+)\/select$/) : null;
-    const cancellingSelf = method === 'POST' && path === `/api/runs/${invocation.runId}/cancel`;
+    const cancellingSelf = invocation.runId !== undefined && method === 'POST' && path === `/api/runs/${invocation.runId}/cancel`;
     if (restore || cancellingSelf) {
       // Stopping this invocation inline would close its private socket before
       // the receipt and can make restore wait for its own unanswered MCP call.
@@ -130,7 +134,7 @@ const createAppHandler = (): ReturnType<typeof createHandler> => {
         catch { throw new AppError('Бэкап не найден', 404); }
         backups.validate(id);
       } else {
-        const run = owner.store.getRun(invocation.runId);
+        const run = owner.store.getRun(invocation.runId!);
         if (run.taskId !== invocation.taskId || !['running', 'preparing', 'queued'].includes(run.status)) {
           throw new AppError('Текущий запуск уже завершён или отменён.', 409);
         }
@@ -151,6 +155,10 @@ const createAppHandler = (): ReturnType<typeof createHandler> => {
     return request(method, path, value, invocation);
   } };
   owner.setTaskAppAccess(access);
+  if (mcpToken) options.mcp = createMcpHandler({ token: mcpToken, store: owner.store, access,
+    defaultCwd: () => owner.store.getDefaultCwd() ?? defaultCwd ?? process.cwd(),
+    isCurrent: () => active && !restoring && !exiting && owner === engine,
+  });
   return appHandler;
 };
 let handler = createAppHandler();

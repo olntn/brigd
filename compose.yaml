@@ -16,6 +16,7 @@ services:
       TRACKT_ALLOWED_HOSTS: "127.0.0.1:4310,localhost:4310"
       TRACKT_ALLOWED_ORIGINS: "http://127.0.0.1:4310,http://localhost:4310"
       TRACKT_DEFAULT_CWD: "/workspace/projects"
+      BRIGD_MCP_TOKEN: "${BRIGD_MCP_TOKEN:-}"
       PORT: "4310"
     ports:
       - "127.0.0.1:4310:4310"

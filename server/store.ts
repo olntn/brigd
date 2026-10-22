@@ -451,6 +451,9 @@ export class Store {
         CREATE TABLE IF NOT EXISTS task_tool_operations (
           key TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), fingerprint TEXT NOT NULL, result TEXT
         );
+        CREATE TABLE IF NOT EXISTS mcp_tool_operations (
+          key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT
+        );
         CREATE TRIGGER IF NOT EXISTS attachments_immutable BEFORE UPDATE ON attachments
           WHEN OLD.task_id IS NOT NULL OR NEW.id IS NOT OLD.id OR NEW.source IS NOT OLD.source OR NEW.name IS NOT OLD.name
           OR NEW.mime IS NOT OLD.mime OR NEW.size IS NOT OLD.size OR NEW.sha256 IS NOT OLD.sha256 OR NEW.previewable IS NOT OLD.previewable
@@ -1296,6 +1299,24 @@ export class Store {
   finishTaskToolOperation(key: string, result: string): void {
     if (Buffer.byteLength(result) > 4096) throw new AppError('Слишком большой результат операции MCP');
     this.db.query('UPDATE task_tool_operations SET result=? WHERE key=? AND result IS NULL').run(result, key);
+  }
+  /** External MCP receipts survive reconnects and restarts without creating a run. */
+  beginMcpToolOperation(principal: string, idempotencyKey: string, fingerprint: string): { key: string; result: string | null; fresh: boolean } {
+    if (!/^[a-f0-9]{64}$/.test(principal) || !/^[a-zA-Z0-9_-]{1,100}$/.test(idempotencyKey)) throw new AppError('Invalid MCP operation identity.');
+    const key = JSON.stringify([principal, idempotencyKey]);
+    return this.db.transaction(() => {
+      const previous = this.db.query('SELECT fingerprint,result FROM mcp_tool_operations WHERE key=?').get(key) as Row | null;
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) throw new AppError('idempotency_key уже использован для другой операции', 409);
+        return { key, result: previous.result, fresh: false };
+      }
+      this.db.query('INSERT INTO mcp_tool_operations(key,fingerprint) VALUES (?,?)').run(key, fingerprint);
+      return { key, result: null, fresh: true };
+    }).immediate();
+  }
+  finishMcpToolOperation(key: string, result: string): void {
+    if (Buffer.byteLength(result) > 4096) throw new AppError('Слишком большой результат операции MCP');
+    this.db.query('UPDATE mcp_tool_operations SET result=? WHERE key=? AND result IS NULL').run(result, key);
   }
   publishAgentAttachment(runId: string, fence: RunFence, requestId: string, prepared: PreparedAttachment, caption?: string, now = Date.now()): Attachment {
     if (caption !== undefined && (typeof caption !== 'string' || caption.length > 16_000 || caption.includes('\0'))) throw new AppError('Подпись: не больше 16000 символов');
