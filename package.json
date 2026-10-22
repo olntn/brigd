@@ -1,6 +1,6 @@
 {
   "name": "brigd",
-  "version": "0.2.2",
+  "version": "0.2.4",
   "brigdUpdaterProtocol": 1,
   "private": true,
   "type": "module",
