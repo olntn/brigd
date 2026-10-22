@@ -260,7 +260,7 @@ export interface WorkspaceSnapshot {
   prepared: boolean;
   checkCommands?: string[][];
   lastIntegratedCommit?: string | null;
-  /** When brigd itself removed the worktree folder; a continuation recreates it from the branch. */
+  /** When brigd itself removed the worktree folder; a continuation can recreate its branch from lastIntegratedCommit. */
   removedAt?: number | null;
   /** What removed it: the merge of its result, or the storage clean-up. */
   removedBy?: 'merge' | 'cleanup' | null;
@@ -294,10 +294,13 @@ export interface StorageOverview {
   reclaimableBytes: number;
   retainedBytes: number;
   entries: StorageEntry[];
+  /** Merged task branches that cleanup can remove, including those whose folders are already gone. */
+  reclaimableBranches: string[];
   scannedAt: number;
 }
 export interface StorageCleanupResult {
   removed: number;
+  removedBranches: number;
   freedBytes: number;
   failures: { path: string; error: string }[];
   overview: StorageOverview;

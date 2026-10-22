@@ -74,7 +74,7 @@
     }
   }
   async function confirmCleanup() {
-    if (busy || loading || !selectable.length) return;
+    if (busy || loading || !selectable.length && !reclaimableBranches.length) return;
     confirming = true;
     includeCandidates = false;
     actionError = '';
@@ -99,16 +99,22 @@
       });
       overview = outcome.overview;
       confirming = false;
-      status = outcome.removed ? `${plural(outcome.removed, 'Удалена', 'Удалены', 'Удалено')} ${count(outcome.removed)}. Освобождено ${formatBytes(outcome.freedBytes)}.`
-        : outcome.failures.length ? '' : 'Нечего удалять: все папки ещё нужны.';
-      if (outcome.failures.length) actionError = `Не удалось удалить ${accusative(outcome.failures.length)}: ${outcome.failures.map(failure => `${failure.path} — ${failure.error}`).join('; ')}`;
-    } catch (error) { actionError = message(error, 'Не удалось очистить рабочие папки. Попробуйте ещё раз.'); }
+      const removed = [
+        outcome.removed ? `${plural(outcome.removed, 'Удалена', 'Удалены', 'Удалено')} ${count(outcome.removed)}.` : '',
+        outcome.removedBranches ? `${plural(outcome.removedBranches, 'Удалена', 'Удалены', 'Удалено')} ${branchCount(outcome.removedBranches)}.` : '',
+      ].filter(Boolean);
+      status = removed.length ? `${removed.join(' ')} Освобождено ${formatBytes(outcome.freedBytes)}.`
+        : outcome.failures.length ? '' : 'Нечего удалять: все папки и ветки ещё нужны.';
+      if (outcome.failures.length) actionError = `Не удалось удалить: ${outcome.failures.map(failure => `${failure.path} — ${failure.error}`).join('; ')}`;
+    } catch (error) { actionError = message(error, 'Не удалось очистить хранилище. Попробуйте ещё раз.'); }
     finally { busy = false; }
     await tick();
     cleanupButton?.focus();
   }
   const count = (value: number) => `${value.toLocaleString('ru-RU')} ${plural(value, 'папка', 'папки', 'папок')}`;
   const accusative = (value: number) => `${value.toLocaleString('ru-RU')} ${plural(value, 'папку', 'папки', 'папок')}`;
+  const branchCount = (value: number) => `${value.toLocaleString('ru-RU')} ${plural(value, 'ветка', 'ветки', 'веток')}`;
+  const accusativeBranches = (value: number) => `${value.toLocaleString('ru-RU')} ${plural(value, 'ветку', 'ветки', 'веток')}`;
   function dateLabel(timestamp: number, includeSeconds = false) {
     return new Date(timestamp).toLocaleString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', second: includeSeconds ? '2-digit' : undefined });
   }
@@ -130,16 +136,21 @@
   let reclaimable = $derived(overview?.entries.filter(entry => !entry.retained) ?? []);
   let optional = $derived(overview?.entries.filter(entry => entry.retained && entry.optional) ?? []);
   let selectable = $derived([...reclaimable, ...optional]);
+  let reclaimableBranches = $derived(overview?.reclaimableBranches ?? []);
   let selectedBytes = $derived(sum(reclaimable) + (includeCandidates ? sum(optional) : 0));
   let selectedCount = $derived(reclaimable.length + (includeCandidates ? optional.length : 0));
+  let selectedDescription = $derived(reclaimableBranches.length
+    ? `${selectedCount ? `${accusative(selectedCount)} и ` : ''}${accusativeBranches(reclaimableBranches.length)}`
+    : accusative(selectedCount));
+  let cleanupLabel = $derived(reclaimableBranches.length ? selectedCount ? 'Удалить папки и ветки' : 'Удалить ветки' : 'Удалить папки');
   let groups = $derived(overview ? grouped(overview.entries) : []);
 </script>
 
 <section class="storage-settings model-settings" aria-labelledby="storage-settings-title" aria-busy={busy || loading}>
-  <div class="model-settings-heading"><Icon name="folder" size={22} /><div><h3 id="storage-settings-title">Хранилище</h3><p>Рабочие папки запусков (Git worktree) и кандидаты слияния. После переноса результата в целевую ветку папка запуска удаляется автоматически; папки активных, прерванных, конфликтных, завершившихся ошибкой или блокировкой и ещё не перенесённых запусков сохраняются.</p></div></div>
+  <div class="model-settings-heading"><Icon name="folder" size={22} /><div><h3 id="storage-settings-title">Хранилище</h3><p>Рабочие папки запусков (Git worktree) и кандидаты слияния. После переноса результата в целевую ветку ненужная папка запуска и его ветка удаляются автоматически. Используемые worktree, папки с подмодулями и ветки с неперенесёнными изменениями сохраняются, как и папки активных, прерванных, конфликтных, завершившихся ошибкой или блокировкой и ещё не перенесённых запусков.</p></div></div>
   {#if loadError}<div class="model-load-error" role="alert"><span>{loadError}</span><button type="button" class="button secondary" disabled={busy || loading} onclick={() => { void load(); }}>Повторить подсчёт</button></div>{/if}
   {#if loading}<p class="model-catalog-status" role="status"><Icon name="refresh" class="spin" size={16} /><span>Подсчитываем занятое место…</span></p>{/if}
-  {#if busy}<p class="model-catalog-status" role="status"><Icon name="refresh" class="spin" size={16} /><span>Удаляем ненужные папки… Дождитесь ответа сервера, прежде чем закрывать настройки.</span></p>{/if}
+  {#if busy}<p class="model-catalog-status" role="status"><Icon name="refresh" class="spin" size={16} /><span>Очищаем хранилище… Дождитесь ответа сервера, прежде чем закрывать настройки.</span></p>{/if}
   {#if status}<p class="model-catalog-status success" role="status"><Icon name="check" size={16} /><span>{status}</span></p>{/if}
   {#if actionError}<div class="form-error storage-action-error" role="alert"><Icon name="alert" size={17} /><span>{actionError}</span></div>{/if}
   {#if overview && !overview.available}
@@ -152,17 +163,24 @@
     </dl>
     <p class="model-catalog-note storage-root">Каталог: <code>{overview.root}</code>{#if overview.scannedAt} · подсчитано {dateLabel(overview.scannedAt, true)}{/if}</p>
     <div class="backup-toolbar storage-toolbar">
-      <button bind:this={cleanupButton} type="button" class="button secondary danger-hover" disabled={busy || loading || !selectable.length || confirming} onclick={confirmCleanup}><Icon name="trash" size={16} />Очистить</button>
+      <button bind:this={cleanupButton} type="button" class="button secondary danger-hover" disabled={busy || loading || !selectable.length && !reclaimableBranches.length || confirming} onclick={confirmCleanup}><Icon name="trash" size={16} />Очистить</button>
       <button type="button" class="button secondary" disabled={busy || loading} onclick={() => { void load(); }}><Icon name="refresh" size={16} />Пересчитать</button>
     </div>
     {#if confirming}
       <div class="model-delete-confirm storage-confirm">
-        <p>Удалить {accusative(selectedCount)} и освободить {formatBytes(selectedBytes)}? Папки отменённых запусков и уже перенесённых результатов, устаревшие кандидаты слияния и папки запусков без записи в базе будут удалены без возможности восстановления. Незакоммиченная работа отменённых запусков будет потеряна; ветки <code>brigd/run-…</code> и история задач останутся. Папки активных, прерванных, конфликтных, завершившихся ошибкой или блокировкой и ещё не перенесённых запусков не трогаются.</p>
+        <p>Удалить {selectedDescription} и освободить {formatBytes(selectedBytes)}? Папки отменённых запусков и уже перенесённых результатов, устаревшие кандидаты слияния и папки запусков без записи в базе будут удалены без возможности восстановления. Незакоммиченная работа отменённых запусков будет потеряна. Ветки <code>brigd/run-…</code> удаляются только для уже перенесённых результатов, если они не изменились после переноса и больше нигде не используются. Остальные ветки и история задач останутся. Папки активных, прерванных, конфликтных, завершившихся ошибкой или блокировкой и ещё не перенесённых запусков не трогаются.</p>
         {#if optional.length}<label class="storage-option"><input type="checkbox" bind:checked={includeCandidates} disabled={busy} /><span>Также удалить кандидаты неудачных проверок и заблокированных переносов ({count(optional.length)}, {formatBytes(sum(optional))}). Папки самих запусков останутся для повтора.</span></label>{/if}
-        <div class="model-catalog-actions"><button type="button" class="button secondary" disabled={busy} onclick={cancelCleanup}>Отмена очистки</button><button bind:this={confirmButton} type="button" class="button danger" disabled={busy || loading || !selectedCount} onclick={cleanup}>{busy ? 'Удаляем…' : 'Удалить папки'}</button></div>
+        <div class="model-catalog-actions"><button type="button" class="button secondary" disabled={busy} onclick={cancelCleanup}>Отмена очистки</button><button bind:this={confirmButton} type="button" class="button danger" disabled={busy || loading || !selectedCount && !reclaimableBranches.length} onclick={cleanup}>{busy ? 'Удаляем…' : cleanupLabel}</button></div>
       </div>
     {/if}
-    {#if !overview.entries.length}<p class="model-catalog-empty storage-empty">Папок пока нет: первый реальный запуск создаст worktree в этом каталоге.</p>{/if}
+    {#if !overview.entries.length}<p class="model-catalog-empty storage-empty">Рабочих папок в этом каталоге нет.</p>{/if}
+    {#if reclaimableBranches.length}
+      <section class="storage-branches" aria-labelledby="storage-branches-title">
+        <h4 id="storage-branches-title">Ветки после слияния</h4>
+        <p>Можно удалить {accusativeBranches(reclaimableBranches.length)}. Их коммиты сохранены в целевых ветках; при продолжении задачи ветка запуска создастся заново. Объём выше относится к рабочим папкам.</p>
+        <ul>{#each reclaimableBranches as branch}<li><code>{branch}</code></li>{/each}</ul>
+      </section>
+    {/if}
     {#if groups.length}
       <ul class="storage-groups" aria-label="Папки по состоянию">
         {#each groups as group (group.reason)}
@@ -205,4 +223,9 @@
   .storage-entry-meta { font-size: .75rem; color: var(--muted); }
   .storage-entry-path { font-size: .72rem; color: var(--muted); overflow-wrap: anywhere; }
   .storage-empty { margin-top: 16px; }
+  .storage-branches { margin-top: 16px; padding: 12px 14px; border: 1px dashed var(--line); border-radius: var(--radius-md); }
+  .storage-branches h4 { margin: 0 0 6px; font-size: .88rem; font-weight: 600; color: var(--secondary); }
+  .storage-branches p { margin: 0; font-size: .8rem; line-height: 1.6; color: var(--muted); }
+  .storage-branches ul { margin: 8px 0 0; padding-left: 20px; font-size: .8rem; line-height: 1.6; }
+  .storage-branches code { overflow-wrap: anywhere; }
 </style>

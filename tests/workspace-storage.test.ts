@@ -122,6 +122,7 @@ describe('automatic reclamation', () => {
     const merged = await settled(first);
     expect(merged.status).toBe('merged');
     expect(existsSync(first.workspace!.path)).toBe(false); expect(existsSync(merged.candidatePath!)).toBe(false);
+    expect(git(root, 'for-each-ref', '--format=%(refname)', `refs/heads/${first.workspace!.branch}`)).toBe('');
     expect(existsSync(dirname(first.workspace!.path))).toBe(false); expect(existsSync(workspacesRoot())).toBe(true);
     const overview = await engine.storageOverview();
     expect(overview).toMatchObject({ available: true, root: workspacesRoot(), totalBytes: 0, reclaimableBytes: 0, entries: [] });
@@ -139,10 +140,10 @@ describe('automatic reclamation', () => {
     const logs = store.detail(first.taskId).logs!.filter(item => item.summary === 'Рабочая папка запуска удалена после слияния');
     expect(logs).toHaveLength(2); expect(logs[0]!.details.join(' ')).toContain('Освобождено');
   });
-  test('a branch deleted by hand is rebuilt from the last merged commit', async () => {
+  test('an automatically removed branch is rebuilt from the last merged commit', async () => {
     const first = await start(); complete(first, 'kept result\n');
     const merged = await settled(first);
-    git(root, 'branch', '-D', `brigd/run-${first.id}`);
+    expect(git(root, 'for-each-ref', '--format=%(refname)', `refs/heads/brigd/run-${first.id}`)).toBe('');
     engine.followup(first.taskId, { sourceRunId: first.id, sourceStepIndex: null, body: 'Continue.', attachmentIds: [], requestId: crypto.randomUUID() });
     await until(() => agent.calls.length === 2);
     expect(git(first.workspace!.path, 'rev-parse', 'HEAD')).toBe(merged.sourceCommit!);
@@ -362,6 +363,8 @@ describe('manual cleanup', () => {
     const result = await engine.cleanupStorage();
     expect(result).toMatchObject({ removed: 3, failures: [] }); expect(result.freedBytes).toBe(overview.reclaimableBytes);
     expect(existsSync(cancelled.workspace!.path)).toBe(false); expect(existsSync(orphan.workspace!.path)).toBe(false); expect(existsSync(stale)).toBe(false);
+    expect(git(root, 'rev-parse', `refs/heads/${cancelled.workspace!.branch}`)).toBe(cancelled.workspace!.baseCommit!);
+    expect(git(root, 'rev-parse', `refs/heads/${orphan.workspace!.branch}`)).toBe(orphan.workspace!.baseCommit!);
     for (const path of [plain, join(workspacesRoot(), 'link'), join(workspacesRoot(), 'stray.txt'), join(bucket, 'note.txt'), join(workspacesRoot(), 'shared', 'data.bin'), join(outside, 'keep.txt')]) expect(existsSync(path)).toBe(true);
     expect(existsSync(failing.workspace!.path)).toBe(true); expect(existsSync(failed.candidatePath!)).toBe(true);
     const registered = git(root, 'worktree', 'list', '--porcelain');

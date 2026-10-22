@@ -943,7 +943,7 @@
 
 {#snippet workspaceNote(run: Run)}
   {#if run.workspace?.mode === 'worktree' && (run.workspace.removedAt || run.workspace.recreatedAt)}
-    <p class="workspace-note">{#if run.workspace.removedAt}{run.workspace.removedBy === 'cleanup' ? 'Папка запуска удалена при очистке хранилища' : 'Папка запуска удалена после переноса результата'} {dateTime(run.workspace.removedAt)}.{#if run.status === 'completed' && run.sessionId && selectedTask?.archivedAt === null} Ветка {run.workspace.branch} сохранена; ответ или дополнительный запрос создаст папку заново без неотслеживаемых файлов прежней сессии.{/if}{:else}Папка запуска создана заново из ветки {run.workspace.branch} {dateTime(run.workspace.recreatedAt!)}; неотслеживаемые файлы прежней сессии в ней отсутствуют.{/if}</p>
+    <p class="workspace-note">{#if run.workspace.removedAt}{run.workspace.removedBy === 'cleanup' ? 'Папка запуска удалена при очистке хранилища' : 'Папка запуска удалена после переноса результата'} {dateTime(run.workspace.removedAt)}.{#if run.status === 'completed' && run.sessionId && selectedTask?.archivedAt === null} Ответ или дополнительный запрос создаст папку заново; если ветка {run.workspace.branch} удалена, она восстановится из последнего перенесённого коммита. Неотслеживаемые файлы прежней сессии не восстанавливаются.{/if}{:else}Папка запуска создана заново для ветки {run.workspace.branch} {dateTime(run.workspace.recreatedAt!)}; неотслеживаемые файлы прежней сессии в ней отсутствуют.{/if}</p>
   {/if}
 {/snippet}
 {#snippet instructionSnapshot(run: Run)}

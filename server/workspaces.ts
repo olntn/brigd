@@ -94,13 +94,13 @@ export class GitWorkspaces implements WorkspaceProvider {
       mkdirSync(resolve(workspace.path, '..'), { recursive: true, mode: 0o700 });
       const spawnGit = async (args: string[]) => await gitExit(['-C', workspace.repositoryRoot, ...args]) === 0;
       if (workspace.removedAt) {
-        // The folder was reclaimed after a merge: every result is committed on its branch, so the same path comes back from there.
+        // The folder was reclaimed after a merge: its branch may have been reclaimed too; the stored commit recreates both.
         // Only brigd's own stale registration is cleared; other worktrees of the repository are never pruned.
         if (isRegistered(workspace.repositoryId, workspace.path)) await gitExit(['--git-dir', workspace.repositoryId, 'worktree', 'remove', '--force', '--force', workspace.path]);
         const listing = gitOutput(['--git-dir', workspace.repositoryId, 'worktree', 'list', '--porcelain', '-z']) ?? '';
         if (listing.split('\0').includes(`branch refs/heads/${workspace.branch}`)) throw new WorkspaceError(`Ветка ${workspace.branch} уже открыта в другом worktree. Закройте её там, чтобы воссоздать рабочую папку запуска.`);
         const branchExists = gitOutput(['--git-dir', workspace.repositoryId, 'rev-parse', '--verify', '--quiet', `refs/heads/${workspace.branch}`]) !== null;
-        // A branch deleted by hand is rebuilt from the last merged commit, which was stored together with the removal.
+        // An absent branch is rebuilt from the last merged commit, which was stored together with the removal.
         const created = await spawnGit(branchExists ? ['worktree', 'add', workspace.path, workspace.branch!]
           : ['worktree', 'add', '-b', workspace.branch!, workspace.path, workspace.lastIntegratedCommit ?? workspace.baseCommit!]);
         if (!created) throw new WorkspaceError(`Не удалось заново создать Git worktree из ветки ${workspace.branch} после очистки. Проверьте место на диске и состояние ветки.`);

@@ -2,7 +2,7 @@ import { chmodSync, existsSync, lstatSync, readdirSync, readFileSync, realpathSy
 import { lstat, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import type { Integration, IntegrationStatus, Run, RunStatus, StorageCleanupResult, StorageEntry, StorageOverview, StorageReason } from '../src/lib/types';
+import type { Integration, IntegrationStatus, Run, RunStatus, StorageCleanupResult, StorageEntry, StorageOverview, StorageReason, WorkspaceSnapshot } from '../src/lib/types';
 import { formatBytes } from '../src/lib/format';
 import type { Store } from './store';
 
@@ -126,11 +126,12 @@ export function ownedWorktree(path: string, repositoryIds: readonly string[]): {
 }
 /** Git keeps a linked worktree's submodule repositories in its admin directory; removing it would destroy their commits. */
 export const hasSubmoduleData = (admin: string) => existsSync(join(admin, 'modules'));
-export const UNAVAILABLE_STORAGE: StorageOverview = { available: false, note: null, root: null, totalBytes: 0, reclaimableBytes: 0, retainedBytes: 0, entries: [], scannedAt: 0 };
+export const UNAVAILABLE_STORAGE: StorageOverview = { available: false, note: null, root: null, totalBytes: 0, reclaimableBytes: 0, retainedBytes: 0, entries: [], reclaimableBranches: [], scannedAt: 0 };
 export interface CleanupOptions { /** Also reclaim candidates of attempts that failed their checks or were blocked. */ includeCandidates?: boolean; }
 export interface SettledFolders { summary: string; details: string[]; }
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 500);
 interface Found { path: string; name: string; inBucket: boolean; directory: boolean; symlink: boolean; }
+interface BranchRemoval { sourceRef: string; sourceCommit: string; targetRef: string; targetCommit: string; }
 
 /** Folders under the workspaces root: run worktrees, merge candidates and anything else brigd did not create. */
 export class WorkspaceStorage {
@@ -144,7 +145,7 @@ export class WorkspaceStorage {
   async cleanup(options: CleanupOptions = {}): Promise<StorageCleanupResult> {
     const before = await this.scan();
     const failures: StorageCleanupResult['failures'] = [];
-    let removed = 0, freedBytes = 0;
+    let removed = 0, removedBranches = 0, freedBytes = 0;
     if (before.available) {
       for (const entry of before.entries) {
         if (entry.retained && !(options.includeCandidates && entry.optional)) continue;
@@ -154,9 +155,14 @@ export class WorkspaceStorage {
           removed++; freedBytes += entry.bytes;
         } catch (error) { failures.push({ path: entry.path, error: describe(error) }); }
       }
+      // Older versions already reclaimed folders while keeping their branches. Those branches still have durable workspace records.
+      for (const record of this.store.listWorkspaceRecords()) {
+        try { if (this.removeMergedBranch(record.snapshot, record.runs)) removedBranches++; }
+        catch (error) { failures.push({ path: `${record.snapshot.repositoryId}: ${record.snapshot.branch}`, error: describe(error) }); }
+      }
       this.pruneBuckets();
     }
-    return { removed, freedBytes, failures, overview: await this.scan() };
+    return { removed, removedBranches, freedBytes, failures, overview: await this.scan() };
   }
   /** Before an attempt's final status is stored: scratch candidates go, and a merged result's worktree goes once nothing holds it.
    * `job.status` is the status about to be stored. Returns the task-log entry describing what happened to the worktree. */
@@ -182,9 +188,49 @@ export class WorkspaceStorage {
     // Marked first, together with the merged commit: a crash halfway through must not leave a continuation refusing to recreate the folder.
     this.store.markWorkspaceRemoved(workspace.id, Date.now(), job.sourceCommit, 'merge');
     await this.removeFolder(workspace.path, workspace.repositoryId);
+    const branchDetails: string[] = [];
+    try {
+      if (this.removeMergedBranch(this.store.getWorkspace(workspace.id), runs)) branchDetails.push(`Ветка ${workspace.branch} удалена; её коммиты доступны в целевой ветке.`);
+    } catch (error) { branchDetails.push(`Не удалось удалить ветку ${workspace.branch}: ${describe(error)}. Повторите очистку в настройках хранилища.`); }
     this.pruneBuckets(job.runId);
     return { summary: 'Рабочая папка запуска удалена после слияния', details: [`Освобождено ${formatBytes(size.bytes)}.`, `Папка: ${workspace.path}.`,
-      `Ветка ${workspace.branch} сохранена; ответ или дополнительный запрос создаст папку заново из неё, без неотслеживаемых файлов прежней сессии.`] };
+      ...branchDetails, 'Ответ или дополнительный запрос создаст папку и при необходимости ветку заново из последнего перенесённого коммита, без неотслеживаемых файлов прежней сессии.'] };
+  }
+  /** Only an unchanged task branch whose committed result is still reachable from its target may go. */
+  private branchRemoval(workspace: WorkspaceSnapshot, runs: readonly WorkspaceRun[], removingFolder = false): BranchRemoval | null {
+    if (workspace.mode !== 'worktree' || !inside(this.root, workspace.path) || workspaceRetention(runs).retained ||
+        (!workspace.removedAt && !removingFolder) || (existsSync(workspace.path) && !removingFolder) ||
+        workspace.branch !== `brigd/run-${workspace.id}` || !workspace.lastIntegratedCommit || !/^[a-f0-9]{40,64}$/.test(workspace.lastIntegratedCommit) ||
+        !workspace.targetBranch || workspace.targetBranch === workspace.branch) return null;
+    const prefix = ['--git-dir', workspace.repositoryId];
+    const sourceRef = `refs/heads/${workspace.branch}`, targetRef = `refs/heads/${workspace.targetBranch}`;
+    if (gitOutput([...prefix, 'check-ref-format', targetRef]) === null || gitOutput([...prefix, 'symbolic-ref', '--quiet', sourceRef]) !== null ||
+        gitOutput([...prefix, 'symbolic-ref', '--quiet', targetRef]) !== null) return null;
+    const sourceCommit = gitOutput([...prefix, 'rev-parse', '--verify', '--quiet', sourceRef])?.trim();
+    if (sourceCommit !== workspace.lastIntegratedCommit) return null;
+    const targetCommit = gitOutput([...prefix, 'rev-parse', '--verify', '--quiet', `${targetRef}^{commit}`])?.trim();
+    if (!targetCommit || !/^[a-f0-9]{40,64}$/.test(targetCommit) || gitOutput([...prefix, 'merge-base', '--is-ancestor', sourceCommit, targetCommit]) === null) return null;
+    // A failed listing is not evidence that the branch is unused. Preserve registrations of missing user worktrees too.
+    const listing = gitOutput([...prefix, 'worktree', 'list', '--porcelain', '-z']);
+    if (listing === null) return null;
+    let path = '';
+    for (const line of listing.split('\0')) {
+      if (line.startsWith('worktree ')) path = line.slice(9);
+      if (line === `branch ${sourceRef}` && !(removingFolder && samePath(path, workspace.path))) return null;
+    }
+    return { sourceRef, sourceCommit, targetRef, targetCommit };
+  }
+  private removeMergedBranch(workspace: WorkspaceSnapshot, runs: readonly WorkspaceRun[]): boolean {
+    const branch = this.branchRemoval(workspace, runs);
+    if (!branch) return false;
+    // Compare both refs in one transaction: a concurrent new task commit or target reset must preserve the branch.
+    // --no-deref also prevents a substituted symbolic ref from causing deletion of its referent.
+    const child = Bun.spawnSync(['git', '--git-dir', workspace.repositoryId, 'update-ref', '--no-deref', '--stdin'], {
+      stdin: Buffer.from(`verify ${branch.targetRef} ${branch.targetCommit}\ndelete ${branch.sourceRef} ${branch.sourceCommit}\n`),
+      stdout: 'ignore', stderr: 'ignore', timeout: 10_000,
+    });
+    if (child.exitCode !== 0) throw new Error('Git не удалил ветку: ссылки изменились или недоступны для записи.');
+    return true;
   }
   /** Earlier attempts of the same merge are superseded once a new attempt starts. */
   async discardOlderCandidates(run: Run, job: Integration): Promise<void> {
@@ -247,8 +293,11 @@ export class WorkspaceStorage {
     }
     entries.sort((left, right) => Number(left.retained) - Number(right.retained) || right.bytes - left.bytes || left.path.localeCompare(right.path));
     const sum = (selected: StorageEntry[]) => selected.reduce((total, entry) => total + entry.bytes, 0);
+    const removableFolders = new Set(entries.filter(entry => entry.kind === 'worktree' && !entry.retained).map(entry => entry.path));
+    const reclaimableBranches = workspaces.filter(record => this.branchRemoval(record.snapshot, record.runs, removableFolders.has(record.snapshot.path)))
+      .map(record => record.snapshot.branch!);
     return { available: true, note: null, root: this.root, totalBytes: sum(entries), reclaimableBytes: sum(entries.filter(entry => !entry.retained)),
-      retainedBytes: sum(entries.filter(entry => entry.retained)), entries, scannedAt: Date.now() };
+      retainedBytes: sum(entries.filter(entry => entry.retained)), entries, reclaimableBranches, scannedAt: Date.now() };
   }
   private classify(item: Found, workspaces: ReturnType<Store['listWorkspaceRecords']>, integrations: Map<string, IntegrationRecord>, repositoryIds: string[]): Omit<StorageEntry, 'bytes' | 'files'> {
     const base = { path: item.path, kind: 'unknown' as const, retained: true, reason: 'foreign' as StorageReason, runId: null, taskId: null, taskTitle: null, startedAt: null };

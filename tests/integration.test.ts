@@ -63,11 +63,12 @@ test('combined candidate is checked before a clean target receives the saved res
   expect(git(root, 'ls-files')).not.toContain('.brigd-outbox');
   expect(store.getTask(run.taskId).status).toBe('completed');
   expect(store.getRun(run.id).workspace!.lastIntegratedCommit).toBe(integration.sourceCommit!);
-  // The merged worktree and the checked candidate are reclaimed before the merge is reported; the branch keeps the result.
+  // The worktree, candidate and task branch are reclaimed; the target keeps the integrated result.
   expect(existsSync(run.workspace!.path)).toBe(false); expect(existsSync(integration.candidatePath!)).toBe(false);
   expect(existsSync(dirname(run.workspace!.path))).toBe(false);
   expect(store.getRun(run.id).workspace!.removedAt).toBeGreaterThan(0);
-  expect(git(root, 'rev-parse', `brigd/run-${run.id}`)).toBe(integration.sourceCommit!);
+  expect(git(root, 'for-each-ref', '--format=%(refname)', `refs/heads/brigd/run-${run.id}`)).toBe('');
+  expect(git(root, 'merge-base', '--is-ancestor', integration.sourceCommit!, 'main')).toBe('');
   expect(git(root, 'worktree', 'list', '--porcelain')).not.toContain(run.workspace!.path);
   expect(store.detail(run.taskId).logs!.map(entry => entry.summary)).toContain('Рабочая папка запуска удалена после слияния');
 });

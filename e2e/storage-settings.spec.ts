@@ -16,16 +16,16 @@ const entries: StorageEntry[] = [
   entry({ path: `${root}/notes.txt`, kind: 'unknown', reason: 'foreign', retained: true, bytes: 0, files: 0, runId: null, taskId: null, taskTitle: null, startedAt: null }),
 ];
 const sum = (selected: StorageEntry[]) => selected.reduce((total, item) => total + item.bytes, 0);
-function overviewOf(selected: StorageEntry[]): StorageOverview {
+function overviewOf(selected: StorageEntry[], reclaimableBranches: string[] = []): StorageOverview {
   return { available: true, note: null, root, totalBytes: sum(selected), reclaimableBytes: sum(selected.filter(item => !item.retained)),
-    retainedBytes: sum(selected.filter(item => item.retained)), entries: selected, scannedAt: Date.UTC(2026, 9, 22, 9, 30, 15) };
+    retainedBytes: sum(selected.filter(item => item.retained)), entries: selected, reclaimableBranches, scannedAt: Date.UTC(2026, 9, 22, 9, 30, 15) };
 }
 
 async function fixtureApi(page: Page, options: { available?: boolean; readError?: string; cleanupError?: string } = {}) {
-  const state = { entries: [...entries], reads: 0, cleanups: 0, available: options.available ?? true, readError: options.readError ?? '', cleanupError: options.cleanupError ?? '' };
+  const state = { entries: [...entries], branches: [] as string[], reads: 0, cleanups: 0, available: options.available ?? true, readError: options.readError ?? '', cleanupError: options.cleanupError ?? '' };
   const info: AppInfo = { mode: 'mock', cwd: '/workspace/project', scheduler: 'running', startedAt: Date.UTC(2026, 0, 15, 12),
     providers: [{ id: 'codex', available: true, label: 'Codex' }, { id: 'claude', available: true, label: 'Claude Code' }] };
-  const overview = (): StorageOverview => state.available ? overviewOf(state.entries) : { available: false, note: null, root: null, totalBytes: 0, reclaimableBytes: 0, retainedBytes: 0, entries: [], scannedAt: Date.UTC(2026, 9, 22, 9, 30, 15) };
+  const overview = (): StorageOverview => state.available ? overviewOf(state.entries, state.branches) : { available: false, note: null, root: null, totalBytes: 0, reclaimableBytes: 0, retainedBytes: 0, entries: [], reclaimableBranches: [], scannedAt: Date.UTC(2026, 9, 22, 9, 30, 15) };
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
     const method = route.request().method();
@@ -40,7 +40,9 @@ async function fixtureApi(page: Page, options: { available?: boolean; readError?
       const taken = (item: StorageEntry) => !item.retained || !!body.includeCandidates && !!item.optional;
       const removed = state.entries.filter(taken);
       state.entries = state.entries.filter(item => !taken(item));
-      const result: StorageCleanupResult = { removed: removed.length, freedBytes: sum(removed), failures: [], overview: overview() };
+      const removedBranches = state.branches.length;
+      state.branches = [];
+      const result: StorageCleanupResult = { removed: removed.length, removedBranches, freedBytes: sum(removed), failures: [], overview: overview() };
       await route.fulfill({ json: result });
     } else if (method !== 'GET') {
       await route.fulfill({ status: 405, json: { error: 'Unsupported fixture mutation' } });
@@ -171,7 +173,7 @@ test('failed folder removals remain reclaimable and do not report that all folde
   state.entries = entries.filter(item => item.retained || item.path.endsWith('/run-cancelled'));
   await page.route('**/api/settings/storage/cleanup', async route => {
     const result: StorageCleanupResult = {
-      removed: 0, freedBytes: 0,
+      removed: 0, removedBranches: 0, freedBytes: 0,
       failures: [{ path: `${bucket}/run-cancelled`, error: 'Нет доступа к папке.' }],
       overview: overviewOf(state.entries),
     };
@@ -181,9 +183,34 @@ test('failed folder removals remain reclaimable and do not report that all folde
   const { panel } = await openStorage(page);
   await panel.getByRole('button', { name: 'Очистить', exact: true }).click();
   await panel.getByRole('button', { name: 'Удалить папки', exact: true }).click();
-  await expect(panel.getByRole('alert')).toContainText('Не удалось удалить 1 папку:');
+  await expect(panel.getByRole('alert')).toContainText('Не удалось удалить:');
   await expect(panel.getByRole('alert')).toContainText('Нет доступа к папке.');
   await expect(panel.getByRole('status')).toBeHidden();
   await expect(panel.getByRole('button', { name: 'Очистить', exact: true })).toBeEnabled();
   await expect(panel.locator('.storage-summary')).toContainText('120 МБ');
+});
+
+test('cleanup removes merged branches even after their working folders have already been removed', async ({ page }) => {
+  const state = await fixtureApi(page);
+  state.entries = [];
+  state.branches = ['brigd/run-old-merged'];
+  await page.setViewportSize({ width: 320, height: 720 });
+  await page.goto('/');
+  const { panel } = await openStorage(page);
+  await expect(panel.getByRole('heading', { name: 'Ветки после слияния', exact: true })).toBeVisible();
+  await expect(panel.getByText('brigd/run-old-merged', { exact: true })).toBeVisible();
+  const clean = panel.getByRole('button', { name: 'Очистить', exact: true });
+  await expect(clean).toBeEnabled();
+  await clean.click();
+  await expect(panel.getByText('Удалить 1 ветку и освободить 0 Б?')).toBeVisible();
+  await expect(panel.getByText('Остальные ветки и история задач останутся.')).toBeVisible();
+  const confirm = panel.getByRole('button', { name: 'Удалить ветки', exact: true });
+  await expect(confirm).toBeFocused();
+  await expect(confirm).toBeEnabled();
+  expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await confirm.click();
+  await expect(panel.getByRole('status')).toContainText('Удалена 1 ветка. Освобождено 0 Б.');
+  expect(state.cleanups).toBe(1);
+  await expect(panel.getByText('brigd/run-old-merged', { exact: true })).toBeHidden();
+  await expect(clean).toBeDisabled();
 });
