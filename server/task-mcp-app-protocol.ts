@@ -1,6 +1,7 @@
 /** Wire-only app-management catalogue. Safe to import from the stdio helper. */
 import { DOC_MARKDOWN_LIMIT, DOC_TITLE_LIMIT } from '../src/lib/docs';
 import { TASK_PRIORITIES } from '../src/lib/priority';
+import { DEFAULT_SCHEDULES, TASK_SCHEDULES, TIME_ZONE_MAX_LENGTH, WEEKDAYS } from '../src/lib/schedule';
 export type TaskAppTarget = 'task_id' | 'run_id' | 'worker_id' | 'instruction_id' | 'tag_id' | 'model_id' | 'backup_id' | 'provider' | 'doc_page_id';
 type Schema = Record<string, unknown>;
 export interface TaskAppOperation {
@@ -38,16 +39,19 @@ const page: Record<string, Schema> = {
 const ids = (maxItems: number): Schema => ({ type: 'array', items: id, maxItems, uniqueItems: true });
 const timestamp: Schema = { type: 'integer', minimum: 0, maximum: 8_640_000_000_000_000, description: 'Unix time in milliseconds.' };
 const model: Schema = { ...text(128), pattern: '^[A-Za-z0-9][A-Za-z0-9._:/+@\\[\\]-]*$' };
-const schedule: Schema = { type: 'string', enum: ['manual', 'interval', 'auto'] };
+const schedule: Schema = { type: 'string', enum: [...TASK_SCHEDULES] };
 const taskFields: Record<string, Schema> = {
   title: text(140),
   instruction: { ...text(16_000), description: 'Task description and instructions to its agent.' },
   provider,
   cwd: { ...text(4_096), description: 'Existing absolute project directory. Omit on creation to inherit the invoking task\'s project directory.' },
-  schedule: { ...schedule, description: 'manual waits for start_task; interval uses intervalMinutes; auto enters the autopilot pool. Creation defaults to manual.' },
+  schedule: { ...schedule, description: 'manual waits for start_task; interval uses intervalMinutes; daily runs at timeOfDay on weekdays in timeZone; auto enters the autopilot pool. Creation defaults to manual.' },
   timeLimitMinutes: { ...nullable({ type: 'integer', minimum: 1, maximum: 1440 }), description: 'Per agent turn, in minutes; null follows the general agent time limit. Frozen for each new turn.' },
   intervalMinutes: nullable({ type: 'integer', minimum: 1, maximum: 525_600 }),
   firstRunAt: nullable(timestamp),
+  timeOfDay: { ...nullable({ ...text(5, 5), pattern: '^(?:[01][0-9]|2[0-3]):[0-5][0-9]$' }), description: 'Required for daily: local 24-hour HH:MM in timeZone, e.g. 02:00. A time skipped by a forward clock change runs that much later; a repeated time runs once.' },
+  weekdays: { ...nullable({ type: 'array', items: { type: 'integer', enum: [...WEEKDAYS] }, minItems: 1, maxItems: 7, uniqueItems: true }), description: 'daily only: ISO weekdays, 1 is Monday and 7 is Sunday, e.g. [1,2,3,4,5] for weekdays. Omitted or null means every day.' },
+  timeZone: { ...nullable(text(TIME_ZONE_MAX_LENGTH)), description: 'daily only: the user\'s IANA time zone, e.g. Europe/Moscow. Omitted or null saves the brigd server\'s zone, which is often UTC in containers.' },
   paused: flag,
   workerId: nullable(id),
   ultracode: { ...nullable(flag), description: 'true or false forces the provider\'s ultra agent mode for the card\'s new runs (every stage of a workflow); null follows each worker profile. Creation defaults to null.' },
@@ -150,7 +154,7 @@ export const TASK_APP_OPERATIONS: readonly TaskAppOperation[] = [
 
   operation('get_app_info', 'Read brigd server mode, available providers, default directory and scheduler status.', 'GET', '/api/info'),
   operation('get_general_settings', 'Read time limits for agent turns and merge checks, the default project directory, card schedule, the worker preselected for new cards in the UI form and the per-provider replacement workers for exhausted usage limits.', 'GET', '/api/settings/general'),
-  operation('update_general_settings', 'Update the app\'s default project directory, card schedule, default worker and/or the replacement workers that pick up fresh runs when a provider reports exhausted usage limits. Time limits apply to new turns and merge attempts, including existing cards; other defaults apply to new cards.', 'PATCH', '/api/settings/general', { data: object({ defaultCwd: { ...text(4_096), description: 'Existing absolute project directory.' }, defaultSchedule: schedule,
+  operation('update_general_settings', 'Update the app\'s default project directory, card schedule, default worker and/or the replacement workers that pick up fresh runs when a provider reports exhausted usage limits. Time limits apply to new turns and merge attempts, including existing cards; other defaults apply to new cards.', 'PATCH', '/api/settings/general', { data: object({ defaultCwd: { ...text(4_096), description: 'Existing absolute project directory.' }, defaultSchedule: { type: 'string', enum: [...DEFAULT_SCHEDULES], description: 'Launch mode preselected in the UI form of a new card. daily is not accepted: its time is chosen per card.' },
     agentTimeLimitMinutes: { ...nullable({ type: 'integer', minimum: 1, maximum: 1440 }), description: 'Maximum minutes per agent turn, including follow-ups and the Integrator; null means unlimited. Task timeLimitMinutes overrides this.' },
     integrationCheckTimeLimitMinutes: { ...nullable({ type: 'integer', minimum: 1, maximum: 1440 }), description: 'Maximum minutes per merge check command, including retries; null means unlimited. Frozen for each new merge attempt.' },
     defaultWorkerId: { ...nullable(id), description: 'Active worker preselected in the UI form of a new single-worker card, or null for none. create_task does not apply it; pass workerId explicitly.' }, fallbackWorkers }, [], { minProperties: 1 }) }),

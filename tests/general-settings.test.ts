@@ -145,6 +145,14 @@ describe('general settings', () => {
     expect(await (await request()).json()).toEqual({ webhookUrl: '', webhookSecret: '', agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: process.cwd(), defaultSchedule: schedule, defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
   });
 
+  test('the daily schedule is not a default launch type: its time is chosen per card', async () => {
+    store.setDefaultSchedule('interval');
+    const response = await request('/api/settings/general', 'PATCH', { defaultSchedule: 'daily' });
+    expect(response.status).toBe(400);
+    expect(store.getDefaultSchedule()).toBe('interval');
+    expect(() => store.db.exec("UPDATE general_settings SET default_schedule='daily' WHERE singleton=1")).toThrow();
+  });
+
   test('partial writes preserve the other setting and combined writes save both', async () => {
     const project = join(folder, 'next-project');
     mkdirSync(project);

@@ -8,6 +8,7 @@ import { validateWorkflowSteps } from './workflows';
 import { attachmentIds } from './attachments';
 import { effortOptions, normalizeModel, normalizeWorkerDescription } from '../src/lib/workers';
 import { validateTagIds } from './tags';
+import { isTaskSchedule, isTimeOfDay, normalizeWeekdays, TIME_ZONE_MAX_LENGTH, WEEKDAYS } from '../src/lib/schedule';
 
 export function textField(value: unknown, label: string, max: number): string {
   if (typeof value !== 'string' || !value.trim() || value.length > max || value.includes('\0')) throw new AppError(`${label}: введите от 1 до ${max} символов`);
@@ -20,6 +21,25 @@ export function validateTimeLimitMinutes(value: unknown): number | null {
     throw new AppError('Лимит времени: введите целое число от 1 до 1440 минут или null');
   }
   return value;
+}
+
+/** The zone daily times are read in when a request names none: the service's own, saved into the card so it never drifts. */
+export const serviceTimeZone = () => new Intl.DateTimeFormat().resolvedOptions().timeZone;
+/** A daily schedule's time, weekdays (every day when omitted) and time zone (the service's when omitted), stored in canonical form.
+ * The zone already saved in the card is kept as is, so pausing still works should this runtime no longer know it. */
+export function validateDailySchedule(v: { timeOfDay?: unknown; weekdays?: unknown; timeZone?: unknown }, savedTimeZone: string | null = null): { timeOfDay: string; weekdays: number[]; timeZone: string } {
+  if (!isTimeOfDay(v.timeOfDay)) throw new AppError('Время запуска: укажите ЧЧ:ММ от 00:00 до 23:59');
+  const weekdays = v.weekdays == null ? [...WEEKDAYS] : normalizeWeekdays(v.weekdays);
+  if (!weekdays) throw new AppError('Дни недели: укажите от 1 до 7 разных чисел от 1 (понедельник) до 7 (воскресенье)');
+  let timeZone: string;
+  if (v.timeZone == null) timeZone = serviceTimeZone();
+  else if (savedTimeZone !== null && v.timeZone === savedTimeZone) timeZone = savedTimeZone;
+  else {
+    if (typeof v.timeZone !== 'string' || !v.timeZone.trim() || v.timeZone.length > TIME_ZONE_MAX_LENGTH) throw new AppError('Часовой пояс: укажите название IANA, например Europe/Moscow');
+    try { timeZone = new Intl.DateTimeFormat('en-US', { timeZone: v.timeZone.trim() }).resolvedOptions().timeZone; }
+    catch { throw new AppError('Часовой пояс: укажите название IANA, например Europe/Moscow'); }
+  }
+  return { timeOfDay: v.timeOfDay, weekdays, timeZone };
 }
 
 export async function validateTask(value: unknown): Promise<TaskInput> {
@@ -37,7 +57,7 @@ export async function validateTask(value: unknown): Promise<TaskInput> {
     cwd = await realpath(cwdInput);
     if (!(await stat(cwd)).isDirectory()) throw new Error('Not a directory');
   } catch { throw new AppError('Рабочая папка не существует или недоступна сервису'); }
-  if (v.schedule !== 'manual' && v.schedule !== 'interval' && v.schedule !== 'auto') throw new AppError('Неизвестное расписание');
+  if (!isTaskSchedule(v.schedule)) throw new AppError('Неизвестное расписание');
   if (typeof v.paused !== 'boolean') throw new AppError('paused должен быть boolean');
   const ultracode = v.ultracode ?? null;
   if (ultracode !== null && typeof ultracode !== 'boolean') throw new AppError('ultracode должен быть true, false или null');
@@ -53,7 +73,8 @@ export async function validateTask(value: unknown): Promise<TaskInput> {
       firstRunAt = v.firstRunAt;
     }
   }
-  return { ...(v.timeLimitMinutes !== undefined ? { timeLimitMinutes: validateTimeLimitMinutes(v.timeLimitMinutes) } : {}), ...(v.tagIds !== undefined ? { tagIds: validateTagIds(v.tagIds) } : {}), ...(v.attachmentIds !== undefined ? { attachmentIds: attachmentIds(v.attachmentIds) } : {}), steps: validateWorkflowSteps(v.steps), workerId, title, instruction, provider: v.provider, cwd, ultracode, priority, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
+  const daily = v.schedule === 'daily' ? validateDailySchedule(v) : { timeOfDay: null, weekdays: null, timeZone: null };
+  return { ...(v.timeLimitMinutes !== undefined ? { timeLimitMinutes: validateTimeLimitMinutes(v.timeLimitMinutes) } : {}), ...(v.tagIds !== undefined ? { tagIds: validateTagIds(v.tagIds) } : {}), ...(v.attachmentIds !== undefined ? { attachmentIds: attachmentIds(v.attachmentIds) } : {}), steps: validateWorkflowSteps(v.steps), workerId, title, instruction, provider: v.provider, cwd, ultracode, priority, schedule: v.schedule, intervalMinutes, firstRunAt, ...daily, paused: v.paused };
 }
 
 /** The autopilot switch. A stop time is optional; when enabling it must lie ahead and within a month. */
