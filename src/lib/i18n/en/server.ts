@@ -23,6 +23,7 @@ export const messages: Dictionary = {
   'Недопустимый путь': 'Path not allowed',
   'Внутренняя ошибка. Подробности в терминале сервиса.': 'Internal error. See the service terminal for details.',
   'Слишком много одновременных загрузок. Повторите через несколько секунд.': 'Too many uploads at once. Try again in a few seconds.',
+  'Слишком много открытых потоков событий. Закройте лишние вкладки brigd.': 'Too many open event streams. Close extra brigd tabs.',
   'Укажите только поле mode': 'Specify only the mode field',
   'Допускается только поле includeCandidates типа boolean': 'Only the boolean includeCandidates field is allowed',
   'Укажите только поле integrationChecks': 'Specify only the integrationChecks field',

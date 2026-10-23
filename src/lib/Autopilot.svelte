@@ -5,6 +5,7 @@
   import { TASK_STATUS_LABELS } from './status';
   import { DEFAULT_TASK_PRIORITY, TASK_PRIORITIES, TASK_PRIORITY_LABELS } from './priority';
   import { formatDate, serverText, t } from './i18n';
+  import { subscribe } from './events';
   import type { AutopilotInput, AutopilotOverview, AutopilotSettings, Run, Task, TaskStatus } from './types';
 
   let { tasks, settings, checksRequired, notify, onopen, onchanged, onsettings, onstatus }: {
@@ -99,7 +100,7 @@
   }
 
   async function load(force = false) {
-    if (reading || dragId || (pending && !force)) return;
+    if (reading || dragId || (pending && !force)) return false;
     reading = true;
     const readSequence = ++sequence;
     try {
@@ -113,10 +114,9 @@
 
   onMount(() => {
     void load();
-    const interval = setInterval(() => { if (document.visibilityState === 'visible') void load(); }, 2000);
-    const onVisible = () => { if (document.visibilityState === 'visible') void load(); };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => { alive = false; sequence++; clearInterval(interval); document.removeEventListener('visibilitychange', onVisible); };
+    // The queue and the report show task cards, their runs and workers.
+    const unsubscribe = subscribe(['autopilot', 'tasks', 'workers'], () => load());
+    return () => { alive = false; sequence++; unsubscribe(); };
   });
 
   async function save(input: AutopilotInput, success: string) {

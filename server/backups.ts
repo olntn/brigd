@@ -7,7 +7,9 @@ import type { BackupEntry, BackupOverview } from '../src/lib/types';
 export type { BackupEntry, BackupOverview } from '../src/lib/types';
 
 export const BACKUP_MAX_BYTES = 256 * 1024 * 1024;
-export interface BackupManagerOptions { dbPath: string; updateBackupDir: string; }
+export interface BackupManagerOptions { dbPath: string; updateBackupDir: string;
+  /** Called after the list of backups, their names or the selection changed. */
+  onChange?: () => void; }
 interface BackupState {
   version: 1;
   selectedId: string | null;
@@ -84,8 +86,10 @@ export class BackupManager {
   readonly directory: string;
   private readonly updateDirectory: string;
   private readonly statePath: string;
+  private readonly onChange?: () => void;
 
   constructor(options: BackupManagerOptions) {
+    this.onChange = options.onChange;
     const database = resolve(options.dbPath);
     this.dbPath = existsSync(database) ? realpathSync(database) : database;
     // Databases beside each other must not share imported files or a selected backup.
@@ -218,12 +222,14 @@ export class BackupManager {
     if (state.selectedId === id) throw new AppError('Текущий выбранный бэкап удалить нельзя', 409);
     const { path } = this.file(id);
     rmSync(path);
-    syncPath(dirname(path));
-    if (Object.hasOwn(state.names, id) || Object.hasOwn(state.createdAt, id)) {
-      delete state.names[id];
-      delete state.createdAt[id];
-      this.writeState(state);
-    }
+    try {
+      syncPath(dirname(path));
+      if (Object.hasOwn(state.names, id) || Object.hasOwn(state.createdAt, id)) {
+        delete state.names[id];
+        delete state.createdAt[id];
+        this.writeState(state);
+      }
+    } finally { this.onChange?.(); }
   }
 
   download(id: string): { path: string; name: string } {
@@ -288,6 +294,7 @@ export class BackupManager {
       renameSync(temporary, target.path);
       replaced = true;
       syncPath(directory);
+      this.onChange?.();
       return this.entry(id, next);
     } catch (error) {
       if (replaced) {
@@ -312,6 +319,7 @@ export class BackupManager {
       syncPath(this.directory);
       state.names[id] = name;
       this.writeState(state);
+      this.onChange?.();
       return this.entry(id, state);
     } catch (error) { rmSync(path, { force: true }); throw error; }
   }
@@ -364,6 +372,7 @@ export class BackupManager {
       try { this.writeState(state); } catch {}
       throw error;
     }
+    this.onChange?.();
   }
 
   private assertLocalDirectory(): void {

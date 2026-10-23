@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { AppError, nextOccurrence, Store } from '../server/store';
+import { TABLE_SCOPES, writeScopes } from '../server/changes';
+import type { ChangeScope } from '../src/lib/change-scopes';
 import type { RunStatus, TaskInput, TaskPriority } from '../src/lib/types';
 
 const MINUTE = 60_000;
@@ -674,5 +676,85 @@ describe('autopilot', () => {
     expect(store.claimDue(true, BASE + 60 * MINUTE)).toEqual([]);
     expect(store.updateTask(task.id, input({ ...task, schedule: 'interval', intervalMinutes: 5, firstRunAt: BASE + MINUTE }), BASE).nextRunAt).toBe(BASE + MINUTE);
     expect(store.updateTask(task.id, auto(), BASE).nextRunAt).toBeNull();
+  });
+});
+
+describe('change revision', () => {
+  const record = () => {
+    const seen: ChangeScope[][] = [];
+    const stop = store.onChange(scopes => { seen.push([...scopes]); });
+    return { stop, scopes: () => [...new Set(seen.splice(0).flat())].sort() };
+  };
+
+  test('every table has an explicit scope mapping', () => {
+    const rows = store.db.query("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as { name: string; sql: string }[];
+    const virtual = rows.filter(row => /^CREATE VIRTUAL TABLE/i.test(row.sql)).map(row => row.name);
+    // Full-text search keeps its own shadow tables beside the virtual one.
+    const tables = rows.map(row => row.name).filter(name => !virtual.some(table => name.startsWith(`${table}_`)));
+    expect(tables.filter(table => !Object.hasOwn(TABLE_SCOPES, table))).toEqual([]);
+  });
+
+  test('statements are classified by the tables they write', () => {
+    expect(writeScopes('SELECT * FROM tasks WHERE updated_at > ?')).toEqual([]);
+    expect(writeScopes('UPDATE runs SET status=? WHERE id=?')).toEqual(['tasks']);
+    expect(writeScopes('INSERT OR REPLACE INTO general_settings (singleton,default_cwd) VALUES (1,?)')).toEqual(['settings']);
+    expect(writeScopes('INSERT INTO tags(id,name) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name')).toEqual(['tags']);
+    expect(writeScopes('DELETE FROM mcp_tool_operations WHERE key=?')).toEqual([]);
+    expect(writeScopes('CREATE TABLE x (a TEXT REFERENCES tasks(id) ON UPDATE CASCADE)')).toEqual([]);
+  });
+
+  test('mutations report their scope and advance the revision; reads and writes that change no row stay silent', () => {
+    const events = record();
+    const start = store.revision;
+    const task = store.createTask(input(), BASE);
+    expect(events.scopes()).toEqual(['tasks']);
+    expect(store.revision).toBeGreaterThan(start);
+    const worker = store.createWorker({ name: 'Анна', provider: 'codex', model: null, effort: 'default', communicationStyle: '', avatarUrl: null } as never, BASE);
+    expect(events.scopes()).toEqual(['workers']);
+    store.createTag({ name: 'Срочно' } as never, BASE);
+    expect(events.scopes()).toEqual(['tags']);
+    store.updateGeneralSettings({ defaultSchedule: 'interval' });
+    expect(events.scopes()).toEqual(['settings']);
+    store.createInstruction({ title: 'Стиль', body: 'Кратко.', enabled: true }, BASE);
+    expect(events.scopes()).toEqual(['instructions']);
+    store.createDocPage({ parentId: null } as never, BASE);
+    expect(events.scopes()).toEqual(['docs']);
+    store.setAutopilot({ enabled: true, until: null }, BASE);
+    expect(events.scopes()).toEqual(['autopilot']);
+    const run = store.startManual(task.id, true, BASE);
+    store.setRunProgress(run.id, { turn: run.turn, currentStepIndex: run.currentStepIndex, attemptId: null }, 'Чтение кода', BASE + 1);
+    expect(events.scopes()).toContain('tasks');
+    const revision = store.revision;
+    store.listTasks();
+    store.detail(task.id);
+    store.listWorkers();
+    store.autopilotOverview();
+    store.db.query('UPDATE tasks SET title=? WHERE id=?').run('Missing', 'no-such-task');
+    expect(store.revision).toBe(revision);
+    expect(events.scopes()).toEqual([]);
+    expect(worker.id).toBeString();
+    events.stop();
+    store.createTask(input(), BASE);
+    expect(events.scopes()).toEqual([]);
+  });
+
+  test('a failing listener never rolls back the write that reported it', () => {
+    const stop = store.onChange(() => { throw new Error('Listener failure'); });
+    const error = console.error;
+    console.error = () => {};
+    try {
+      const task = store.createTask(input(), BASE);
+      expect(store.getTask(task.id).title).toBe('Inspect repository');
+    } finally { console.error = error; stop(); }
+  });
+
+  test('each opened Store is a separate instance whose revision starts again', () => {
+    store.createTask(input(), BASE);
+    expect(store.revision).toBeGreaterThan(0);
+    const other = new Store(join(folder, 'trackt.sqlite'));
+    try {
+      expect(other.instance).not.toBe(store.instance);
+      expect(other.revision).toBe(0);
+    } finally { other.close(); }
   });
 });

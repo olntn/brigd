@@ -5,7 +5,7 @@
   import type { Tag } from './types';
 
   let { tags, selected = $bindable([]), disabled = false, loading = false, error = '', onreload }:
-    { tags: Tag[]; selected?: string[]; disabled?: boolean; loading?: boolean; error?: string; onreload: () => void | Promise<void> } = $props();
+    { tags: Tag[]; selected?: string[]; disabled?: boolean; loading?: boolean; error?: string; onreload: () => unknown } = $props();
   let search = $state('');
   let searchInput = $state<HTMLInputElement>();
   let query = $derived(search.trim().toLocaleLowerCase('ru-RU'));

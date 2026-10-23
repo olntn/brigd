@@ -22,7 +22,7 @@ function fixture(progress: RunProgress | null, status: Run['status'] = 'running'
 }
 
 async function serve(page: Page, initial: TaskDetail) {
-  const state = { detail: initial };
+  const state = { detail: initial, revision: 0 };
   const info: AppInfo = {
     mode: 'mock', cwd: '/workspace/project', scheduler: 'running', startedAt: timestamp,
     providers: [{ id: 'codex', available: true, label: 'Codex' }, { id: 'claude', available: true, label: 'Claude Code' }],
@@ -34,6 +34,9 @@ async function serve(page: Page, initial: TaskDetail) {
     else if (path === '/api/info') await route.fulfill({ json: info });
     else if (path === '/api/tasks') await route.fulfill({ json: [state.detail.task] });
     else if (path === `/api/tasks/${taskId}`) await route.fulfill({ json: state.detail });
+    // Each short stream reports the fixture revision; the page reconnects and rereads once it changes.
+    else if (path === '/api/events') await route.fulfill({ contentType: 'text/event-stream',
+      body: `event: ready\ndata: ${JSON.stringify({ instance: 'task-progress-fixture', revision: state.revision })}\n\n` });
     else if (path === '/api/workers' || path === '/api/instructions' || path === '/api/models' || path === '/api/tags') await route.fulfill({ json: [] });
     else await route.fulfill({ status: 404, json: { error: 'Unknown progress fixture' } });
   });
@@ -48,6 +51,7 @@ test('the agent-reported progress status follows the running task on the board, 
   await expect(card.locator('.card-progress')).toHaveText('Сбор информации о проекте');
 
   state.detail = fixture({ text: 'Написание кода', updatedAt: timestamp + 30_000 });
+  state.revision++;
   await expect(card.locator('.card-progress')).toHaveText('Написание кода', { timeout: 6_000 });
   await page.screenshot({ path: testInfo.outputPath('task-progress-board.png') });
 
@@ -64,6 +68,7 @@ test('the agent-reported progress status follows the running task on the board, 
 
   // A finished run keeps only its lifecycle status.
   state.detail = fixture(null, 'completed');
+  state.revision++;
   await expect(dialog.locator('.detail-progress')).toHaveCount(0, { timeout: 6_000 });
   await expect(dialog.locator('.drawer-badges .status-badge')).toHaveText('Завершено');
   await page.keyboard.press('Escape');

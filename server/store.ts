@@ -1,6 +1,6 @@
-import { Database } from 'bun:sqlite';
+import type { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CheckTriage, CheckTriageCounts, CheckTriageOutcome, CliAccessMode, Comment, ConcurrencySettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunCheckFailure, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
@@ -28,6 +28,8 @@ import { validateModel, validateModelPatch } from './models';
 import { followupRequestText, handbackOutput, validateFollowup } from './followups';
 import { attachmentIds, preparedAttachmentPayload, type PreparedAttachment } from './attachments';
 import { ATTACHMENT_MAX_COUNT, ATTACHMENT_TASK_MAX_COUNT, ATTACHMENT_TASK_MAX_BYTES, ATTACHMENT_STAGING_MAX_COUNT, ATTACHMENT_STAGING_MAX_BYTES, ATTACHMENT_TOTAL_MAX_BYTES, ATTACHMENT_STAGING_TTL_MS } from '../src/lib/attachments';
+import { ChangeTrackingDatabase } from './changes';
+import type { ChangeScope } from '../src/lib/change-scopes';
 export { AppError } from './errors';
 type Row = Record<string, any>;
 const ATTACHMENT_COLUMNS = 'a.id,a.task_id,a.comment_id,a.run_id,a.step_index,a.attempt_id,a.source,a.name,a.mime,a.size,a.sha256,a.previewable,a.created_at';
@@ -268,8 +270,13 @@ export function nextOccurrence(due: number, intervalMinutes: number, now: number
 
 export class Store {
   readonly db: Database;
+  /** Identifies this connection to `/api/events` clients: a restored or restarted database is a new instance. */
+  readonly instance = randomUUID();
+  private changeRevision = 0;
+  private changeListeners = new Set<(scopes: readonly ChangeScope[], revision: number) => void>();
   constructor(path = ':memory:') {
-    this.db = new Database(path, { create: true });
+    const db = new ChangeTrackingDatabase(path, { create: true });
+    this.db = db;
     this.db.exec(`PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;
       CREATE TABLE IF NOT EXISTS avatars (
         id TEXT PRIMARY KEY, mime TEXT NOT NULL, data BLOB NOT NULL, created_at INTEGER NOT NULL
@@ -535,8 +542,27 @@ export class Store {
     this.db.transaction(() => {
       this.db.exec(`DROP INDEX IF EXISTS one_open_run; CREATE UNIQUE INDEX one_open_run ON runs(task_id) WHERE ${OCCUPIED}`);
     }).immediate();
+    // Every later write on this connection, from any module, advances the revision.
+    db.onWrite = scopes => this.changed(...scopes);
   }
   close() { this.db.close(); }
+  /** Count of writes reported since this Store opened. */
+  get revision(): number { return this.changeRevision; }
+  /** Reports a change; also usable for data kept outside this database. */
+  changed(...scopes: ChangeScope[]): void {
+    if (!scopes.length) return;
+    const revision = ++this.changeRevision;
+    for (const listener of this.changeListeners) {
+      // Runs inside the caller's transaction: a listener failure must never roll back the write.
+      try { listener(scopes, revision); }
+      catch (error) { console.error('[brigd] Обработчик изменений завершился с ошибкой:', error); }
+    }
+  }
+  /** Listeners run synchronously, possibly before the transaction commits; they should only schedule work. */
+  onChange(listener: (scopes: readonly ChangeScope[], revision: number) => void): () => void {
+    this.changeListeners.add(listener);
+    return () => { this.changeListeners.delete(listener); };
+  }
   getCliAccessMode(): CliAccessMode | undefined {
     const row = this.db.query('SELECT mode FROM cli_access_settings WHERE singleton=1').get() as { mode: CliAccessMode | null };
     return row.mode ?? undefined;

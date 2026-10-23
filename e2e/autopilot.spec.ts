@@ -67,19 +67,24 @@ test('navigation distinguishes loading and unavailable status and recovers', asy
   await page.reload();
   const navigation = page.getByRole('button', { name: 'Автопилот', exact: true });
   const badge = navigation.locator('.autopilot-nav-status');
+  // The status is read again on change events, reconnects and on returning to the tab; the last one is easy to trigger here.
+  const reread = () => page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
   await expect(navigation).toHaveAccessibleDescription('Загрузка…');
   release();
   await expect(navigation).toHaveAccessibleDescription('Неизвестно');
   await expect(badge).toHaveClass(/is-unknown/);
 
   unavailable = false;
+  await reread();
   await expect(navigation).toHaveAccessibleDescription('Выключен');
   await expect(badge).not.toHaveClass(/is-unknown/);
   await navigation.click();
   await expect(page.getByRole('region', { name: 'Состояние автопилота' })).toBeVisible();
   unavailable = true;
+  await reread();
   await expect(navigation).toHaveAccessibleDescription('Неизвестно');
   unavailable = false;
+  await reread();
   await expect(navigation).toHaveAccessibleDescription('Выключен');
 });
 

@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import type { AgentCallbacks, AgentInput, AgentOutcome } from '../server/adapter';
 import { Engine, type AgentFactory } from '../server/engine';
 import { createHandler } from '../server/http';
+import { EventStreams } from '../server/events';
 import { Store } from '../server/store';
+import { readEvents } from './sse';
 import { TASK_JSON_LIMIT } from '../server/workflows';
 import type { Run, Task, TaskDetail, TaskInput } from '../src/lib/types';
 
@@ -549,4 +551,127 @@ describe('CLI setup endpoints', () => {
     expect(readFileSync(join(folder, 'home', '.codex', 'config.toml'), 'utf8')).toContain('sandbox_mode = "workspace-write"');
     expect((await (await request('/api/cli-config/codex', 'POST')).json()).added).toEqual([]);
   });
+});
+
+describe('change events', () => {
+  const open = (headers: Record<string, string> = {}, signal?: AbortSignal) =>
+    handler(new Request(ORIGIN + '/api/events', { headers: { origin: ORIGIN, ...headers }, signal }));
+
+  test('the stream starts at the current revision and groups later changes by scope', async () => {
+    store.createTask(valid());
+    const response = await open();
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('text/event-stream; charset=utf-8');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    const events = readEvents(response);
+    try {
+      expect(await events.next()).toEqual({ event: 'ready', data: { instance: store.instance, revision: store.revision } });
+      const before = store.revision;
+      await createTask();
+      expect((await request('/api/tags', 'POST', { name: 'Срочно' })).status).toBe(201);
+      const change = await events.next();
+      expect(change?.event).toBe('change');
+      expect(change?.data.scopes.sort()).toEqual(['tags', 'tasks']);
+      expect(change?.data.revision).toBe(store.revision);
+      expect(store.revision).toBeGreaterThan(before);
+      // Reads and requests that change nothing stay silent.
+      expect((await request('/api/tasks')).status).toBe(200);
+      expect((await request('/api/settings/general')).status).toBe(200);
+      expect(await events.quiet(300)).toBe(true);
+      expect((await request('/api/instructions', 'POST', { title: 'Стиль', body: 'Пиши кратко.', enabled: true })).status).toBe(201);
+      expect((await events.next())?.data.scopes).toEqual(['instructions']);
+    } finally { await events.cancel(); }
+  });
+
+  test('runs, their progress and engine transitions report the tasks scope', async () => {
+    const task = await createTask();
+    const events = readEvents(await open());
+    try {
+      await events.next();
+      expect((await request(`/api/tasks/${task.id}/run`, 'POST')).status).toBe(201);
+      expect((await events.next())?.data.scopes).toEqual(['tasks']);
+      await flush();
+      expect(calls).toHaveLength(1);
+      calls[0]!.callbacks.onProgress?.('Чтение кода');
+      expect((await events.next())?.data.scopes).toEqual(['tasks']);
+      calls[0]!.resolve({ envelope: { status: 'completed', summary: 'Готово', questions: [] }, sessionId: '0199a213-81c0-7800-8aa1-bbab2a035a53' });
+      expect((await events.next())?.data.scopes).toEqual(['tasks']);
+      expect((await detail(task.id)).task.status).toBe('completed');
+    } finally { await events.cancel(); }
+  });
+
+  test('backup files outside the database report the backups scope', async () => {
+    const events = readEvents(await open());
+    try {
+      await events.next();
+      const created = await request('/api/backups', 'POST');
+      expect(created.status).toBe(201);
+      expect((await events.next())?.data.scopes).toEqual(['backups']);
+      const { id } = await created.json();
+      expect((await request(`/api/backups/${encodeURIComponent(id)}`, 'PATCH', { name: 'Перед экспериментом.sqlite' })).status).toBe(200);
+      expect((await events.next())?.data.scopes).toEqual(['backups']);
+      expect((await request(`/api/backups/${encodeURIComponent(id)}`, 'DELETE')).status).toBe(200);
+      expect((await events.next())?.data.scopes).toEqual(['backups']);
+    } finally { await events.cancel(); }
+  });
+
+  test('applies the same Host, Origin and fetch-metadata checks as the rest of the API', async () => {
+    const events = new EventStreams();
+    handler = createHandler(engine, { port: PORT, root: folder, events });
+    expect((await open({ host: 'evil.test:4310' })).status).toBe(403);
+    expect((await open({ origin: 'https://evil.test' })).status).toBe(403);
+    expect((await open({ 'sec-fetch-site': 'cross-site' })).status).toBe(403);
+    expect((await handler(new Request(ORIGIN + '/api/events', { method: 'POST', headers: { origin: ORIGIN, 'content-type': 'application/json' }, body: '{}' }))).status).toBe(404);
+    expect(events.size).toBe(0);
+  });
+
+  test('limits open streams, frees a slot when a client leaves and closes every stream on request', async () => {
+    const events = new EventStreams({ limit: 2 });
+    handler = createHandler(engine, { port: PORT, root: folder, events });
+    const leaving = new AbortController();
+    const first = await open({}, leaving.signal);
+    const second = readEvents(await open());
+    expect(events.size).toBe(2);
+    const refused = await open();
+    expect(refused.status).toBe(429);
+    expect((await refused.json()).error).toContain('Слишком много открытых потоков событий');
+    leaving.abort();
+    expect(first.status).toBe(200);
+    expect(events.size).toBe(1);
+    // A handler created later, as after a restore, shares the same limit.
+    handler = createHandler(engine, { port: PORT, root: folder, events });
+    const third = readEvents(await open());
+    expect(events.size).toBe(2);
+    expect((await open()).status).toBe(429);
+    expect((await second.next())?.event).toBe('ready');
+    expect((await third.next())?.event).toBe('ready');
+    events.closeAll();
+    expect(events.size).toBe(0);
+    expect(await second.next()).toBeNull();
+    expect(await third.next()).toBeNull();
+    // Closed streams no longer follow the Store.
+    await createTask();
+    const reader = readEvents(await open());
+    expect((await reader.next())?.event).toBe('ready');
+    await reader.cancel();
+    await Bun.sleep(0);
+    expect(events.size).toBe(0);
+  });
+
+  test('a native stream outlives Bun\'s idle timeout and keeps sending heartbeats', async () => {
+    // Bun checks idle sockets every few seconds: the first heartbeat comes after the cut-off an idle stream would hit.
+    const events = new EventStreams({ heartbeatMs: 4_500 });
+    let native!: ReturnType<typeof createHandler>;
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, idleTimeout: 1, fetch: (req, srv) => native(req, srv) });
+    try {
+      native = createHandler(engine, { port: server.port!, root: folder, events });
+      const stream = readEvents(await fetch(`http://127.0.0.1:${server.port}/api/events`));
+      try {
+        expect((await stream.next())?.event).toBe('ready');
+        expect(await stream.next(6_000)).toEqual({ comment: 'heartbeat' });
+        store.createTag({ name: 'После паузы' } as never);
+        expect((await stream.next())?.data.scopes).toEqual(['tags']);
+      } finally { await stream.cancel(); }
+    } finally { events.closeAll(); server.stop(true); }
+  }, 15_000);
 });

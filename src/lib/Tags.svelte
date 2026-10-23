@@ -9,7 +9,7 @@
     tags: Tag[];
     loading: boolean;
     error: string;
-    onreload: () => void | Promise<void>;
+    onreload: () => unknown;
     onchanged: (tag: Tag) => void;
     ondeleted: (id: string) => void;
     onmutation?: (pending: boolean) => void;
