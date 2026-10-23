@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, symlinkSync, linkSync, mkdirSync, renameSync, chmodSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, symlinkSync, linkSync, mkdirSync, renameSync, chmodSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import sharp from 'sharp';
@@ -7,7 +7,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { Store, runFence } from '../server/store';
 import { prepareAttachment } from '../server/attachments';
-import { createTaskBroker, createTaskBridge, type TaskBroker } from '../server/task-mcp';
+import { createTaskBroker, createTaskBridge, taskHelperPath, type TaskBroker } from '../server/task-mcp';
 import { MAX_TASK_READ_BYTES, MAX_TASK_TOOL_CALLS, TASK_MCP_TOOLS, MAX_TASK_RESULT_TOTAL_BYTES, type TaskToolResult } from '../server/task-mcp-protocol';
 import type { TaskInput } from '../src/lib/types';
 
@@ -155,6 +155,37 @@ describe('authoritative current-task MCP broker', () => {
     let total = 0, successes = 0, stopped = false;
     for (let i = 0; i <= MAX_TASK_TOOL_CALLS; i++) { const r = await call(broker, 'view_attachment', { attachment_id: a.id }); if (r.isError) { stopped = true; break; } total += Buffer.byteLength(JSON.stringify(r)); successes++; }
     expect(stopped).toBe(true); expect(successes).toBeGreaterThan(0); expect(total).toBeLessThanOrEqual(MAX_TASK_RESULT_TOTAL_BYTES);
+  });
+});
+
+describe('task MCP helper selection', () => {
+  test('a packaged helper older than any source it could bundle is never offered to agents', () => {
+    const server = join(directory, 'server'), lib = join(directory, 'lib'), bundled = join(directory, 'task-mcp-stdio.js'), source = join(directory, 'task-mcp-stdio.ts');
+    mkdirSync(server); mkdirSync(lib);
+    const at = (path: string, seconds: number) => utimesSync(path, seconds, seconds);
+    for (const [path, seconds] of [[join(server, 'task-mcp-protocol.ts'), 1000], [join(lib, 'progress.ts'), 1000], [join(lib, 'Card.svelte'), 5000]] as const) { writeFileSync(path, ''); at(path, seconds); }
+    const select = () => taskHelperPath(bundled, [server, lib], source);
+    expect(select()).toBe(source);
+    writeFileSync(bundled, ''); at(bundled, 2000);
+    expect(select()).toBe(bundled);
+    // A merged tool, e.g. set_progress, changes the sources while `bun run dev` keeps the old dist.
+    at(join(server, 'task-mcp-protocol.ts'), 3000);
+    expect(select()).toBe(source);
+    at(bundled, 3000);
+    expect(select()).toBe(bundled);
+    at(join(lib, 'progress.ts'), 4000);
+    expect(select()).toBe(source);
+  });
+  test('the helper a bridge launches lists exactly the current task tools', async () => {
+    const { broker } = setup();
+    expect(broker.agentConfig.args).toEqual([taskHelperPath()]);
+    const client = new Client({ name: 'brigd-test', version: '1.0.0' });
+    const transport = new StdioClientTransport({ command: broker.agentConfig.command, args: broker.agentConfig.args, stderr: 'pipe',
+      env: { BRIGD_TASK_SOCKET: join(directory, 'absent.sock'), BRIGD_TASK_CAPABILITY: '1'.repeat(64) } });
+    try {
+      await client.connect(transport);
+      expect((await client.listTools()).tools.map(tool => tool.name)).toEqual([...TASK_MCP_TOOLS]);
+    } finally { await client.close(); }
   });
 });
 
