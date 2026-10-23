@@ -2,12 +2,13 @@ import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CliAccessMode, Comment, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocReference, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
+import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CliAccessMode, Comment, ConcurrencySettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocReference, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
 import type { IntegrationRecord, WorkspaceRun } from './workspace-storage';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { AUTOPILOT_FAILURE_LIMIT } from '../src/lib/autopilot';
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
+import { CONCURRENCY_LIMIT_MAX, validateConcurrencyLimit } from '../src/lib/concurrency';
 import { DEFAULT_TAG_COLOR, TAG_COUNT_LIMIT } from '../src/lib/tags';
 import { tagNameKey, validateTag, validateTagIds, validateTagPatch } from './tags';
 import { validateInstruction, validateInstructionPatch, validateInstructionSnapshots } from './instructions';
@@ -28,6 +29,8 @@ type Row = Record<string, any>;
 const ATTACHMENT_COLUMNS = 'a.id,a.task_id,a.comment_id,a.run_id,a.step_index,a.attempt_id,a.source,a.name,a.mime,a.size,a.sha256,a.previewable,a.created_at';
 const OPEN = "'queued','preparing','running','cancelling','waiting_input','interrupted'";
 const OCCUPIED = `(status IN (${OPEN}) OR (steps_snapshot != '[]' AND status IN ('failed','blocked')))`;
+/** A conflict handed to the built-in integrator, over the runs table `r`. */
+const INTEGRATOR_WORK = "(r.trigger='reconcile')";
 /** The autopilot queue order a person arranges by dragging; creation order breaks ties. */
 const AUTOPILOT_ORDER = 'autopilot_position IS NULL, autopilot_position, created_at, rowid';
 export interface RunFence { turn: number; currentStepIndex: number | null; attemptId: string | null; }
@@ -388,6 +391,12 @@ export class Store {
     this.db.exec(`CREATE TABLE IF NOT EXISTS cli_access_settings (
       singleton INTEGER PRIMARY KEY CHECK(singleton=1), mode TEXT CHECK(mode IN ('standard','full'))
     ); INSERT OR IGNORE INTO cli_access_settings (singleton,mode) VALUES (1,NULL)`);
+    // Saved process limits; NULL follows BRIGD_MAX_PARALLEL / BRIGD_MAX_PER_REPOSITORY.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS concurrency_settings (
+      singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+      max_parallel INTEGER CHECK(max_parallel BETWEEN 1 AND ${CONCURRENCY_LIMIT_MAX}),
+      max_per_repository INTEGER CHECK(max_per_repository BETWEEN 1 AND ${CONCURRENCY_LIMIT_MAX})
+    ); INSERT OR IGNORE INTO concurrency_settings (singleton) VALUES (1)`);
     this.db.transaction(() => {
       this.db.exec(`CREATE TABLE IF NOT EXISTS general_settings (
         singleton INTEGER PRIMARY KEY CHECK(singleton=1), default_cwd TEXT,
@@ -570,6 +579,27 @@ export class Store {
     try { validated = checks === null ? null : validateIntegrationChecks(checks); }
     catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректный BRIGD_INTEGRATION_CHECKS'); }
     this.db.query('UPDATE autopilot_settings SET integration_checks=? WHERE singleton=1').run(validated === null ? null : JSON.stringify(validated));
+  }
+  getConcurrencyLimits(): ConcurrencySettings['saved'] {
+    const row = this.db.query('SELECT max_parallel,max_per_repository FROM concurrency_settings WHERE singleton=1').get() as { max_parallel: number | null; max_per_repository: number | null };
+    return { maxParallel: row.max_parallel, maxPerRepository: row.max_per_repository };
+  }
+  /** Saves either limit or both; null returns that limit to the service's start-up value. */
+  setConcurrencyLimits(value: Record<string, unknown>): ConcurrencySettings['saved'] {
+    const keys = Object.keys(value);
+    if (!keys.length || keys.some(key => key !== 'maxParallel' && key !== 'maxPerRepository')) throw new AppError('Укажите maxParallel и/или maxPerRepository');
+    const field = (key: 'maxParallel' | 'maxPerRepository') => {
+      if (value[key] === null) return null;
+      try { return validateConcurrencyLimit(value[key], key); }
+      catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректный лимит'); }
+    };
+    const patch = { maxParallel: Object.hasOwn(value, 'maxParallel') ? field('maxParallel') : undefined, maxPerRepository: Object.hasOwn(value, 'maxPerRepository') ? field('maxPerRepository') : undefined };
+    return this.db.transaction(() => {
+      const current = this.getConcurrencyLimits();
+      this.db.query('UPDATE concurrency_settings SET max_parallel=?,max_per_repository=? WHERE singleton=1')
+        .run(patch.maxParallel === undefined ? current.maxParallel : patch.maxParallel, patch.maxPerRepository === undefined ? current.maxPerRepository : patch.maxPerRepository);
+      return this.getConcurrencyLimits();
+    }).immediate();
   }
   acquireLease(pid = process.pid): string {
     return this.db.transaction(() => {
@@ -1849,16 +1879,18 @@ export class Store {
       return this.getRun(run.id);
     }).immediate();
   }
+  /** The integrator takes the first free place: merges of its repository wait for it, so a conflict must not queue behind new tasks. */
   pendingExecutions(): ExecutionRequest[] {
     return (this.db.query(`SELECT e.* FROM execution_requests e JOIN runs r ON r.id=e.run_id AND r.turn=e.turn
-      WHERE e.state='queued' AND r.status='queued' ORDER BY e.seq`).all() as Row[])
+      WHERE e.state='queued' AND r.status='queued' ORDER BY ${INTEGRATOR_WORK} DESC, e.seq`).all() as Row[])
       .map(row => ({ runId: row.run_id, turn: row.turn, answer: row.answer ?? undefined, location: JSON.parse(row.location) }));
   }
   claimExecution(request: ExecutionRequest, maximum: number, perRepository = 1): Run | null {
     return this.db.transaction(() => {
       const run = this.getRun(request.runId);
       if (run.status !== 'queued' || run.turn !== request.turn) return null;
-      const direct = run.workspace?.mode === 'direct' || !run.workspace && !!run.sessionId;
+      // Demo runs share the folder too, but never write to it, so they follow the per-repository limit like worktrees.
+      const direct = !run.mock && (run.workspace?.mode === 'direct' || !run.workspace && !!run.sessionId);
       if (this.repositoryBusy(request.location.repositoryId, perRepository, direct) || this.occupiedSlots() >= maximum) return null;
       const result = this.db.query("UPDATE execution_requests SET state='preparing' WHERE run_id=? AND turn=? AND state='queued'").run(run.id, run.turn);
       if (!result.changes) return null;
@@ -1871,7 +1903,7 @@ export class Store {
     const uncertain = this.db.query("SELECT seq FROM execution_requests WHERE repository_id=? AND state IN ('interrupted','held')").get(repositoryId);
     const occupied = (this.db.query("SELECT COUNT(*) AS n FROM execution_requests WHERE repository_id=? AND state IN ('preparing','running')").get(repositoryId) as { n: number }).n;
     const shared = this.db.query(`SELECT r.id FROM execution_requests e JOIN runs r ON r.id=e.run_id
-      LEFT JOIN workspaces w ON w.id=r.workspace_id WHERE e.repository_id=? AND e.state IN ('preparing','running')
+      LEFT JOIN workspaces w ON w.id=r.workspace_id WHERE e.repository_id=? AND e.state IN ('preparing','running') AND r.mock=0
       AND (json_extract(w.snapshot,'$.mode')='direct' OR (r.workspace_id IS NULL AND r.session_id IS NOT NULL))`).get(repositoryId);
     const integration = this.db.query("SELECT seq FROM integrations WHERE repository_id=? AND state IN ('queued','checking','merging','cancelling','interrupted')").get(repositoryId);
     return !!uncertain || !!integration || !!shared || exclusive && occupied > 0 || occupied >= perRepository;
@@ -1955,20 +1987,31 @@ export class Store {
   private writeIntegration(job: Integration) {
     this.db.query('UPDATE integrations SET state=?,attempt=?,snapshot=? WHERE id=?').run(job.status, job.attempt, JSON.stringify(job), job.id);
   }
+  /** A result the integrator has just reconciled is checked first, before another merge moves the target it was resolved against. */
   claimIntegrations(maximum: number): Integration[] {
     return this.db.transaction(() => {
       const claimed: Integration[] = [];
-      const rows = this.db.query("SELECT snapshot FROM integrations WHERE state='queued' ORDER BY seq").all() as Row[];
+      const rows = this.db.query(`SELECT i.snapshot, r.workspace_id FROM integrations i JOIN runs r ON r.id=i.run_id
+        WHERE i.state='queued' ORDER BY ${INTEGRATOR_WORK} DESC, i.seq`).all() as Row[];
       for (const row of rows) {
         const job = JSON.parse(row.snapshot) as Integration;
         if (this.occupiedSlots() >= maximum) break;
-        if (this.db.query("SELECT seq FROM execution_requests WHERE repository_id=? AND state IN ('preparing','running','interrupted','held')").get(job.repositoryId) ||
-            this.db.query("SELECT seq FROM integrations WHERE repository_id=? AND state IN ('checking','merging','cancelling','interrupted')").get(job.repositoryId)) continue;
+        if (this.integrationWaits(job.repositoryId, row.workspace_id)) continue;
         const next = { ...job, status: 'checking' as const, attempt: job.attempt + 1, error: null, sourceCommit: null, targetCommit: null, resultCommit: null, candidatePath: null, checks: [], updatedAt: Date.now() };
         this.writeIntegration(next); claimed.push(next);
       }
       return claimed;
     }).immediate();
+  }
+  /** One merge per repository at a time. Agents in their own worktrees keep working while it runs; it waits for work it could disturb
+   * or invalidate: the shared project folder, unconfirmed or held processes, a run still writing this result's worktree, and the
+   * integrator, which resolves a conflict against the current target. */
+  private integrationWaits(repositoryId: string, workspaceId: string | null): boolean {
+    return !!this.db.query("SELECT seq FROM integrations WHERE repository_id=? AND state IN ('checking','merging','cancelling','interrupted')").get(repositoryId) ||
+      !!this.db.query("SELECT seq FROM execution_requests WHERE repository_id=? AND state IN ('interrupted','held')").get(repositoryId) ||
+      !!this.db.query(`SELECT e.seq FROM execution_requests e JOIN runs r ON r.id=e.run_id LEFT JOIN workspaces w ON w.id=r.workspace_id
+        WHERE e.repository_id=? AND e.state IN ('preparing','running') AND (r.workspace_id IS NULL OR json_extract(w.snapshot,'$.mode') IS NOT 'worktree'
+          OR r.workspace_id=? OR ${INTEGRATOR_WORK})`).get(repositoryId, workspaceId);
   }
   updateIntegration(id: string, attempt: number, patch: Partial<Integration>, finish = false): Integration | null {
     return this.db.transaction(() => {

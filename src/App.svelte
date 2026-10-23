@@ -5,6 +5,7 @@
   import ModelSettings from './lib/ModelSettings.svelte';
   import GeneralSettings from './lib/GeneralSettings.svelte';
   import AutopilotSettings from './lib/AutopilotSettings.svelte';
+  import ConcurrencySettings from './lib/ConcurrencySettings.svelte';
   import Backups from './lib/Backups.svelte';
   import StorageSettings from './lib/StorageSettings.svelte';
   import Instructions from './lib/Instructions.svelte';
@@ -76,7 +77,8 @@
   let autopilotSettingsMutationPending = $state(false);
   let backupsMutationPending = $state(false);
   let storageMutationPending = $state(false);
-  let settingsMutationPending = $derived(modelMutationPending || generalSettingsMutationPending || autopilotSettingsMutationPending || backupsMutationPending || storageMutationPending);
+  let concurrencyMutationPending = $state(false);
+  let settingsMutationPending = $derived(modelMutationPending || generalSettingsMutationPending || autopilotSettingsMutationPending || concurrencyMutationPending || backupsMutationPending || storageMutationPending);
   let integrationChecksMissing = $derived(info?.mode === 'cli' && !autopilotSettings?.integrationChecks?.length);
   const integrationChecksRequired = 'Сначала задайте BRIGD_INTEGRATION_CHECKS в Настройки → Автопилот.';
   let loading = $state(true);
@@ -114,6 +116,7 @@
     { id: 'models', label: 'Модели', icon: 'spark' },
     { id: 'permissions', label: 'Разрешения', icon: 'lock' },
     { id: 'autopilot', label: 'Автопилот', icon: 'moon' },
+    { id: 'concurrency', label: 'Параллельность', icon: 'lanes' },
     { id: 'storage', label: 'Хранилище', icon: 'folder' },
     { id: 'backups', label: 'Бэкапы', icon: 'archive' },
   ] as const;
@@ -1289,6 +1292,9 @@
       </div>
       <div id="settings-autopilot-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-autopilot-tab" hidden={settingsSection !== 'autopilot'}>
         {#if settingsOpen}<AutopilotSettings settings={autopilotSettings} loading={autopilotSettingsLoading} error={autopilotSettingsError} retry={() => { void loadAutopilotSettings(); }} onchange={autopilotSettingsChanged} onmutation={autopilotSettingsMutationStarted} bind:busy={autopilotSettingsMutationPending} />{/if}
+      </div>
+      <div id="settings-concurrency-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-concurrency-tab" hidden={settingsSection !== 'concurrency'}>
+        {#if settingsOpen}<ConcurrencySettings active={settingsSection === 'concurrency'} bind:busy={concurrencyMutationPending} />{/if}
       </div>
       <div id="settings-storage-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-storage-tab" hidden={settingsSection !== 'storage'}>
         {#if settingsOpen}<StorageSettings active={settingsSection === 'storage'} bind:busy={storageMutationPending} />{/if}

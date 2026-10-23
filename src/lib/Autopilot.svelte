@@ -64,7 +64,7 @@
       return `Работает ${window}, с ${dateTime(state.startedAt)}.${state.failures ? ` Ошибок подряд: ${state.failures} из ${AUTOPILOT_FAILURE_LIMIT}.` : ''}`;
     }
     if (state.stoppedAt !== null && state.stopReason) return `Остановлен ${dateTime(state.stoppedAt)}: ${AUTOPILOT_STOP_REASONS[state.stopReason]}.`;
-    return 'Включите перед уходом: задачи из очереди будут запускаться по одной на репозиторий, а результаты проходить проверку и слияние.';
+    return 'Включите перед уходом: задачи из очереди будут запускаться в пределах лимитов из настроек «Параллельность», а результаты по одному проходить проверку и слияние.';
   }
 
   async function request<T>(path: string, options?: RequestInit): Promise<T> {

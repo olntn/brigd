@@ -53,6 +53,8 @@ async function fixtureApi(page: Page, mode: AppInfo['mode'] = 'mock', populated:
       await route.fulfill({ json: { integrationChecks: [['bun', 'run', 'verify']], source: 'settings' } });
     } else if (path === '/api/settings/general') {
       await route.fulfill({ json: { defaultCwd: '/workspace/project', defaultSchedule: 'manual' } });
+    } else if (path === '/api/settings/concurrency') {
+      await route.fulfill({ json: { maxParallel: 4, maxPerRepository: 2, saved: { maxParallel: null, maxPerRepository: 2 }, defaults: { maxParallel: 4, maxPerRepository: 1 } } });
     } else if (path === '/api/tasks') {
       await route.fulfill({ json: Array.isArray(populated) ? populated : populated ? [task] : [] });
     } else if (path === `/api/tasks/${taskId}`) {
@@ -297,9 +299,11 @@ test('settings sections use side navigation that stacks on narrow screens', asyn
   const autopilotPanel = dialog.getByRole('tabpanel', { name: 'Автопилот', exact: true });
   const backups = sections.getByRole('tab', { name: 'Бэкапы', exact: true });
   const backupsPanel = dialog.getByRole('tabpanel', { name: 'Бэкапы', exact: true });
+  const concurrency = sections.getByRole('tab', { name: 'Параллельность', exact: true });
+  const concurrencyPanel = dialog.getByRole('tabpanel', { name: 'Параллельность', exact: true });
   const storage = sections.getByRole('tab', { name: 'Хранилище', exact: true });
   const storagePanel = dialog.getByRole('tabpanel', { name: 'Хранилище', exact: true });
-  await expect(sections.getByRole('tab')).toHaveText(['Общие', 'Внешний вид', 'Модели', 'Разрешения', 'Автопилот', 'Хранилище', 'Бэкапы']);
+  await expect(sections.getByRole('tab')).toHaveText(['Общие', 'Внешний вид', 'Модели', 'Разрешения', 'Автопилот', 'Параллельность', 'Хранилище', 'Бэкапы']);
   await expect(general).toHaveAttribute('aria-selected', 'true');
   await expect(generalPanel.getByRole('heading', { name: 'Общие', exact: true })).toBeVisible();
   await expect(generalPanel.getByLabel('Рабочая папка по умолчанию', { exact: true })).toBeVisible();
@@ -330,6 +334,11 @@ test('settings sections use side navigation that stacks on narrow screens', asyn
   await expect(storage).toBeFocused();
   await expect(storage).toHaveAttribute('aria-selected', 'true');
   await expect(storagePanel.getByRole('heading', { name: 'Хранилище', exact: true })).toBeVisible();
+  await page.keyboard.press('ArrowUp');
+  await expect(concurrency).toBeFocused();
+  await expect(concurrency).toHaveAttribute('aria-selected', 'true');
+  await expect(concurrencyPanel.getByRole('heading', { name: 'Параллельность', exact: true })).toBeVisible();
+  await expect(concurrencyPanel.getByRole('spinbutton', { name: 'Задач одновременно в одном репозитории', exact: true })).toHaveValue('2');
   await page.keyboard.press('ArrowUp');
   await expect(autopilot).toBeFocused();
   await expect(autopilot).toHaveAttribute('aria-selected', 'true');
