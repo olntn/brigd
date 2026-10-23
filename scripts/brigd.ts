@@ -1,4 +1,6 @@
 /** Local agent client. Uses the same API as the UI; no MCP setup or direct SQLite access. */
+import { isTaskPriority, TASK_PRIORITIES, TASK_PRIORITY_LABELS } from '../src/lib/priority';
+
 type Worker = { id: string; name: string; provider: 'codex' | 'claude'; archived: boolean };
 type Info = { mode: 'cli' | 'mock'; cwd: string; scheduler: string };
 
@@ -49,11 +51,14 @@ export function createBrigdClient(env: Record<string, string | undefined> = proc
     async createTask(raw: unknown) {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Ожидается JSON-объект задачи.');
       const args = raw as Record<string, unknown>;
-      if (Object.keys(args).some(key => !['worker', 'title', 'instruction', 'cwd'].includes(key))) throw new Error('Допустимы только worker, title, instruction, cwd.');
+      if (Object.keys(args).some(key => !['worker', 'title', 'instruction', 'cwd', 'priority'].includes(key))) throw new Error('Допустимы только worker, title, instruction, cwd, priority.');
       for (const name of ['worker', 'title', 'instruction']) {
         if (typeof args[name] !== 'string' || !(args[name] as string).trim()) throw new Error(`Нужно поле ${name}.`);
       }
       if (args.cwd !== undefined && (typeof args.cwd !== 'string' || !args.cwd.trim())) throw new Error('cwd должен быть путём к рабочей папке.');
+      if (args.priority !== undefined && !isTaskPriority(args.priority)) {
+        throw new Error(`priority: ${TASK_PRIORITIES.map(priority => `${priority} (${TASK_PRIORITY_LABELS[priority]})`).join(', ')}.`);
+      }
       const app = await info();
       const all = await workers(), selected = (args.worker as string).trim();
       const active = all.filter(worker => !worker.archived);
@@ -64,7 +69,7 @@ export function createBrigdClient(env: Record<string, string | undefined> = proc
       const worker = matches[0]!;
       // Always create a manual card. Scheduling or starting work is a separate user intent.
       return request('/api/tasks', { title: args.title, instruction: args.instruction, workerId: worker.id, provider: worker.provider,
-        cwd: args.cwd ?? app.cwd, schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false });
+        cwd: args.cwd ?? app.cwd, ...(args.priority !== undefined ? { priority: args.priority } : {}), schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false });
     },
   };
 }
@@ -73,7 +78,7 @@ if (import.meta.main) {
   try {
     const command = process.argv[2];
     if (!command || command === '--help') {
-      console.log('brigd agent client: info | workers | tasks | create-task\ncreate-task читает JSON из stdin: {"worker":"имя или ID","title":"Название","instruction":"Задание","cwd":"необязательная рабочая папка"}');
+      console.log('brigd agent client: info | workers | tasks | create-task\ncreate-task читает JSON из stdin: {"worker":"имя или ID","title":"Название","instruction":"Задание","cwd":"необязательная рабочая папка","priority":"необязательно: critical, high, normal или low"}');
     } else {
       const client = createBrigdClient();
       let result: unknown;

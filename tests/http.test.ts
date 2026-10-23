@@ -195,6 +195,22 @@ describe('bounded JSON and task validation', () => {
     expect(store.listTasks()).toEqual([]);
   });
 
+  test('task priority defaults to normal, is kept by unrelated edits and accepts only the four levels', async () => {
+    const task = await createTask();
+    expect(task.priority).toBe('normal');
+    let response = await request(`/api/tasks/${task.id}`, 'PATCH', { priority: 'high' });
+    expect(response.status).toBe(200);
+    expect((await response.json()).priority).toBe('high');
+    response = await request(`/api/tasks/${task.id}`, 'PATCH', { title: 'Renamed' });
+    expect(await response.json()).toMatchObject({ title: 'Renamed', priority: 'high' });
+    for (const priority of ['urgent', null, 1]) {
+      expect((await request(`/api/tasks/${task.id}`, 'PATCH', { priority })).status).toBe(400);
+      expect((await request('/api/tasks', 'POST', { ...valid(), priority })).status).toBe(400);
+    }
+    expect(store.listTasks().map(item => item.priority)).toEqual(['high']);
+    expect((await createTask({ priority: 'critical' })).priority).toBe('critical');
+  });
+
   test('accepts a JSON content type with a charset parameter', async () => {
     expect((await request('/api/tasks', 'POST', valid(), { 'content-type': 'application/json; charset=utf-8' })).status).toBe(201);
   });

@@ -1,5 +1,6 @@
 /** Wire-only app-management catalogue. Safe to import from the stdio helper. */
 import { DOC_MARKDOWN_LIMIT, DOC_TITLE_LIMIT } from '../src/lib/docs';
+import { TASK_PRIORITIES } from '../src/lib/priority';
 export type TaskAppTarget = 'task_id' | 'run_id' | 'worker_id' | 'instruction_id' | 'tag_id' | 'model_id' | 'backup_id' | 'provider' | 'doc_page_id';
 type Schema = Record<string, unknown>;
 export interface TaskAppOperation {
@@ -49,6 +50,7 @@ const taskFields: Record<string, Schema> = {
   paused: flag,
   workerId: nullable(id),
   ultracode: { ...nullable(flag), description: 'true or false forces the provider\'s ultra agent mode for the card\'s new runs (every stage of a workflow); null follows each worker profile. Creation defaults to null.' },
+  priority: { type: 'string', enum: [...TASK_PRIORITIES], description: 'critical, high, normal or low. The autopilot claims a higher-priority auto card first; within one priority it follows the queue order. Changing an auto card\'s priority moves it to the end of that priority. Creation defaults to normal.' },
   tagIds: ids(100),
   attachmentIds: { ...ids(20), description: 'Previously staged upload IDs accepted by the task API.' },
   steps: { type: 'array', maxItems: 20, description: 'Empty for a single-worker task, or 2–20 ordered workflow stages; at most 64000 characters in total.',
@@ -159,9 +161,9 @@ export const TASK_APP_OPERATIONS: readonly TaskAppOperation[] = [
   operation('update_concurrency_settings', 'Set the limits of simultaneous work, each an integer 1–32; null returns a limit to the service default. Applies to the next start without a restart; running work is not stopped. Merges of one repository stay sequential regardless of these limits.', 'PATCH', '/api/settings/concurrency', { data: object({
     maxParallel: nullable({ type: 'integer', minimum: 1, maximum: 32 }), maxPerRepository: nullable({ type: 'integer', minimum: 1, maximum: 32 }),
   }, [], { minProperties: 1 }) }),
-  operation('get_autopilot', 'Read the autopilot switch, stop time, failure counter and up to 20 pool/attempt summaries. Use offset and limit to page both arrays; pool_count, attempt_count, pool_next_offset and attempts_next_offset describe their pagination.', 'GET', '/api/autopilot', { properties: page }),
+  operation('get_autopilot', 'Read the autopilot switch, stop time, failure counter and up to 20 pool/attempt summaries. The pool is in claim order: higher priority first, then the arranged queue order. Use offset and limit to page both arrays; pool_count, attempt_count, pool_next_offset and attempts_next_offset describe their pagination.', 'GET', '/api/autopilot', { properties: page }),
   operation('update_autopilot', 'Enable or disable automatic claiming of cards scheduled as auto. until is an optional Unix millisecond stop time, at most 31 days ahead; null continues until switched off. Running work finishes when disabled.', 'PATCH', '/api/autopilot', { data: object({ enabled: flag, until: nullable(timestamp) }, ['enabled']) }),
-  operation('move_autopilot_task', 'Reorder the autopilot queue; the autopilot claims cards from its head. Places an active auto card right before data.beforeTaskId, a full card ID from get_autopilot, or at the end with null. Read get_autopilot afterwards for the new order.', 'POST', '/api/tasks/{id}/queue', { target: 'task_id', data: object({ beforeTaskId: nullable(id) }, ['beforeTaskId']) }),
+  operation('move_autopilot_task', 'Reorder the autopilot queue within one priority; the autopilot claims higher-priority cards first, then from the head of each priority. Places an active auto card right before data.beforeTaskId, a full ID of a card with the same priority from get_autopilot, or at the end of its priority with null. To move a card across priorities, change its priority with update_task. Read get_autopilot afterwards for the new order.', 'POST', '/api/tasks/{id}/queue', { target: 'task_id', data: object({ beforeTaskId: nullable(id) }, ['beforeTaskId']) }),
   operation('get_integrator', 'Read the built-in integrator profile and its conflict-resolution instructions.', 'GET', '/api/integrator'),
   operation('update_integrator', 'Edit the built-in integrator profile. mode=inherit uses each source run\'s CLI model settings; custom uses this profile\'s provider/model/effort. Personal instructions are applied in either mode.', 'PATCH', '/api/integrator', { data: object({ mode: { type: 'string', enum: ['inherit', 'custom'] }, ...profileFields }, [], { minProperties: 1 }) }),
   operation('get_cli_config', 'Inspect Claude and Codex CLI setup readiness, required settings and login presence. Does not return authentication secrets.', 'GET', '/api/cli-config'),

@@ -60,7 +60,7 @@ function canonical(value: unknown): unknown {
 function summary(value: unknown): unknown {
   if (!record(value)) return value;
   const fields = ['id', 'taskId', 'runId', 'title', 'name', 'provider', 'modelId', 'model', 'label', 'enabled', 'archived', 'archivedAt',
-    'status', 'trigger', 'schedule', 'paused', 'ultracode', 'nextRunAt', 'startedAt', 'finishedAt', 'workerId', 'kind', 'createdAt', 'updatedAt',
+    'status', 'trigger', 'schedule', 'paused', 'ultracode', 'priority', 'nextRunAt', 'startedAt', 'finishedAt', 'workerId', 'kind', 'createdAt', 'updatedAt',
     'selected', 'autoUpdate', 'size', 'source', 'color', 'mode', 'defaultSchedule', 'defaultWorkerId', 'ok', 'accepted', 'action', 'parentId', 'position', 'snippet'];
   const result = Object.fromEntries(fields.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
   return Object.keys(result).length ? result : { updated: true };

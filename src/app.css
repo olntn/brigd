@@ -1006,6 +1006,11 @@ dialog::backdrop { background: var(--overlay); }
 .followup-request, .run-followup-request p { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--secondary); font-size: .92rem; line-height: 1.8; margin: 10px 0 0; }
 .followup-type-badge { display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 4px 7px; color: var(--accent-text); background: var(--soft); font-size: .77rem; overflow-wrap: anywhere; }
 .ultracode-badge { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 3px 6px; color: var(--accent-text); background: var(--soft); font-size: .66rem; font-weight: 650; letter-spacing: .4px; line-height: 1.3; flex-shrink: 0; }
+.priority-badge { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 3px 6px; color: var(--secondary); background: var(--soft); font-size: .66rem; font-weight: 650; letter-spacing: .4px; line-height: 1.3; flex-shrink: 0; }
+.priority-critical { color: var(--error); background: var(--error-bg); border-color: var(--error-line); }
+.priority-high { color: var(--warning); background: var(--warning-bg); border-color: var(--warning-line); }
+.priority-low { color: var(--muted); background: var(--subtle); }
+.autopilot-task .priority-badge, .list-task-name .priority-badge { margin-right: 6px; vertical-align: 1px; }
 .task-ultracode-option { display: flex; align-items: center; gap: 10px; color: var(--secondary); font-size: .92rem; cursor: pointer; }.task-ultracode-option input[type='checkbox'] { width: 17px; height: 17px; margin: 0; padding: 0; }
 .card-followup-label { display: flex; align-items: flex-start; gap: 6px; margin-top: 10px; font-size: .77rem; line-height: 1.65; color: var(--accent-text); }
 .card-followup-label svg { margin-top: 2px; }.card-followup-label span { min-width: 0; overflow-wrap: anywhere; }

@@ -291,6 +291,19 @@ describe('MCP app management through the shared HTTP controller', () => {
     expect(store.autopilotPool(null).map(task => task.id)).toEqual([second.id, first.id]);
   });
 
+  test('sets card priority, reports it and orders the autopilot queue by it', async () => {
+    const { broker } = setup();
+    const normal = await createCard(broker, 'Normal card', undefined, { schedule: 'auto' });
+    const urgent = await createCard(broker, 'Urgent card', undefined, { schedule: 'auto', priority: 'critical' });
+    expect([normal.priority, urgent.priority]).toEqual(['normal', 'critical']);
+    expect(parse(await call(broker, 'get_task', { task_id: urgent.id })).task.priority).toBe('critical');
+    expect(parse(await call(broker, 'get_autopilot')).pool.map((card: any) => [card.id, card.priority])).toEqual([[urgent.id, 'critical'], [normal.id, 'normal']]);
+    expect((await call(broker, 'move_autopilot_task', { task_id: normal.id, data: { beforeTaskId: urgent.id }, idempotency_key: 'cross-priority' })).isError).toBe(true);
+    expect((await call(broker, 'update_task', { task_id: normal.id, data: { priority: 'urgent' }, idempotency_key: 'unknown-priority' })).isError).toBe(true);
+    await mutate(broker, 'update_task', { task_id: normal.id, data: { priority: 'critical' } });
+    expect(store.autopilotPool(null).map(task => [task.id, task.priority])).toEqual([[urgent.id, 'critical'], [normal.id, 'critical']]);
+  });
+
   test('autopilot overview pages compact pool summaries even when raw cards exceed the response budget', async () => {
     const worker = store.createWorker({
       name: 'Pool worker', provider: 'codex', model: null, effort: 'default', avatarUrl: null,

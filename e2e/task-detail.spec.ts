@@ -20,7 +20,7 @@ function fixtureDetail(waitingForAnswer = false): TaskDetail {
   const task: Task = {
     tagIds: [], tags: [],
     id: taskId, title: 'Проверка карточки задачи', instruction: run.instruction, workerId: null,
-    worker: null, steps: [], provider: 'codex', cwd: run.cwd, schedule: 'manual', intervalMinutes: null,
+    worker: null, steps: [], provider: 'codex', cwd: run.cwd, schedule: 'manual', priority: 'normal', intervalMinutes: null,
     firstRunAt: null, paused: false, createdAt: timestamp, updatedAt: timestamp + 5_000,
     archivedAt: null, nextRunAt: null, status: run.status, latestRun: run, runCount: 1,
   };

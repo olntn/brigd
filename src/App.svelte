@@ -29,10 +29,11 @@
   import { WORKFLOW_MIN_STEPS, WORKFLOW_MAX_STEPS, WORKFLOW_TEXT_LIMIT, WORKFLOW_BYTES_LIMIT } from './lib/workflows';
   import { effortLabel, modelLabel, runUltracode } from './lib/workers';
   import { tagColorStyle } from './lib/tags';
+  import { DEFAULT_TASK_PRIORITY, TASK_PRIORITIES, TASK_PRIORITY_LABELS } from './lib/priority';
   import { followupTargets, followupFingerprint, followupStage, runWorkflowSteps, taskHasCompletedRun, resolveFollowupTarget, followupSessionKey, type FollowupTarget } from './lib/followups';
   import { applyTheme, readTheme, saveTheme, themes, themeStorageKey, type Theme } from './lib/theme';
   import { plural } from './lib/format';
-  import type { AppInfo, Attachment, AutopilotSettings as AutopilotSettingsValue, Comment, FollowupInput, GeneralSettings as GeneralSettingsValue, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
+  import type { AppInfo, Attachment, AutopilotSettings as AutopilotSettingsValue, Comment, FollowupInput, GeneralSettings as GeneralSettingsValue, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskPriority, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
 
   type Scope = 'all' | 'scheduled' | 'autopilot' | 'attention' | 'completed';
   type View = 'board' | 'list';
@@ -140,6 +141,7 @@
   let formOriginalStepWorkers = $state<string[]>([]);
   /** null follows the assigned worker profiles; a boolean is this task's own choice. */
   let formUltracode = $state<boolean | null>(null);
+  let formPriority = $state<TaskPriority>(DEFAULT_TASK_PRIORITY);
   let drawerContext = $state(0);
   let editorContext = $state(0);
   let formAttachments = $state<Attachment[]>([]);
@@ -594,6 +596,7 @@
     formSteps = (task?.steps?.length ? task.steps : [1, 2].map(index => ({ workerId: '', title: `Этап ${index}`, instruction: '' }))).map(step => ({ ...step, key: crypto.randomUUID() }));
     formOriginalStepWorkers = task?.steps?.map(step => step.workerId) ?? [];
     formUltracode = task?.ultracode ?? null;
+    formPriority = task?.priority ?? DEFAULT_TASK_PRIORITY;
     if (task) void loadWorkers();
     formCwd = task?.cwd ?? generalSettings?.defaultCwd ?? info?.cwd ?? '';
     formSchedule = task?.schedule ?? generalSettings?.defaultSchedule ?? 'manual';
@@ -639,6 +642,7 @@
       schedule: formSchedule, intervalMinutes: formSchedule === 'interval' ? formInterval : null,
       firstRunAt, paused: formPaused,
       ultracode: formUltracode,
+      priority: formPriority,
       tagIds: formTagIds,
     };
     const savedEditingId = editingId;
@@ -1012,10 +1016,14 @@
   {#if task.tags?.length}<span class="task-tags">{#each task.tags as tag (tag.id)}<span class="task-tag" style={tagColorStyle(tag.color)}><span>{tag.name}</span></span>{/each}</span>{/if}
 {/snippet}
 
+{#snippet priorityBadge(priority: TaskPriority)}
+  <span class="priority-badge priority-{priority}" title={'Приоритет: ' + TASK_PRIORITY_LABELS[priority]}><span class="sr-only">{'Приоритет: '}</span>{TASK_PRIORITY_LABELS[priority]}</span>
+{/snippet}
+
 {#snippet taskCard(task: Task)}
   <article class="task-card {task.status}" class:paused-card={task.paused}>
     <button class="card-main" onclick={() => openTask(task)} aria-label={'Открыть задачу: ' + task.title}>
-      <div class="card-top">{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}{#if visibleUltracode(task)}<span class="ultracode-badge" title="Режим ultracode">ultracode</span>{/if}<span class="task-ref">{task.id.slice(0, 6).toUpperCase()}</span></div>
+      <div class="card-top">{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}{#if visibleUltracode(task)}<span class="ultracode-badge" title="Режим ultracode">ultracode</span>{/if}{#if task.priority !== DEFAULT_TASK_PRIORITY}{@render priorityBadge(task.priority)}{/if}<span class="task-ref">{task.id.slice(0, 6).toUpperCase()}</span></div>
       <h3>{task.title}</h3>
       <p class="card-description">{task.latestRun?.summary || task.instruction}</p>
       {@render taskTags(task)}
@@ -1080,7 +1088,7 @@
         {:else}
           <div class="toolbar"><label class="search-box"><Icon name="search" size={16} /><input bind:value={archiveSearch} type="search" placeholder="Найти в архиве…" aria-label="Поиск в архиве" /></label><label class="provider-filter tag-filter"><Icon name="tag" size={15} /><select bind:value={archiveTagFilter} aria-label="Фильтр по тегу" disabled={tagsLoading}><option value="all">Все теги</option><option value="untagged">Без тегов</option>{#each tags as tag (tag.id)}<option value={tag.id}>{tag.name}</option>{/each}</select><Icon name="down" size={13} /></label></div>
           {#if tagsError}<div class="connection-error" role="alert"><span>{tagsError}</span><button onclick={() => { void loadTags(); }}>Повторить загрузку тегов</button></div>{/if}
-          <div class="task-list archive-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>В АРХИВЕ С</span><span></span><span></span></div>{#each archiveResults as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name="archive" size={17} /></span><span><strong>{task.title}</strong><small>{shortPath(task.cwd)}</small>{@render taskTags(task)}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{dateTime(task.archivedAt!)}</span><div class="archive-row-actions"><button class="button secondary" disabled={pending.includes(task.id)} aria-label={'Восстановить: ' + task.title} onclick={() => act(task, 'restore')}><Icon name={pending.includes(task.id) ? 'refresh' : 'restore'} size={15} class={pending.includes(task.id) ? 'spin' : ''} />Восстановить</button>{#if !taskIsOccupied(task)}<button class="button text-button danger-hover" disabled={pending.includes(task.id)} aria-label={'Удалить: ' + task.title} onclick={() => askDeleteTask(task)}><Icon name="trash" size={15} />Удалить</button>{/if}</div><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="search" size={20} /><span>В архиве ничего не найдено</span></div>{/each}</div>
+          <div class="task-list archive-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>В АРХИВЕ С</span><span></span><span></span></div>{#each archiveResults as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name="archive" size={17} /></span><span><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}{@render priorityBadge(task.priority)}{/if}{shortPath(task.cwd)}</small>{@render taskTags(task)}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{dateTime(task.archivedAt!)}</span><div class="archive-row-actions"><button class="button secondary" disabled={pending.includes(task.id)} aria-label={'Восстановить: ' + task.title} onclick={() => act(task, 'restore')}><Icon name={pending.includes(task.id) ? 'refresh' : 'restore'} size={15} class={pending.includes(task.id) ? 'spin' : ''} />Восстановить</button>{#if !taskIsOccupied(task)}<button class="button text-button danger-hover" disabled={pending.includes(task.id)} aria-label={'Удалить: ' + task.title} onclick={() => askDeleteTask(task)}><Icon name="trash" size={15} />Удалить</button>{/if}</div><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="search" size={20} /><span>В архиве ничего не найдено</span></div>{/each}</div>
         {/if}
       {:else if page === 'workers'}
         <Workers {workers} loading={workersLoading} error={workersError} retry={() => { void loadWorkers(); }} onchange={workerChanged} ondelete={workerDeleted} {notify} {models} {modelsLoading} {modelsError} retryModels={() => { void loadModels(); }} />
@@ -1130,7 +1138,7 @@
             {/each}
           </div>
         {:else}
-          <div class="task-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>ЗАПУСК</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : task.schedule === 'auto' ? 'moon' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{shortPath(task.cwd)}</small>{@render taskTags(task)}{#if task.latestRun?.followup}<small class="list-followup-label">Дополнительный запрос{#if followupStage(task.latestRun)} · Этап {followupStage(task.latestRun)!.index + 1}{/if}</small>{/if}{#if workflowSteps(task).length}<small class="list-workflow-progress">{workflowProgress(task)}</small>{/if}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{scheduleLabel(task, true)}</span><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>Новые задачи появятся здесь</span></div>{/each}</div>
+          <div class="task-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>ЗАПУСК</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : task.schedule === 'auto' ? 'moon' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}{@render priorityBadge(task.priority)}{/if}{shortPath(task.cwd)}</small>{@render taskTags(task)}{#if task.latestRun?.followup}<small class="list-followup-label">Дополнительный запрос{#if followupStage(task.latestRun)} · Этап {followupStage(task.latestRun)!.index + 1}{/if}</small>{/if}{#if workflowSteps(task).length}<small class="list-workflow-progress">{workflowProgress(task)}</small>{/if}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{scheduleLabel(task, true)}</span><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>Новые задачи появятся здесь</span></div>{/each}</div>
         {/if}
       {/if}
       {/if}
@@ -1142,7 +1150,7 @@
   <div class="drawer-content">
     <header class="drawer-topbar">
       <span class="drawer-task-ref"><Icon name="terminal" size={16} />Задача <span class="detail-ref">{selectedId?.slice(0, 8).toUpperCase()}</span></span>
-      {#if selectedTask}<div class="drawer-badges">{@render statusBadge(selectedTask.status)}{#if currentRun?.followup}<span class="followup-type-badge">Дополнительный запрос</span>{/if}{#if currentRun?.reconcile}<span class="followup-type-badge">Разрешение конфликта</span>{/if}{#if visibleWorker(selectedTask)}{@render workerBadge(visibleWorker(selectedTask)!)}{:else}{@render providerBadge(visibleProvider(selectedTask), true)}{/if}{#if visibleUltracode(selectedTask)}<span class="ultracode-badge" title="Режим ultracode">ultracode</span>{/if}{#if selectedTask.latestRun?.mock}<span class="demo-badge">MOCK</span>{/if}{#if workflowSteps(selectedTask).length}<span class="workflow-type-badge">Сложная задача</span>{/if}</div>{/if}
+      {#if selectedTask}<div class="drawer-badges">{@render statusBadge(selectedTask.status)}{#if currentRun?.followup}<span class="followup-type-badge">Дополнительный запрос</span>{/if}{#if currentRun?.reconcile}<span class="followup-type-badge">Разрешение конфликта</span>{/if}{#if visibleWorker(selectedTask)}{@render workerBadge(visibleWorker(selectedTask)!)}{:else}{@render providerBadge(visibleProvider(selectedTask), true)}{/if}{#if visibleUltracode(selectedTask)}<span class="ultracode-badge" title="Режим ultracode">ultracode</span>{/if}{@render priorityBadge(selectedTask.priority)}{#if selectedTask.latestRun?.mock}<span class="demo-badge">MOCK</span>{/if}{#if workflowSteps(selectedTask).length}<span class="workflow-type-badge">Сложная задача</span>{/if}</div>{/if}
       <button class="icon-button" aria-label="Закрыть задачу" disabled={followupSending || tagsSaving} onclick={closeDrawer}><Icon name="close" size={20} /></button>
     </header>
     {#if selectedTask}
@@ -1368,6 +1376,7 @@
         {#if editingId && selectedTask && taskIsOccupied(selectedTask)}<div class="form-note">Изменения применятся к следующему запуску. Текущий запуск сохраняет план этапов, работников, настройки, инструкции и рабочую папку. Для повтора этапа используется сохранённый план.</div>{/if}
         <label class="form-field"><span>Название задачи <span class="required">*</span></span><input bind:value={formTitle} name="title" placeholder="Например, проверить новые изменения" required maxlength="140" disabled={submitting} /></label>
         <TagPicker {tags} bind:selected={formTagIds} disabled={submitting} loading={tagsLoading} error={tagsError} onreload={loadTags} />
+        <label class="form-field"><span>Приоритет</span><select name="priority" aria-label="Приоритет" bind:value={formPriority} aria-describedby="task-priority-help" disabled={submitting}>{#each TASK_PRIORITIES as priority (priority)}<option value={priority}>{TASK_PRIORITY_LABELS[priority]}</option>{/each}</select><small id="task-priority-help">Автопилот первой берёт задачу с более высоким приоритетом; при равном приоритете — по порядку очереди.</small></label>
         <div class="task-type-switch" role="group" aria-label="Тип задачи"><button type="button" class:selected={!formComplex} aria-pressed={!formComplex} disabled={submitting} onclick={() => formComplex = false}>Простая задача</button><button type="button" class:selected={formComplex} aria-pressed={formComplex} disabled={submitting} onclick={() => formComplex = true}>Сложная задача</button></div>
         {#if formComplex}<p class="workflow-help">Одна общая цель, несколько работников по очереди. Порядок и задания можно изменить до запуска.</p>{/if}
         <label class="form-field"><span>{formComplex ? 'Общая цель и ограничения' : 'Что нужно сделать?'} <span class="required">*</span></span><textarea bind:value={formInstruction} name="instruction" maxlength="16000" rows="4" placeholder="Опишите результат, важные детали и ограничения. Агент получит эту инструкцию при каждом запуске." required disabled={submitting}></textarea></label>

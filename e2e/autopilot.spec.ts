@@ -131,3 +131,77 @@ test('the queue is reordered by dragging or with arrow keys, the autopilot follo
   await expect(status.getByText('Выключен', { exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test('the task form sets a priority, the queue puts more urgent tasks first and moves stay within one priority', async ({ page, request }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const info = await (await request.get('/api/info')).json();
+  const create = async (title: string, priority?: string) => {
+    const created = await request.post('/api/tasks', { headers: origin, data: {
+      title, instruction: 'Проверь проект и опиши структуру.', provider: 'codex', cwd: info.cwd, schedule: 'auto', intervalMinutes: null, firstRunAt: null, paused: false,
+      ...(priority ? { priority } : {}),
+    } });
+    expect(created.status()).toBe(201);
+    return (await created.json() as Task).id;
+  };
+  const low = unique('Низкий приоритет'), first = unique('Обычная первая'), second = unique('Обычная вторая'), urgent = unique('Критическая задача');
+  const ids = [await create(low, 'low'), await create(first), await create(second)];
+
+  await page.getByRole('button', { name: 'Новая задача', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Новая задача', exact: true });
+  const priority = editor.getByLabel('Приоритет', { exact: true });
+  await expect(priority).toHaveValue('normal');
+  await expect(priority.locator('option')).toHaveText(['Критический', 'Высокий', 'Обычный', 'Низкий']);
+  await priority.selectOption({ label: 'Критический' });
+  await editor.locator('[name="title"]').fill(urgent);
+  await editor.locator('[name="instruction"]').fill('Срочно проверь проект.');
+  await editor.locator('[name="cwd"]').fill(info.cwd);
+  await editor.getByRole('button', { name: 'Автопилот', exact: true }).click();
+  await editor.getByRole('button', { name: 'Создать задачу', exact: true }).click();
+  await expect(editor).toBeHidden();
+  const drawer = page.getByRole('dialog', { name: urgent, exact: true });
+  await expect(drawer.locator('.drawer-badges .priority-badge')).toHaveText('Приоритет: Критический');
+  await drawer.getByRole('button', { name: 'Закрыть задачу', exact: true }).click();
+  const tasks = await (await request.get('/api/tasks')).json() as Task[];
+  const urgentId = tasks.find(task => task.title === urgent)!.id;
+  expect(tasks.find(task => task.id === urgentId)).toMatchObject({ priority: 'critical', schedule: 'auto' });
+  const card = page.locator('article.task-card').filter({ has: page.getByRole('button', { name: `Открыть задачу: ${urgent}`, exact: true }) });
+  await expect(card.locator('.priority-badge')).toHaveText('Приоритет: Критический');
+
+  await page.getByRole('button', { name: 'Автопилот', exact: true }).click();
+  const queue = page.getByRole('region', { name: 'Очередь автопилота' });
+  const order = queue.locator('.autopilot-queue-row .autopilot-task strong');
+  const row = (title: string) => queue.locator('.autopilot-queue-row', { hasText: title });
+  await expect(order).toHaveText([urgent, first, second, low]);
+  await expect(row(urgent).locator('.priority-badge')).toHaveText('Критический');
+  await expect(row(first).locator('.priority-badge')).toHaveCount(0);
+  await expect(queue.getByRole('button', { name: `Открыть: ${low}, приоритет низкий`, exact: true })).toBeVisible();
+  const pool = async () => (await (await request.get('/api/autopilot')).json() as AutopilotOverview).pool.map(task => task.id);
+
+  // A task cannot be dropped among tasks of another priority, nor moved past them with the arrow keys.
+  await row(low).dragTo(row(urgent), { targetPosition: { x: 300, y: 3 } });
+  const lowHandle = queue.getByRole('button', { name: new RegExp(`^Переместить: ${low}`) });
+  await lowHandle.focus();
+  await page.keyboard.press('ArrowUp');
+  await expect(order).toHaveText([urgent, first, second, low]);
+  await expect.poll(pool).toEqual([urgentId, ids[1], ids[2], ids[0]]);
+  // Within one priority the order is still arranged by hand.
+  const secondHandle = queue.getByRole('button', { name: new RegExp(`^Переместить: ${second}`) });
+  await secondHandle.focus();
+  await page.keyboard.press('ArrowUp');
+  await expect(order).toHaveText([urgent, second, first, low]);
+  await page.keyboard.press('ArrowUp');
+  await expect(order).toHaveText([urgent, second, first, low]);
+  await expect.poll(pool).toEqual([urgentId, ids[2], ids[1], ids[0]]);
+
+  // The autopilot follows the priorities: one repository takes one task at a time.
+  const status = page.getByRole('region', { name: 'Состояние автопилота' });
+  await status.getByLabel('Остановить в').uncheck();
+  await status.getByRole('button', { name: 'Включить автопилот', exact: true }).click();
+  await expect(status.getByText('Включён', { exact: true })).toBeVisible();
+  const attempts = async () => (await (await request.get('/api/autopilot')).json() as AutopilotOverview).attempts.map(run => run.taskId);
+  await expect.poll(attempts).toEqual([urgentId, ids[2], ids[1], ids[0]]);
+  await status.getByRole('button', { name: 'Выключить автопилот', exact: true }).click();
+  await expect(status.getByText('Выключен', { exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});

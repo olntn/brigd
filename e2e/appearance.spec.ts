@@ -20,7 +20,7 @@ const run: Run = {
 const task: Task = {
   tagIds: [], tags: [],
   steps: [], id: taskId, workerId: null, worker: null, title: `Адаптивная-${'Задача'.repeat(18)}`, instruction, provider: 'codex',
-  cwd: `/workspace/${'длинный-путь-'.repeat(35)}`, schedule: 'manual', intervalMinutes: null,
+  cwd: `/workspace/${'длинный-путь-'.repeat(35)}`, schedule: 'manual', priority: 'normal', intervalMinutes: null,
   firstRunAt: null, paused: false, createdAt: timestamp, updatedAt: timestamp,
   archivedAt: null, nextRunAt: null, status: 'completed', latestRun: run, runCount: 2,
 };
