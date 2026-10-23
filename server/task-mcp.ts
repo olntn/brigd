@@ -278,6 +278,11 @@ export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence
         allowed.add(attachment.id);
         return text({ attachment: context(attachment), published: true });
       }
+      case 'set_progress': {
+        const args = object(request.arguments, ['status']);
+        const progress = store.setRunProgress(runId, fence, args.status).progress;
+        return text({ progress: progress?.text ?? null, updated_at: progress?.updatedAt ?? null });
+      }
       case 'commit_changes': {
         const args = object(request.arguments, ['message', 'paths']);
         const message = string(args.message, 5000, 'commit message');
@@ -301,7 +306,7 @@ export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence
     }
     // Reserve the entire bounded receipt before a mutation. Never commit a write
     // and then report failure merely because its success receipt exceeded budget.
-    const mutation = raw.tool === 'add_comment' || raw.tool === 'add_attachment' || raw.tool === 'commit_changes' ||
+    const mutation = raw.tool === 'add_comment' || raw.tool === 'add_attachment' || raw.tool === 'set_progress' || raw.tool === 'commit_changes' ||
       typeof raw.tool === 'string' && app.has(raw.tool) && app.mutates(raw.tool);
     if (mutation && resultBytes + 4096 > MAX_TASK_RESULT_TOTAL_BYTES) {
       close(); return failure('Task attachment tool output budget exhausted before publication. Nothing was published.');

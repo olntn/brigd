@@ -11,6 +11,7 @@ import { DEFAULT_TASK_PRIORITY, isTaskPriority, TASK_PRIORITIES, TASK_PRIORITY_L
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
 import { CONCURRENCY_LIMIT_MAX, validateConcurrencyLimit } from '../src/lib/concurrency';
 import { DEFAULT_TAG_COLOR, TAG_COUNT_LIMIT } from '../src/lib/tags';
+import { normalizeProgress, RUN_PROGRESS_MAX_LENGTH } from '../src/lib/progress';
 import { tagNameKey, validateTag, validateTagIds, validateTagPatch } from './tags';
 import { validateInstruction, validateInstructionPatch, validateInstructionSnapshots } from './instructions';
 import { assertDocPageSize, docSearchQuery, validateDocBlocks, validateDocPageContent, validateDocPageCreate, validateDocPageMarkdown, validateDocPageMove } from './docs';
@@ -307,6 +308,10 @@ export class Store {
         ['workers', 'deleted_at', 'INTEGER'],
         // The turn a replacement worker started after an exhausted limit; NULL while nobody was replaced.
         ['runs', 'fallback_turn', 'INTEGER'],
+        // The stage of work the agent reported through set_progress, and the turn it belongs to: a new turn never shows it.
+        ['runs', 'progress', 'TEXT'],
+        ['runs', 'progress_at', 'INTEGER'],
+        ['runs', 'progress_turn', 'INTEGER'],
         ['tasks', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_snapshot', 'TEXT'],
@@ -1454,6 +1459,18 @@ export class Store {
       return this.mapComment(this.db.query('SELECT * FROM comments WHERE id=?').get(comment.id) as Row);
     }).immediate();
   }
+  /** The agent's own display-only stage of work; it never changes the run's lifecycle status. */
+  setRunProgress(runId: string, fence: RunFence, value: unknown, now = Date.now()): Run {
+    const text = normalizeProgress(value);
+    if (text === null) throw new AppError(`Статус выполнения: одна строка до ${RUN_PROGRESS_MAX_LENGTH} символов`);
+    return this.db.transaction(() => {
+      const run = this.assertPublicationRun(runId, fence);
+      if (run.progress?.text === text) return run;
+      this.db.query('UPDATE runs SET progress=?,progress_at=?,progress_turn=? WHERE id=?').run(text, now, run.turn, runId);
+      this.log(run.taskId, runId, { kind: 'progress', summary: `Статус выполнения: ${text}`, details: ['Работник обновил статус выполнения задачи.'] }, now, run.currentStepIndex);
+      return this.getRun(runId);
+    }).immediate();
+  }
   private mapComment(row: Row): Comment {
     return { stepIndex: row.step_index ?? null, id: row.id, taskId: row.task_id, runId: row.run_id, kind: row.kind, body: row.body, createdAt: row.created_at, attachments: this.commentAttachments(row.id) };
   }
@@ -1506,7 +1523,8 @@ export class Store {
     const followup = followupSnapshot(row, worker as WorkerSnapshot | null);
     const reconcile = reconcileSnapshot(row, worker as WorkerSnapshot | null);
     const workspace = row.workspace_id ? this.getWorkspace(row.workspace_id) : null;
-    return { integration: this.integrationForRun(row.id), workspace, followup, reconcile, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, ultracode: readFlag(row.ultracode), fallbackTurn: row.fallback_turn ?? null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
+    return { integration: this.integrationForRun(row.id), workspace, followup, reconcile, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, ultracode: readFlag(row.ultracode), fallbackTurn: row.fallback_turn ?? null,
+      progress: row.status === 'running' && row.progress_turn === row.turn && typeof row.progress === 'string' ? { text: row.progress, updatedAt: row.progress_at } : null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
       trigger: row.trigger, scheduledFor: row.scheduled_for, status: row.status, sessionId: row.session_id,
       startedAt: row.started_at, updatedAt: row.updated_at, finishedAt: row.finished_at, summary: row.summary,
       error: row.error, turn: row.turn, mock: !!row.mock };
