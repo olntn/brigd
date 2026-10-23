@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -165,11 +165,15 @@ test('a textual merge conflict is retained and does not advance the target', asy
 });
 
 test('a conflict is handed to the built-in integrator in the same worktree and its resolution becomes a checked merge commit', async () => {
+  store.updateGeneralSettings({ agentTimeLimitMinutes: 5 });
   const run = await start();
+  store.updateGeneralSettings({ agentTimeLimitMinutes: 7 });
   conflictingTarget('conflicting target\n'); complete(run);
   await until(() => agent.calls.length === 2);
   const call = agent.calls[1]!;
   expect(call.input).toMatchObject({ cwd: run.workspace!.cwd, provider: 'codex', instruction: 'Update the project.', reconcile: { targetBranch: 'main', conflicts: ['src/value.txt'], resultSummary: 'Synthetic result.' } });
+  expect(call.input.timeLimitMinutes).toBe(7);
+  expect(store.getRun(run.id).timeLimitMinutes).toBe(5);
   expect(call.input.sessionId).toBeUndefined(); expect(call.input.followup).toBeUndefined();
   const integrator = store.getTask(run.taskId).latestRun!;
   expect(integrator).toMatchObject({ trigger: 'reconcile', status: 'running', workerId: null, worker: { id: 'brigd-integrator', name: 'Интегратор', provider: 'codex', model: null },
@@ -505,4 +509,22 @@ test('the saved integrator profile decides the reconcile run, and merge commits 
     expect(git(root, 'log', '-1', '--format=%an <%ae>', commit)).toBe('Интегратор <integrator@localhost>');
     expect(git(root, 'log', '-1', '--format=%cn', commit)).toBe('Test');
   }
+});
+
+test('a bounded merge check stops its process, fails with output and preserves the target', async () => {
+  await configure([command('console.log("stuck check"); process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)')]);
+  store.updateGeneralSettings({ integrationCheckTimeLimitMinutes: 1 });
+  const run = await start();
+  const target = git(root, 'rev-parse', 'HEAD');
+  const nativeSetTimeout = globalThis.setTimeout;
+  const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((...[handler, delay, ...args]: Parameters<typeof setTimeout>) =>
+    nativeSetTimeout(handler, delay === 60_000 ? 100 : delay, ...args)) as typeof setTimeout);
+  try {
+    complete(run);
+    const integration = await settled(run);
+    expect(integration).toMatchObject({ status: 'failed', error: 'Превышен лимит времени проверки слияния 1 мин; команда остановлена. Целевая ветка сохранена.', checks: [{ exitCode: -1, output: 'stuck check\n' }] });
+    expect(integration.triage).toBeFalsy();
+    expect(git(root, 'rev-parse', 'HEAD')).toBe(target);
+    expect(store.getTask(run.taskId).status).toBe('merge_failed');
+  } finally { timer.mockRestore(); }
 });

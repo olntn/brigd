@@ -26,12 +26,12 @@ export function followupStage(run: Run): { index: number; title: string } | null
   return workflow && step ? { index: workflow.currentStepIndex, title: step.title } : null;
 }
 
-/** One choice per native session, using its newest completed (or scalar blocked) run and frozen identity. */
+/** One choice per native session, using its newest completed, scalar blocked or timed-out run and frozen identity. */
 export function followupTargets(runs: Run[]): FollowupTarget[] {
   const result: FollowupTarget[] = [];
   const sessions = new Set<string>();
   for (const run of [...runs].sort((a, b) => b.startedAt - a.startedAt)) {
-    if (run.status !== 'completed' && !(run.status === 'blocked' && !run.steps?.length)) continue;
+    if (run.status !== 'completed' && !((run.status === 'blocked' || run.timeLimitExceeded) && !run.steps?.length)) continue;
     const add = (target: FollowupTarget) => {
       const session = target.sessionId ? `${target.provider}:${target.sessionId}` : null;
       if (session && sessions.has(session)) return;

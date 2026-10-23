@@ -1,6 +1,10 @@
 import type { Dictionary } from './types';
 
 const dictionary: Dictionary = {
+  'Превышен лимит времени хода': 'Agent turn time limit exceeded',
+  'Лимит времени, мин': 'Time limit, min',
+  'Пусто — общая настройка. Лимит фиксируется отдельно для каждого нового хода агента.': 'Leave empty to use the general setting. The limit is frozen separately for each new agent turn.',
+
   // Task and stage statuses (status.ts, WorkflowChecklist). «Ошибка» as a status is “Failed”; log headings use log::Ошибка.
   'К запуску': 'Ready',
   'В работе': 'Running',

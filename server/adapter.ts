@@ -33,6 +33,7 @@ export interface AgentInput {
   ultracode?: boolean;
   communicationStyle?: string;
   cliAccess?: CliAccessMode;
+  timeLimitMinutes?: number | null;
 }
 export interface AgentCallbacks {
   onSession: (id: string) => void;
@@ -50,6 +51,8 @@ export class AgentRunError extends Error {
     this.name = 'AgentRunError';
   }
 }
+
+export const agentTimeoutMessage = (minutes: number) => `Превышен лимит времени ${minutes} мин; CLI остановлен`;
 
 export const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 export const MAX_PROMPT_BYTES = 128_000;
@@ -407,8 +410,7 @@ export async function runBoundedProcess(argv: string[], options: ProcessOptions)
   const aborted = () => rejectAbort(options.signal.reason ?? new AgentRunError('CANCELLED', 'Run cancelled.'));
   options.signal.addEventListener('abort', aborted, { once: true });
   if (options.signal.aborted) aborted();
-  // Agent turns have no duration limit. Short diagnostic commands may still
-  // supply an explicit deadline (for example, CLI capability inspection).
+  // Explicit deadlines share cancellation's process-group termination path.
   if (options.timeoutMs !== undefined) {
     timeout = setTimeout(() => rejectAbort(new AgentRunError('TIMEOUT', 'The CLI reached the configured time limit. The run did not complete.')), options.timeoutMs);
   }
@@ -487,7 +489,9 @@ async function runMock(input: AgentInput, callbacks: AgentCallbacks, signal: Abo
   callbacks.onProgress?.(input.reconcile ? 'Демо: разрешение конфликтов' : input.followup || input.answer ? 'Демо: продолжение работы' : 'Демо: выполнение задачи');
   await new Promise<void>((resolve, reject) => {
     const finish = () => { signal.removeEventListener('abort', cancel); resolve(); };
-    const timer = setTimeout(finish, 800);
+    // An explicit demo delay makes a hanging turn reproducible without a real CLI.
+    const delay = /\[delay:(\d{1,9})\]/.exec(input.followup?.request ?? input.workflow?.instruction ?? input.instruction);
+    const timer = setTimeout(finish, delay ? Math.min(Number(delay[1]), 86_400_000) : 800);
     const cancel = () => { clearTimeout(timer); signal.removeEventListener('abort', cancel); reject(signal.reason); };
     signal.addEventListener('abort', cancel, { once: true });
     if (signal.aborted) cancel();
@@ -510,7 +514,13 @@ async function runMock(input: AgentInput, callbacks: AgentCallbacks, signal: Abo
 
 export function startAgent(input: AgentInput, callbacks: AgentCallbacks): AgentHandle {
   const abort = new AbortController();
+  const timeout = input.timeLimitMinutes != null
+    ? setTimeout(() => abort.abort(new AgentRunError('TIMEOUT', agentTimeoutMessage(input.timeLimitMinutes!))), input.timeLimitMinutes * 60_000)
+    : undefined;
   const result = (async (): Promise<AgentOutcome> => {
+    if (input.timeLimitMinutes != null && (!Number.isInteger(input.timeLimitMinutes) || input.timeLimitMinutes < 1 || input.timeLimitMinutes > 1440)) {
+      throw new ProtocolError('Time limit must be an integer from 1 to 1440 minutes.');
+    }
     const effort = validateWorkerSettings(input);
     const effectiveEffort = input.provider === 'codex' && input.ultracode ? 'ultra' : effort;
     const model = normalizeModel(input.model);
@@ -562,7 +572,7 @@ export function startAgent(input: AgentInput, callbacks: AgentCallbacks): AgentH
       if (error === nativeApprovalStop) return protocol.finish(-1);
       throw error;
     }
-  })();
+  })().finally(() => clearTimeout(timeout));
   return {
     result,
     cancel: () => abort.abort(new AgentRunError('CANCELLED', 'Run cancelled. Any partial work should be reviewed before retrying.')),

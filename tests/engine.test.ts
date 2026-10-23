@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildPrompt, type AgentCallbacks, type AgentInput, type AgentOutcome } from '../server/adapter';
+import { AgentRunError, buildPrompt, type AgentCallbacks, type AgentInput, type AgentOutcome } from '../server/adapter';
 import { Engine, type AgentFactory } from '../server/engine';
 import { ProtocolError, UsageLimitError } from '../server/protocol';
 import { AppError, Store } from '../server/store';
@@ -814,5 +814,53 @@ describe('replacement after exhausted usage limits', () => {
     await flush();
     expect(store.autopilotOverview()).toMatchObject({ enabled: true, failures: 0 });
     expect(store.detail(task.id).runs[0]?.status).toBe('completed');
+  });
+});
+
+describe('timed turns', () => {
+  test('a one-minute mock timeout releases the repository and lets the next autopilot task start', async () => {
+    await engine.shutdown();
+    engine = new Engine(store, true);
+    store.updateGeneralSettings({ agentTimeLimitMinutes: 1 });
+    const first = store.createTask(input(folder, { instruction: '[delay:61000]', schedule: 'auto' }));
+    const second = store.createTask(input(folder, { instruction: '[delay:10]', schedule: 'auto' }));
+    engine.startScheduler();
+    engine.setAutopilot({ enabled: true, until: null });
+    const running = store.getTask(first.id).latestRun!;
+    expect(running).toMatchObject({ status: 'running', timeLimitMinutes: 1 });
+    // Editing the defaults during the turn must not remove its saved deadline.
+    store.updateGeneralSettings({ agentTimeLimitMinutes: null });
+    expect(store.getRun(running.id).timeLimitMinutes).toBe(1);
+    const deadline = performance.now() + 66_000;
+    while (store.getTask(second.id).latestRun?.status !== 'completed') {
+      if (performance.now() > deadline) throw new Error('Timed mock did not release its repository slot');
+      await Bun.sleep(50);
+    }
+    const failed = store.getRun(running.id);
+    expect(failed).toMatchObject({ status: 'failed', timeLimitMinutes: 1, timeLimitExceeded: true, error: 'Превышен лимит времени 1 мин; CLI остановлен' });
+    expect(failed.sessionId).toStartWith('mock-codex-');
+    expect(store.getTask(second.id).latestRun).toMatchObject({ status: 'completed', timeLimitMinutes: null });
+    const detail = store.detail(first.id);
+    expect(detail.comments.some(c => c.kind === 'system' && c.body === failed.error)).toBe(true);
+    expect(detail.logs?.some(log => log.error === failed.error)).toBe(true);
+    // Continue deliberately in the saved native session after a timeout.
+    const continued = engine.followup(first.id, { sourceRunId: failed.id, sourceStepIndex: null, body: '[delay:10] Continue.', attachmentIds: [], requestId: 'timeout-followup' });
+    expect(continued).toMatchObject({ sessionId: failed.sessionId, timeLimitMinutes: null });
+    await Bun.sleep(50);
+    expect(store.getRun(continued.id).status).toBe('completed');
+  }, 70_000);
+
+  test('three consecutive timeout failures trip the autopilot breaker', async () => {
+    store.updateGeneralSettings({ agentTimeLimitMinutes: 1 });
+    const tasks = [1, 2, 3, 4].map(() => store.createTask(input(folder, { schedule: 'auto' })));
+    engine.setAutopilot({ enabled: true, until: null });
+    for (let i = 0; i < 3; i++) {
+      expect(agent.calls[i]!.input.timeLimitMinutes).toBe(1);
+      agent.calls[i]!.reject(new AgentRunError('TIMEOUT', 'Превышен лимит времени 1 мин; CLI остановлен'));
+      await flush();
+      engine.tick();
+    }
+    expect(store.getAutopilot()).toMatchObject({ enabled: false, failures: 3, stopReason: 'failures' });
+    expect(store.getTask(tasks[3]!.id).latestRun).toBeNull();
   });
 });

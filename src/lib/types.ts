@@ -71,6 +71,10 @@ export interface IntegratorProfile extends IntegratorProfileInput { model: strin
 /** Which worker picks up a fresh run when a provider's CLI reports exhausted usage limits; null leaves the run failed. */
 export interface FallbackWorkers { codex: string | null; claude: string | null; }
 export interface GeneralSettings {
+  /** null leaves agent turns unlimited; a task may override this value. */
+  agentTimeLimitMinutes: number | null;
+  /** Per invocation of a merge-check command; null leaves it unlimited. */
+  integrationCheckTimeLimitMinutes: number | null;
   defaultCwd: string;
   defaultSchedule: TaskInput['schedule'];
   /** Preselected in the form of a new single-worker card; an archived profile is skipped there. */
@@ -164,6 +168,8 @@ export interface RunStep extends TaskStepInput {
 /** How urgent a card is; the autopilot claims a more urgent card first. */
 export type TaskPriority = 'critical' | 'high' | 'normal' | 'low';
 export interface TaskInput {
+  /** null/omitted follows the general agent time limit on each new turn. */
+  timeLimitMinutes?: number | null;
   tagIds?: string[];
   attachmentIds?: string[];
   steps?: TaskStepInput[];
@@ -251,6 +257,10 @@ export interface RunProgress {
   updatedAt: number;
 }
 export interface Run {
+  /** A failed turn stopped by its saved deadline; its native session may be continued manually. */
+  timeLimitExceeded?: boolean;
+  /** Effective limit frozen for this turn, including continuations; null means unlimited. */
+  timeLimitMinutes?: number | null;
   integration?: Integration | null;
   workspace?: WorkspaceSnapshot | null;
   followup?: RunFollowup | null;

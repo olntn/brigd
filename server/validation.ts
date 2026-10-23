@@ -3,7 +3,7 @@ import { isAbsolute } from 'node:path';
 import type { AutopilotInput, Effort, IntegratorProfileInput, TaskInput, WorkerInput } from '../src/lib/types';
 import { AUTOPILOT_MAX_WINDOW_MS } from '../src/lib/autopilot';
 import { DEFAULT_TASK_PRIORITY, isTaskPriority, TASK_PRIORITIES } from '../src/lib/priority';
-import { AppError } from './store';
+import { AppError } from './errors';
 import { validateWorkflowSteps } from './workflows';
 import { attachmentIds } from './attachments';
 import { effortOptions, normalizeModel, normalizeWorkerDescription } from '../src/lib/workers';
@@ -13,6 +13,15 @@ export function textField(value: unknown, label: string, max: number): string {
   if (typeof value !== 'string' || !value.trim() || value.length > max || value.includes('\0')) throw new AppError(`${label}: введите от 1 до ${max} символов`);
   return value.trim();
 }
+/** Minutes in settings and cards; null (or an omitted creation value) leaves the limit unset. */
+export function validateTimeLimitMinutes(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 1440) {
+    throw new AppError('Лимит времени: введите целое число от 1 до 1440 минут или null');
+  }
+  return value;
+}
+
 export async function validateTask(value: unknown): Promise<TaskInput> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError('Ожидается JSON-объект');
   const v = value as Record<string, unknown>;
@@ -44,7 +53,7 @@ export async function validateTask(value: unknown): Promise<TaskInput> {
       firstRunAt = v.firstRunAt;
     }
   }
-  return { ...(v.tagIds !== undefined ? { tagIds: validateTagIds(v.tagIds) } : {}), ...(v.attachmentIds !== undefined ? { attachmentIds: attachmentIds(v.attachmentIds) } : {}), steps: validateWorkflowSteps(v.steps), workerId, title, instruction, provider: v.provider, cwd, ultracode, priority, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
+  return { ...(v.timeLimitMinutes !== undefined ? { timeLimitMinutes: validateTimeLimitMinutes(v.timeLimitMinutes) } : {}), ...(v.tagIds !== undefined ? { tagIds: validateTagIds(v.tagIds) } : {}), ...(v.attachmentIds !== undefined ? { attachmentIds: attachmentIds(v.attachmentIds) } : {}), steps: validateWorkflowSteps(v.steps), workerId, title, instruction, provider: v.provider, cwd, ultracode, priority, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
 }
 
 /** The autopilot switch. A stop time is optional; when enabling it must lie ahead and within a month. */
