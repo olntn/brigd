@@ -536,7 +536,7 @@ export function startAgent(input: AgentInput, callbacks: AgentCallbacks): AgentH
         // installed model/account rejects a requested (CLI-supported) level.
         if ((model || effort !== 'default' || input.ultracode) && error instanceof ProtocolError && !(error instanceof UsageLimitError)) {
           const requested = [model ? `Requested ${input.provider} model: ${model}.` : '', effectiveEffort !== 'default' ? `Requested ${input.provider} effort: ${effectiveEffort}.` : '', input.ultracode ? `Requested ${input.provider} ultra mode.` : ''].filter(Boolean).join(' ');
-          throw new ProtocolError(`${error.message} ${requested} Check the selected model/account supports these settings, or choose default model and effort${input.ultracode ? ' and disable ultracode' : ''}. brigd did not substitute the requested model. Native permissions still apply.`);
+          throw new ProtocolError(`${error.message} ${requested} Check the selected model/account supports these settings, or choose default model and effort${input.ultracode ? ' and disable ultracode' : ''}. brigd did not substitute the requested model. Native permissions still apply.`, error.diagnostic);
         }
         throw error;
       }

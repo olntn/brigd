@@ -7,7 +7,11 @@ export const MAX_PROTOCOL_EVENTS = 50000;
 
 /** Provider stdout is a protocol, never a source of heuristic success signals. */
 export class ProtocolError extends Error {
-  constructor(message: string) {
+  /**
+   * Redacted, bounded CLI output explaining a failure the events did not (a stderr tail,
+   * a non-JSON stdout line). It belongs in the task log's error block only, never in comments.
+   */
+  constructor(message: string, readonly diagnostic?: string) {
     super(message);
     this.name = 'ProtocolError';
   }
@@ -34,6 +38,12 @@ export function isUsageLimit(value: unknown): boolean {
   return STRONG_LIMIT.test(value) || (WEAK_LIMIT.test(value) && !UNRELATED_LIMIT.test(value));
 }
 const USAGE_LIMIT_DETAIL_LENGTH = 500;
+/** Characters of CLI stderr kept for the failure diagnostic; successful turns never surface it. */
+const STDERR_TAIL_LENGTH = 4000;
+const MALFORMED_LINE_EXCERPT_LENGTH = 500;
+const MAX_LOGS_PER_TURN = 1000;
+/** Failure entries are kept past the ordinary cap, so a long turn still records why it failed. */
+const MAX_FAILURE_LOGS_PER_TURN = 200;
 
 const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -108,6 +118,7 @@ export class AgentProtocol {
   private stderrTail = '';
   private blockedTools = new Set<string>();
   private seenLogs = new Set<string>();
+  private failureLogs = 0;
   private pendingTools = new Map<string, TaskLogInput>();
   private pending = '';
   /** Bytes of the oversized line being discarded unread, or 0 while a line is still being collected. */
@@ -127,22 +138,38 @@ export class AgentProtocol {
   }
 
   get permissionBlocked(): boolean { return this.nativeBlock; }
+  private get cliName(): string { return this.provider === 'claude' ? 'Claude Code' : 'Codex'; }
   /** The exhausted-limit message seen so far, if any. */
   get usageLimitDetail(): string | null { return this.usageLimit; }
   /** Bytes of oversized lines dropped unread so far, including the one still streaming in; the bounded runner leaves them out of its output limit. */
   get discardedBytes(): number { return this.discarded + this.skipping; }
 
   private noteLimit(text: string): void {
-    if (this.usageLimit !== null || !isUsageLimit(text)) return;
-    const line = text.split('\n').find(candidate => isUsageLimit(candidate)) ?? text;
+    if (this.usageLimit !== null) return;
+    // Judge each line on its own: an unrelated cap mentioned nearby in the stderr tail must not mask a real limit.
+    const line = text.split('\n').find(candidate => isUsageLimit(candidate)) ?? (isUsageLimit(text) ? text : undefined);
+    if (line === undefined) return;
     this.usageLimit = (sanitizeLogError(line) ?? '').slice(0, USAGE_LIMIT_DETAIL_LENGTH);
   }
 
-  /** Stderr stays private: only an exhausted-limit line is kept, and only when the turn fails anyway. */
+  /** Stderr stays out of comments and successful turns: a bounded tail serves only the exhausted-limit check and the failure diagnostic. */
   noteStderr(chunk: string): void {
     const text = this.stderrTail + chunk;
     this.noteLimit(text);
-    this.stderrTail = text.slice(-USAGE_LIMIT_DETAIL_LENGTH);
+    this.stderrTail = text.slice(-STDERR_TAIL_LENGTH);
+  }
+
+  /** The stderr tail and, for a protocol violation, the offending stdout excerpt, redacted and bounded. */
+  private diagnostic(excerpt?: string): string | undefined {
+    const parts = [
+      excerpt ? `Фрагмент строки stdout без JSON: ${excerpt}` : '',
+      this.stderrTail.trim() ? `Последние строки stderr CLI:\n${this.stderrTail.trim()}` : '',
+    ].filter(Boolean);
+    return parts.length ? sanitizeLogError(parts.join('\n\n')) : undefined;
+  }
+
+  private protocolError(message: string, excerpt?: string): ProtocolError {
+    return new ProtocolError(message, this.diagnostic(excerpt));
   }
 
   push(chunk: string): void {
@@ -193,7 +220,10 @@ export class AgentProtocol {
     if (size > this.maxLineBytes) { this.dropLine(size); return; }
     let event: unknown;
     try { event = JSON.parse(line); }
-    catch { throw new ProtocolError('The CLI emitted malformed JSONL output.'); }
+    catch {
+      const excerpt = line.length > MALFORMED_LINE_EXCERPT_LENGTH ? `${line.slice(0, MALFORMED_LINE_EXCERPT_LENGTH)}…` : line;
+      throw this.protocolError('The CLI emitted malformed JSONL output.', excerpt);
+    }
     this.accept(event);
   }
 
@@ -210,8 +240,11 @@ export class AgentProtocol {
   }
 
   private log(key: string, entry: TaskLogInput): void {
-    if (this.seenLogs.has(key) || this.seenLogs.size >= 1000) return;
+    if (this.seenLogs.has(key)) return;
+    const failure = entry.error !== undefined || entry.summary.startsWith('Ошибка ');
+    if (failure ? this.failureLogs >= MAX_FAILURE_LOGS_PER_TURN : this.seenLogs.size - this.failureLogs >= MAX_LOGS_PER_TURN) return;
     this.seenLogs.add(key);
+    if (failure) this.failureLogs++;
     this.callbacks.onLog?.(entry);
   }
 
@@ -246,7 +279,7 @@ export class AgentProtocol {
   }
 
   accept(event: unknown): void {
-    if (!record(event) || typeof event.type !== 'string') throw new ProtocolError('The CLI emitted an invalid event.');
+    if (!record(event) || typeof event.type !== 'string') throw this.protocolError('The CLI emitted an invalid event.');
     if (++this.eventCount > MAX_PROTOCOL_EVENTS) throw new ProtocolError('CLI output exceeded the event limit.');
     if (this.provider === 'claude' && event.parent_tool_use_id) return; // Nested agent events are not the parent result.
 
@@ -270,7 +303,8 @@ export class AgentProtocol {
 
     if (event.type === 'error' || event.type === 'turn.failed') {
       const text = errorText(event.error) || errorText(event.message);
-      this.log(`error:${this.eventCount}`, { kind: 'lifecycle', summary: `Ошибка ${this.provider === 'claude' ? 'Claude Code' : 'Codex'}`, details: [], error: sanitizeLogError(text) });
+      this.log(`error:${this.eventCount}`, { kind: 'lifecycle', summary: `Ошибка ${this.cliName}`, details: [`Событие CLI: ${event.type}.`],
+        error: sanitizeLogError(text) ?? `${this.cliName} прислал событие ${event.type} без текста ошибки.` });
       if (isPermissionDenial(text)) {
         this.nativeBlock = true;
         if (isNativeApprovalRequired(text)) this.nativePermissionRequest = true;
@@ -291,7 +325,8 @@ export class AgentProtocol {
               isPermissionDenial(errorText(item.aggregated_output) || errorText(item.error))) this.nativeBlock = true;
         }
         if (item.type === 'error') {
-          this.log(`error:${typeof item.id === 'string' ? item.id : this.eventCount}`, { kind: 'lifecycle', summary: 'Ошибка Codex', details: [], error: sanitizeLogError(errorText(item.message)) });
+          this.log(`error:${typeof item.id === 'string' ? item.id : this.eventCount}`, { kind: 'lifecycle', summary: 'Ошибка Codex', details: [`Событие CLI: ${event.type}, элемент error.`],
+            error: sanitizeLogError(errorText(item.message)) ?? 'Codex прислал элемент error без текста ошибки.' });
           if (isPermissionDenial(errorText(item.message))) this.nativeBlock = true;
           else { this.failure = true; this.noteLimit(errorText(item.message)); }
         }
@@ -336,8 +371,10 @@ export class AgentProtocol {
       if (event.type === 'result') {
         this.terminal = true;
         if (event.subtype !== 'success' || event.is_error === true) {
-          const details = [errorText(event.result), ...(Array.isArray(event.errors) ? event.errors.map(errorText) : [])].join('\n');
-          this.log(`result-error:${this.eventCount}`, { kind: 'lifecycle', summary: 'Ошибка Claude Code', details: [], error: sanitizeLogError(details) });
+          const details = [errorText(event.result), ...(Array.isArray(event.errors) ? event.errors.map(errorText) : [])].filter(Boolean).join('\n');
+          const subtype = typeof event.subtype === 'string' && event.subtype ? event.subtype.slice(0, 100) : 'unknown';
+          this.log(`result-error:${this.eventCount}`, { kind: 'lifecycle', summary: 'Ошибка Claude Code', details: [`Результат Claude Code: ${subtype}${event.is_error === true ? ', is_error' : ''}.`],
+            error: sanitizeLogError(details) ?? `Claude Code завершил ход с результатом ${subtype} без текста ошибки.` });
           if (isPermissionDenial(details)) {
             this.nativeBlock = true;
             if (isNativeApprovalRequired(details)) this.nativePermissionRequest = true;
@@ -354,14 +391,14 @@ export class AgentProtocol {
     if (!this.nativeBlock) this.end();
     // An exhausted limit may stop the CLI before any session exists; a replacement account can still take the work.
     if (this.usageLimit !== null && !this.nativeBlock && (this.failure || exitCode !== 0 || !this.terminal)) throw new UsageLimitError(this.provider, this.usageLimit);
-    if (!this.sessionId) throw new ProtocolError('The CLI did not return a durable session ID.');
-    if (this.failure) throw new ProtocolError('The CLI reported a failed turn. No successful result was accepted.');
+    if (!this.sessionId) throw this.protocolError('The CLI did not return a durable session ID.');
+    if (this.failure) throw this.protocolError('The CLI reported a failed turn. No successful result was accepted.');
     if (this.nativeBlock) return {
       sessionId: this.sessionId,
       envelope: { status: 'blocked', summary: this.blockedSummary(), questions: [] },
     };
-    if (exitCode !== 0) throw new ProtocolError(`The CLI exited with code ${exitCode}. No successful result was accepted.`);
-    if (!this.terminal) throw new ProtocolError('The CLI exited without a completed turn event.');
+    if (exitCode !== 0) throw this.protocolError(`The CLI exited with code ${exitCode}. No successful result was accepted.`);
+    if (!this.terminal) throw this.protocolError('The CLI exited without a completed turn event.');
     return { sessionId: this.sessionId, envelope: validateEnvelope(this.finalResponse) };
   }
 }
