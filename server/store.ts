@@ -6,6 +6,8 @@ import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, Aut
 import type { RepositoryLocation } from './workspaces';
 import type { IntegrationRecord, WorkspaceRun } from './workspace-storage';
 import { clock } from './clock';
+import { agentTimeoutMessage } from './adapter';
+import { validateTimeLimitMinutes } from './validation';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { AUTOPILOT_FAILURE_LIMIT } from '../src/lib/autopilot';
 import { DEFAULT_TASK_PRIORITY, isTaskPriority, TASK_PRIORITIES, TASK_PRIORITY_LABELS } from '../src/lib/priority';
@@ -343,6 +345,8 @@ export class Store {
         ['runs', 'progress', 'TEXT'],
         ['runs', 'progress_at', 'INTEGER'],
         ['runs', 'progress_turn', 'INTEGER'],
+        ['tasks', 'time_limit_minutes', 'INTEGER CHECK(time_limit_minutes BETWEEN 1 AND 1440)'],
+        ['runs', 'time_limit_minutes', 'INTEGER CHECK(time_limit_minutes BETWEEN 1 AND 1440)'],
         ['tasks', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_snapshot', 'TEXT'],
@@ -457,6 +461,9 @@ export class Store {
       if (!columns.includes('default_schedule')) {
         this.db.exec("ALTER TABLE general_settings ADD COLUMN default_schedule TEXT NOT NULL DEFAULT 'manual' CHECK(default_schedule IN ('auto','manual','interval'))");
       }
+      for (const column of ['agent_time_limit_minutes', 'integration_check_time_limit_minutes']) {
+        if (!columns.includes(column)) this.db.exec(`ALTER TABLE general_settings ADD COLUMN ${column} INTEGER CHECK(${column} BETWEEN 1 AND 1440)`);
+      }
       // Per provider: the worker that picks up a fresh run when that CLI reports exhausted usage limits.
       for (const column of ['fallback_codex', 'fallback_claude']) {
         if (!columns.includes(column)) this.db.exec(`ALTER TABLE general_settings ADD COLUMN ${column} TEXT REFERENCES workers(id)`);
@@ -545,6 +552,19 @@ export class Store {
     if (value !== 'standard' && value !== 'full') throw new AppError('Режим доступа должен быть standard или full');
     this.db.query('UPDATE cli_access_settings SET mode=? WHERE singleton=1').run(value);
   }
+  getTimeLimits(): { agentTimeLimitMinutes: number | null; integrationCheckTimeLimitMinutes: number | null } {
+    const row = this.db.query('SELECT agent_time_limit_minutes,integration_check_time_limit_minutes FROM general_settings WHERE singleton=1').get() as Row;
+    return { agentTimeLimitMinutes: validateTimeLimitMinutes(row.agent_time_limit_minutes),
+      integrationCheckTimeLimitMinutes: validateTimeLimitMinutes(row.integration_check_time_limit_minutes) };
+  }
+  private turnTimeLimit(taskId: string): number | null {
+    // Read only the card's limit: workflow transitions may be midway through updating their snapshot here.
+    const row = this.db.query('SELECT time_limit_minutes FROM tasks WHERE id=?').get(taskId) as Row;
+    return validateTimeLimitMinutes(row.time_limit_minutes) ?? this.getTimeLimits().agentTimeLimitMinutes;
+  }
+  private snapshotTimeLimit(runId: string, taskId: string): void {
+    this.db.query('UPDATE runs SET time_limit_minutes=? WHERE id=?').run(this.turnTimeLimit(taskId), runId);
+  }
   getDefaultCwd(): string | null {
     const row = this.db.query('SELECT default_cwd FROM general_settings WHERE singleton=1').get() as { default_cwd: string | null };
     return row.default_cwd;
@@ -606,12 +626,15 @@ export class Store {
   }
   updateGeneralSettings(value: Record<string, unknown>): void {
     const keys = Object.keys(value);
-    if (!keys.length || keys.some(key => key !== 'defaultCwd' && key !== 'defaultSchedule' && key !== 'defaultWorkerId' && key !== 'fallbackWorkers')) {
-      throw new AppError('Укажите defaultCwd, defaultSchedule, defaultWorkerId и/или fallbackWorkers');
+    if (!keys.length || keys.some(key => key !== 'defaultCwd' && key !== 'defaultSchedule' && key !== 'defaultWorkerId' && key !== 'fallbackWorkers' && key !== 'agentTimeLimitMinutes' && key !== 'integrationCheckTimeLimitMinutes')) {
+      throw new AppError('Укажите defaultCwd, defaultSchedule, defaultWorkerId, fallbackWorkers, agentTimeLimitMinutes и/или integrationCheckTimeLimitMinutes');
     }
     const cwd = Object.hasOwn(value, 'defaultCwd') ? validatedDefaultCwd(value.defaultCwd) : null;
     const schedule = Object.hasOwn(value, 'defaultSchedule') ? validatedDefaultSchedule(value.defaultSchedule) : null;
     this.db.transaction(() => {
+      for (const [field, column] of [['agentTimeLimitMinutes', 'agent_time_limit_minutes'], ['integrationCheckTimeLimitMinutes', 'integration_check_time_limit_minutes']] as const) {
+        if (Object.hasOwn(value, field)) this.db.query(`UPDATE general_settings SET ${column}=? WHERE singleton=1`).run(validateTimeLimitMinutes(value[field]));
+      }
       if (Object.hasOwn(value, 'fallbackWorkers')) this.setFallbackWorkers(value.fallbackWorkers);
       const current = this.getDefaultWorkerId();
       const worker = Object.hasOwn(value, 'defaultWorkerId') ? this.validatedDefaultWorker(value.defaultWorkerId, current) : current;
@@ -1154,6 +1177,7 @@ export class Store {
         this.persistSteps(run);
       }
       this.advanceAttachmentInputs(run, run.turn + 1);
+      this.snapshotTimeLimit(id, run.taskId);
       this.db.query(`UPDATE runs SET provider=?,worker_id=?,worker_snapshot=?,session_id=NULL,turn=turn+1,fallback_turn=turn+1,updated_at=?,summary=NULL,error=NULL,finished_at=NULL WHERE id=?`)
         .run(snapshot.provider, replacement.id, JSON.stringify(snapshot), now, id);
       return this.getRun(id);
@@ -1591,7 +1615,7 @@ export class Store {
     const followup = followupSnapshot(row, worker as WorkerSnapshot | null);
     const reconcile = reconcileSnapshot(row, worker as WorkerSnapshot | null);
     const workspace = row.workspace_id ? this.getWorkspace(row.workspace_id) : null;
-    return { integration: this.integrationForRun(row.id), workspace, followup, reconcile, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, ultracode: readFlag(row.ultracode), fallbackTurn: row.fallback_turn ?? null,
+    return { timeLimitExceeded: row.status === 'failed' && row.time_limit_minutes != null && row.error === agentTimeoutMessage(row.time_limit_minutes), integration: this.integrationForRun(row.id), workspace, followup, reconcile, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, ultracode: readFlag(row.ultracode), timeLimitMinutes: validateTimeLimitMinutes(row.time_limit_minutes), fallbackTurn: row.fallback_turn ?? null,
       progress: row.status === 'running' && row.progress_turn === row.turn && typeof row.progress === 'string' ? { text: row.progress, updatedAt: row.progress_at } : null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
       trigger: row.trigger, scheduledFor: row.scheduled_for, status: row.status, sessionId: row.session_id,
       startedAt: row.started_at, updatedAt: row.updated_at, finishedAt: row.finished_at, summary: row.summary,
@@ -1607,7 +1631,7 @@ export class Store {
       queued: 'awaiting_merge', checking: 'integrating', merging: 'integrating', cancelling: 'integrating',
       conflict: 'merge_conflict', failed: 'merge_failed', blocked: 'merge_blocked', interrupted: 'merge_interrupted', cancelled: 'merge_blocked',
     };
-    return { tagIds: tags.map(tag => tag.id), tags, hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd, ultracode: readFlag(row.ultracode),
+    return { tagIds: tags.map(tag => tag.id), tags, hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd, ultracode: readFlag(row.ultracode), timeLimitMinutes: validateTimeLimitMinutes(row.time_limit_minutes),
       priority: row.priority ?? DEFAULT_TASK_PRIORITY, schedule: row.schedule, intervalMinutes: row.interval_minutes, firstRunAt: row.first_run_at,
       nextRunAt: row.next_run_at, paused: !!row.paused, createdAt: row.created_at, updatedAt: row.updated_at, archivedAt: row.archived_at ?? null,
       status: latestRun?.integration ? integrationStatuses[latestRun.integration.status] ?? latestRun.status : latest?.status ?? 'ready', latestRun,
@@ -1742,10 +1766,10 @@ export class Store {
       const provider = steps.length ? this.getWorker(steps[0]!.workerId).provider : worker?.provider ?? input.provider;
       const ultracode = validatedTaskUltracode(input.ultracode);
       const priority = validatedTaskPriority(input.priority === undefined ? DEFAULT_TASK_PRIORITY : input.priority);
-      this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template,ultracode,autopilot_position,priority) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
+      this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template,ultracode,autopilot_position,priority,time_limit_minutes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
         input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt,
         input.schedule === 'interval' ? (input.firstRunAt ?? now) : null, +input.paused, now, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode),
-        input.schedule === 'auto' ? this.nextAutopilotPosition() : null, priority);
+        input.schedule === 'auto' ? this.nextAutopilotPosition() : null, priority, validateTimeLimitMinutes(input.timeLimitMinutes));
       this.replaceTaskAttachments(id, input.attachmentIds, now);
       this.replaceTaskTags(id, input.tagIds === undefined ? [] : input.tagIds);
       return this.getTask(id);
@@ -1766,8 +1790,8 @@ export class Store {
       // A card switched to the autopilot, or moved to another priority, queues at the end of its priority; leaving it gives up its place.
       const position = input.schedule !== 'auto' ? null : task.schedule === 'auto' && priority === task.priority
         ? (this.db.query('SELECT autopilot_position FROM tasks WHERE id=?').get(id) as Row).autopilot_position : this.nextAutopilotPosition();
-      this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=?,ultracode=?,autopilot_position=?,priority=? WHERE id=?`)
-        .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode), position, priority, id);
+      this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=?,ultracode=?,autopilot_position=?,priority=?,time_limit_minutes=? WHERE id=?`)
+        .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode), position, priority, validateTimeLimitMinutes(input.timeLimitMinutes === undefined ? task.timeLimitMinutes : input.timeLimitMinutes), id);
       this.replaceTaskAttachments(id, input.attachmentIds, now);
       if (input.tagIds !== undefined) this.replaceTaskTags(id, input.tagIds);
       return this.getTask(id);
@@ -1835,6 +1859,7 @@ export class Store {
     this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,scheduled_for,status,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,steps_snapshot,current_step_index,workflow_version,ultracode) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?,?,?,?,?,?)`)
       .run(id, task.id, worker?.provider ?? task.provider, task.cwd, task.instruction, trigger, scheduledFor, now, now, +mock, worker?.id ?? null,
         worker ? JSON.stringify(worker) : null, JSON.stringify(instructions), JSON.stringify(steps), steps.length ? 0 : null, steps.length ? 1 : 0, storedFlag(task.ultracode));
+    this.snapshotTimeLimit(id, task.id);
     for (const attachment of this.listTaskAttachments(task.id)) this.db.query('INSERT INTO run_attachment_inputs(run_id,turn,attachment_id) VALUES (?,1,?)').run(id, attachment.id);
     this.comment(task.id, id, 'system', mock ? 'Демо-запуск: используется тестовый агент, реальные CLI не вызываются.' : `Запуск ${worker?.provider === 'claude' || (!worker && task.provider === 'claude') ? 'Claude Code' : 'Codex'} через CLI.`, now);
     return this.getRun(id);
@@ -1872,9 +1897,9 @@ export class Store {
       this.assertNotArchived(this.getTask(taskId));
       const source = this.getRun(input.sourceRunId);
       if (source.taskId !== taskId) throw new AppError('Исходный запуск относится к другой задаче', 409);
-      // A scalar agent that stopped as blocked awaits guidance in its saved
-      // session; blocked workflow stages keep the explicit retry/cancel path.
-      if (source.status !== 'completed' && !(source.status === 'blocked' && !source.steps.length)) throw new AppError('Продолжить можно только завершённый или заблокированный агентом запуск', 409);
+      // Blocked or timed-out scalar agents can continue their saved session.
+      // Workflow stages use resume after a timeout, or retry/cancel.
+      if (source.status !== 'completed' && !((source.status === 'blocked' || source.timeLimitExceeded) && !source.steps.length)) throw new AppError('Продолжить можно только завершённый или заблокированный агентом запуск', 409);
       if (source.workerId !== storedWorkerId(source.worker) || (source.worker && source.worker.provider !== source.provider)) invalidSnapshot();
       if (this.activeRun(taskId)) throw new AppError('У задачи уже есть активный запуск. Сначала завершите или отмените его.', 409);
       let selected: RunStep | null = null;
@@ -1896,6 +1921,7 @@ export class Store {
         VALUES (?,?,?,?,?,'followup','running',?,?,?,?,?,?,?,?,?)`)
         .run(id, taskId, worker?.provider ?? source.provider, source.cwd, source.instruction, sessionId, now, now, +source.mock,
           storedWorkerId(worker), worker ? JSON.stringify(worker) : null, JSON.stringify(source.instructions), JSON.stringify(followup), storedFlag(source.ultracode));
+      this.snapshotTimeLimit(id, taskId);
       this.db.query('UPDATE runs SET workspace_id=(SELECT workspace_id FROM runs WHERE id=?) WHERE id=?').run(source.id, id);
       // Freeze only the selected saved turn's inputs. No current task edits or
       // later workflow stages may leak into an earlier stage's continuation.
@@ -1937,6 +1963,7 @@ export class Store {
       this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,status,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,reconcile_snapshot,workspace_id)
         VALUES (?,?,?,?,?,'reconcile','running',?,?,?,NULL,?,?,?,?)`)
         .run(id, task.id, worker.provider, source.cwd, source.instruction, now, now, +source.mock, JSON.stringify(worker), JSON.stringify(this.enabledInstructions()), JSON.stringify(reconcile), source.workspace.id);
+      this.snapshotTimeLimit(id, task.id);
       this.comment(task.id, id, 'system', `Интегратор разрешает конфликт слияния с веткой ${reconcile.targetBranch}${reconcile.conflicts.length ? `: ${reconcile.conflicts.slice(0, 10).join(', ')}` : ''}. Результат задачи остаётся в её worktree.`, now);
       return this.getRun(id);
     }).immediate();
@@ -2334,6 +2361,7 @@ export class Store {
           this.persistSteps(run);
           this.db.query(`UPDATE runs SET current_step_index=?,provider=?,worker_id=?,worker_snapshot=?,session_id=NULL,turn=turn+1,updated_at=?,summary=NULL,error=NULL,finished_at=NULL WHERE id=?`)
             .run(index, next.worker.provider, next.workerId, JSON.stringify(next.worker), now, id);
+          this.snapshotTimeLimit(id, run.taskId);
           return this.getRun(id);
         }
         this.persistSteps(run);
@@ -2362,7 +2390,7 @@ export class Store {
   resume(id: string, answer: string, acknowledgeInterruption = false, now = clock(), ids?: string[]): Run {
     return this.db.transaction(() => {
       const run = this.getRun(id);
-      if (!['waiting_input', 'interrupted'].includes(run.status)) throw new AppError('Этот запуск нельзя продолжить', 409);
+      if (!['waiting_input', 'interrupted'].includes(run.status) && !(run.timeLimitExceeded && run.steps.length && run.sessionId)) throw new AppError('Этот запуск нельзя продолжить', 409);
       if (!run.sessionId) throw new AppError('CLI не сохранил ID сессии. Для сложной задачи повторите текущий этап с подтверждением; иначе отмените запуск и создайте новый.', 409);
       if (run.status === 'interrupted' && !acknowledgeInterruption) throw new AppError('Сначала подтвердите, что предыдущий CLI-процесс остановлен. Повторный запуск может продублировать действия.', 409);
       this.db.query("UPDATE runs SET status='running',turn=turn+1,updated_at=?,finished_at=NULL,error=NULL WHERE id=?").run(now, id);
@@ -2372,6 +2400,7 @@ export class Store {
       }
       this.comment(run.taskId, id, 'user', answer, now, undefined, ids);
       this.advanceAttachmentInputs(run, run.turn + 1, attachmentIds(ids));
+      this.snapshotTimeLimit(id, run.taskId);
       return this.getRun(id);
     }).immediate();
   }
@@ -2387,6 +2416,7 @@ export class Store {
       this.advanceAttachmentInputs(run, run.turn + 1);
       this.persistSteps(run);
       this.db.query("UPDATE runs SET status='running',session_id=NULL,turn=turn+1,updated_at=?,finished_at=NULL,summary=NULL,error=NULL WHERE id=?").run(now, id);
+      this.snapshotTimeLimit(id, run.taskId);
       this.comment(run.taskId, id, 'system', 'Повтор текущего этапа в новой сессии. Предыдущие попытки сохранены; выполненные действия не откатываются. Разрешения CLI не изменены.', now);
       return this.getRun(id);
     }).immediate();

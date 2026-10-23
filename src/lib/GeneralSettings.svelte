@@ -18,6 +18,8 @@
   let defaultSchedule = $state<GeneralSettings['defaultSchedule']>('manual');
   // Empty string stands for "no default worker", as in the task form.
   let defaultWorker = $state('');
+  let agentTimeLimitMinutes = $state<number | undefined>();
+  let integrationCheckTimeLimitMinutes = $state<number | undefined>();
   // Empty string stands for "no replacement"; IDs are kept even when the catalog has not loaded yet.
   let fallback = $state<Record<Provider, string>>({ codex: '', claude: '' });
   let dirty = $state(false);
@@ -55,6 +57,8 @@
     if (!dirty) {
       value = settings?.defaultCwd ?? '';
       defaultSchedule = settings?.defaultSchedule ?? 'manual';
+      agentTimeLimitMinutes = settings?.agentTimeLimitMinutes ?? undefined;
+      integrationCheckTimeLimitMinutes = settings?.integrationCheckTimeLimitMinutes ?? undefined;
       defaultWorker = settings?.defaultWorkerId ?? '';
       fallback = { codex: settings?.fallbackWorkers?.codex ?? '', claude: settings?.fallbackWorkers?.claude ?? '' };
     }
@@ -74,7 +78,7 @@
     onmutation();
     try {
       const response = await fetch('/api/settings/general', {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ defaultCwd, defaultSchedule, defaultWorkerId: defaultWorker || null, fallbackWorkers }),
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ defaultCwd, defaultSchedule, agentTimeLimitMinutes: agentTimeLimitMinutes ?? null, integrationCheckTimeLimitMinutes: integrationCheckTimeLimitMinutes ?? null, defaultWorkerId: defaultWorker || null, fallbackWorkers }),
       });
       let body;
       try { body = await response.json(); } catch { throw new Error(t('Сервер вернул неожиданный ответ. Попробуйте ещё раз.')); }
@@ -83,6 +87,8 @@
       dirty = false;
       value = saved.defaultCwd;
       defaultSchedule = saved.defaultSchedule;
+      agentTimeLimitMinutes = saved.agentTimeLimitMinutes ?? undefined;
+      integrationCheckTimeLimitMinutes = saved.integrationCheckTimeLimitMinutes ?? undefined;
       defaultWorker = saved.defaultWorkerId ?? '';
       fallback = { codex: saved.fallbackWorkers?.codex ?? '', claude: saved.fallbackWorkers?.claude ?? '' };
       onchange(saved);
@@ -105,6 +111,8 @@
     <label class="form-field"><span>{t('Рабочая папка по умолчанию')}</span><div class="input-with-icon"><Icon name="folder" size={16} /><input name="defaultCwd" aria-label={t('Рабочая папка по умолчанию')} aria-describedby="default-cwd-description" bind:value oninput={touched} maxlength="4096" placeholder="/workspace/projects/my-project" required disabled={busy || loading || !settings} spellcheck="false" autocapitalize="off" /></div><small id="default-cwd-description">{t('Абсолютный путь к папке на компьютере, где запущен brigd. Подставляется при создании задачи; его можно изменить в форме.')}</small></label>
     <label class="form-field"><span>{t('Тип запуска по умолчанию')}</span><select name="defaultSchedule" aria-label={t('Тип запуска по умолчанию')} aria-describedby="default-schedule-description" bind:value={defaultSchedule} onchange={touched} disabled={busy || loading || !settings}><option value="auto">{t('Автопилот')}</option><option value="manual">{t('Вручную')}</option><option value="interval">{t('По расписанию')}</option></select><small id="default-schedule-description">{t('Выбирается в поле «Когда запускать» у новых задач. Его можно изменить в форме задачи.')}</small></label>
     <label class="form-field"><span>{t('Работник по умолчанию')}</span><select name="defaultWorkerId" aria-label={t('Работник по умолчанию')} aria-describedby="default-worker-description" bind:value={defaultWorker} onchange={touched} disabled={busy || loading || !settings}><option value="">{t('Не выбирать')}</option>{#each workerOptions(defaultWorker) as worker (worker.id)}<option value={worker.id}>{worker.name} · {providerName(worker.provider)}{worker.archived ? ` · ${t('в архиве')}` : ''}</option>{/each}</select><small id="default-worker-description">{defaultWorkerHint(defaultWorker)}</small></label>
+    <label class="form-field"><span>{t('Максимальная длительность хода агента, мин')}</span><input type="number" name="agentTimeLimitMinutes" min="1" max="1440" step="1" bind:value={agentTimeLimitMinutes} oninput={touched} disabled={busy || loading || !settings} /><small>{t('Пусто — без лимита. Применяется к новым ходам, включая ответы, дополнительные запросы и Интегратора. В задаче можно задать свой лимит.')}</small></label>
+    <label class="form-field"><span>{t('Максимальная длительность проверки слияния, мин')}</span><input type="number" name="integrationCheckTimeLimitMinutes" min="1" max="1440" step="1" bind:value={integrationCheckTimeLimitMinutes} oninput={touched} disabled={busy || loading || !settings} /><small>{t('Пусто — без лимита. Ограничивает каждую команду проверки и её повторы; изменение применяется к новым попыткам слияния.')}</small></label>
     <fieldset class="fallback-settings" aria-describedby="fallback-description">
       <legend>{t('Замена при исчерпании лимитов')}</legend>
       <p id="fallback-description" class="fallback-help">{t('Когда CLI сообщает, что лимиты использования закончились, новую сессию с тем же заданием начинает выбранный работник, обычно другого провайдера: например, Codex Sol 6.1 ↔ Claude Code Opus 5.5. Продолжения сохранённых сессий не передаются. В профиле работника можно задать свою замену вместо этой.')}</p>

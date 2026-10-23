@@ -22,7 +22,7 @@ export const messages: Dictionary = {
   'Работник по умолчанию в архиве. Восстановите его или выберите другого.': 'The default worker is archived. Restore it or choose another one.',
   'fallbackWorkers: ожидается объект с полями codex и claude': 'fallbackWorkers: expected an object with codex and claude fields',
   'fallbackWorkers: допустимы только поля codex и claude': 'fallbackWorkers: only the codex and claude fields are allowed',
-  'Укажите defaultCwd, defaultSchedule, defaultWorkerId и/или fallbackWorkers': 'Specify defaultCwd, defaultSchedule, defaultWorkerId and/or fallbackWorkers',
+  'Укажите defaultCwd, defaultSchedule, defaultWorkerId, fallbackWorkers, agentTimeLimitMinutes и/или integrationCheckTimeLimitMinutes': 'Specify defaultCwd, defaultSchedule, defaultWorkerId, fallbackWorkers, agentTimeLimitMinutes and/or integrationCheckTimeLimitMinutes',
   'Повреждена настройка BRIGD_INTEGRATION_CHECKS. Сохраните команды в настройках → Автопилот.':
     'The BRIGD_INTEGRATION_CHECKS setting is corrupted. Save the commands in Settings → Autopilot.',
   'Некорректный BRIGD_INTEGRATION_CHECKS': 'Invalid BRIGD_INTEGRATION_CHECKS',
