@@ -582,9 +582,11 @@
     if (submitting) return;
     const context = ++editorContext;
     if (!task) {
-      await loadGeneralSettings();
+      // The current catalog decides whether the default worker can still be preselected.
+      await Promise.all([loadGeneralSettings(), loadWorkers()]);
       if (context !== editorContext) return;
     }
+    const defaultWorker = task ? null : workers.find(worker => worker.id === generalSettings?.defaultWorkerId && !worker.archived) ?? null;
     formAttachments = [...(task?.attachments ?? [])];
     formAttachmentCount = formAttachments.length;
     formUploading = false;
@@ -596,14 +598,14 @@
     void loadDocPages();
     void loadTags();
     formInstruction = task?.instruction ?? '';
-    formProvider = task?.provider ?? 'codex';
-    formWorkerId = task?.workerId ?? '';
+    formProvider = task?.provider ?? defaultWorker?.provider ?? 'codex';
+    formWorkerId = task?.workerId ?? defaultWorker?.id ?? '';
     formOriginalWorker = task?.worker ?? null;
     formComplex = !!task?.steps?.length;
     formSteps = (task?.steps?.length ? task.steps : [1, 2].map(index => ({ workerId: '', title: `Этап ${index}`, instruction: '' }))).map(step => ({ ...step, key: crypto.randomUUID() }));
     formOriginalStepWorkers = task?.steps?.map(step => step.workerId) ?? [];
     formUltracode = task?.ultracode ?? null;
-    void loadWorkers();
+    if (task) void loadWorkers();
     formCwd = task?.cwd ?? generalSettings?.defaultCwd ?? info?.cwd ?? '';
     formSchedule = task?.schedule ?? generalSettings?.defaultSchedule ?? 'manual';
     formInterval = task?.intervalMinutes ?? 60;

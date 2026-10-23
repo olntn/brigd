@@ -76,6 +76,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
   const generalSettings = (): GeneralSettings => ({
     defaultCwd: engine.store.getDefaultCwd() ?? options.defaultCwd ?? process.cwd(),
     defaultSchedule: engine.store.getDefaultSchedule(),
+    defaultWorkerId: engine.store.getDefaultWorkerId(),
     fallbackWorkers: engine.store.getFallbackWorkers(),
   });
   let uploading = 0;

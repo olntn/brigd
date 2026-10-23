@@ -51,7 +51,7 @@ async function fixtureApi(page: Page, options: { available?: boolean; readError?
     } else if (path === '/api/tasks' || path === '/api/workers' || path === '/api/models' || path === '/api/tags') {
       await route.fulfill({ json: [] });
     } else if (path === '/api/settings/general') {
-      await route.fulfill({ json: { defaultCwd: '/workspace/project', defaultSchedule: 'manual', fallbackWorkers: { codex: null, claude: null } } });
+      await route.fulfill({ json: { defaultCwd: '/workspace/project', defaultSchedule: 'manual', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } } });
     } else if (path === '/api/settings/autopilot') {
       await route.fulfill({ json: { integrationChecks: null, source: null } });
     } else {

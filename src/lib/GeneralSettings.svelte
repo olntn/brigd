@@ -9,12 +9,14 @@
     retry: () => void;
     onchange: (value: GeneralSettings) => void;
     onmutation: () => void;
-    /** Catalog for the replacement selects; archived profiles stay visible only while selected. */
+    /** Catalog for the default and replacement selects; archived profiles stay visible only while selected. */
     workers?: Worker[];
     busy?: boolean;
   } = $props();
   let value = $state('');
   let defaultSchedule = $state<GeneralSettings['defaultSchedule']>('manual');
+  // Empty string stands for "no default worker", as in the task form.
+  let defaultWorker = $state('');
   // Empty string stands for "no replacement"; IDs are kept even when the catalog has not loaded yet.
   let fallback = $state<Record<Provider, string>>({ codex: '', claude: '' });
   let dirty = $state(false);
@@ -26,9 +28,16 @@
     { provider: 'codex', label: 'Если у Codex закончились лимиты' },
     { provider: 'claude', label: 'Если у Claude Code закончились лимиты' },
   ];
-  /** Active workers first; a saved but archived replacement keeps its option so the form never silently drops it. */
-  function fallbackOptions(selected: string): Worker[] {
+  /** Active workers first; a saved but archived choice keeps its option so the form never silently drops it. */
+  function workerOptions(selected: string): Worker[] {
     return workers.filter(worker => !worker.archived || worker.id === selected);
+  }
+  function defaultWorkerHint(selected: string): string {
+    const worker = workers.find(item => item.id === selected);
+    if (!selected) return 'В новой задаче работник не выбран: укажите его или провайдера в форме.';
+    if (!worker) return 'Работник не найден в списке. Выберите другого или оставьте поле пустым.';
+    if (worker.archived) return `${worker.name} в архиве и не подставляется в новые задачи. Восстановите профиль или выберите другого.`;
+    return `${worker.name} подставляется в поле «Работник» у новых простых задач. Его можно изменить в форме задачи.`;
   }
   function fallbackHint(provider: Provider, selected: string): string {
     const worker = workers.find(item => item.id === selected);
@@ -45,6 +54,7 @@
     if (!dirty) {
       value = settings?.defaultCwd ?? '';
       defaultSchedule = settings?.defaultSchedule ?? 'manual';
+      defaultWorker = settings?.defaultWorkerId ?? '';
       fallback = { codex: settings?.fallbackWorkers?.codex ?? '', claude: settings?.fallbackWorkers?.claude ?? '' };
     }
   });
@@ -63,7 +73,7 @@
     onmutation();
     try {
       const response = await fetch('/api/settings/general', {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ defaultCwd, defaultSchedule, fallbackWorkers }),
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ defaultCwd, defaultSchedule, defaultWorkerId: defaultWorker || null, fallbackWorkers }),
       });
       let body;
       try { body = await response.json(); } catch { throw new Error('Сервер вернул неожиданный ответ. Попробуйте ещё раз.'); }
@@ -72,6 +82,7 @@
       dirty = false;
       value = saved.defaultCwd;
       defaultSchedule = saved.defaultSchedule;
+      defaultWorker = saved.defaultWorkerId ?? '';
       fallback = { codex: saved.fallbackWorkers?.codex ?? '', claude: saved.fallbackWorkers?.claude ?? '' };
       onchange(saved);
       status = 'Настройки сохранены';
@@ -92,12 +103,13 @@
     {#if formError}<div class="form-error" role="alert"><Icon name="alert" size={17} /><span>{formError}</span></div>{/if}
     <label class="form-field"><span>Рабочая папка по умолчанию</span><div class="input-with-icon"><Icon name="folder" size={16} /><input name="defaultCwd" aria-label="Рабочая папка по умолчанию" aria-describedby="default-cwd-description" bind:value oninput={touched} maxlength="4096" placeholder="/workspace/projects/my-project" required disabled={busy || loading || !settings} spellcheck="false" autocapitalize="off" /></div><small id="default-cwd-description">Абсолютный путь к папке на компьютере, где запущен brigd. Подставляется при создании задачи; его можно изменить в форме.</small></label>
     <label class="form-field"><span>Тип запуска по умолчанию</span><select name="defaultSchedule" aria-label="Тип запуска по умолчанию" aria-describedby="default-schedule-description" bind:value={defaultSchedule} onchange={touched} disabled={busy || loading || !settings}><option value="auto">Автопилот</option><option value="manual">Вручную</option><option value="interval">По расписанию</option></select><small id="default-schedule-description">Выбирается в поле «Когда запускать» у новых задач. Его можно изменить в форме задачи.</small></label>
+    <label class="form-field"><span>Работник по умолчанию</span><select name="defaultWorkerId" aria-label="Работник по умолчанию" aria-describedby="default-worker-description" bind:value={defaultWorker} onchange={touched} disabled={busy || loading || !settings}><option value="">Не выбирать</option>{#each workerOptions(defaultWorker) as worker (worker.id)}<option value={worker.id}>{worker.name} · {providerName(worker.provider)}{worker.archived ? ' · в архиве' : ''}</option>{/each}</select><small id="default-worker-description">{defaultWorkerHint(defaultWorker)}</small></label>
     <fieldset class="fallback-settings" aria-describedby="fallback-description">
       <legend>Замена при исчерпании лимитов</legend>
       <p id="fallback-description" class="fallback-help">Когда CLI сообщает, что лимиты использования закончились, новую сессию с тем же заданием начинает выбранный работник, обычно другого провайдера: например, Codex Sol 6.1 ↔ Claude Code Opus 5.5. Продолжения сохранённых сессий не передаются. В профиле работника можно задать свою замену вместо этой.</p>
       {#each fallbackProviders as item (item.provider)}
         <label class="form-field"><span>{item.label}</span>
-          <select name="fallback-{item.provider}" aria-label={item.label} aria-describedby="fallback-{item.provider}-hint" bind:value={fallback[item.provider]} onchange={touched} disabled={busy || loading || !settings}><option value="">Не заменять</option>{#each fallbackOptions(fallback[item.provider]) as worker (worker.id)}<option value={worker.id}>{worker.name} · {providerName(worker.provider)}{worker.archived ? ' · в архиве' : ''}</option>{/each}</select>
+          <select name="fallback-{item.provider}" aria-label={item.label} aria-describedby="fallback-{item.provider}-hint" bind:value={fallback[item.provider]} onchange={touched} disabled={busy || loading || !settings}><option value="">Не заменять</option>{#each workerOptions(fallback[item.provider]) as worker (worker.id)}<option value={worker.id}>{worker.name} · {providerName(worker.provider)}{worker.archived ? ' · в архиве' : ''}</option>{/each}</select>
           <small id="fallback-{item.provider}-hint">{fallbackHint(item.provider, fallback[item.provider])}</small>
         </label>
       {/each}
