@@ -1,4 +1,4 @@
-import { constants, openSync, closeSync, fstatSync, lstatSync, readSync, writeSync, fchmodSync, mkdtempSync, chmodSync, existsSync, rmSync, rmdirSync, unlinkSync } from 'node:fs';
+import { constants, openSync, closeSync, fstatSync, lstatSync, readSync, writeSync, fchmodSync, mkdtempSync, chmodSync, existsSync, readdirSync, rmSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -24,6 +24,21 @@ const taskContext = (task: Task) => ({ id: task.id, title: task.title, instructi
   firstRunAt: task.firstRunAt, nextRunAt: task.nextRunAt, workerId: task.workerId, tagIds: task.tagIds, steps: task.steps,
   latestRunId: task.latestRun?.id ?? null, hasCompletedRun: task.hasCompletedRun ?? false });
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
+const BUNDLED_HELPER = fileURLToPath(new URL('../dist/task-mcp-stdio.js', import.meta.url));
+const SOURCE_HELPER = fileURLToPath(new URL('./task-mcp-stdio.ts', import.meta.url));
+// The helper's tool catalogue lives in server/*.ts and imports src/lib/*.ts; a bundle older than any of them may lack current tools.
+const HELPER_SOURCES = ['./', '../src/lib/'].map(path => fileURLToPath(new URL(path, import.meta.url)));
+/** The packaged helper starts faster, but only a bundle built after every source it could include is used.
+ * `bun run dev` never rebuilds dist: after an update a stale bundle would hide new task tools that the prompt already asks the agent to call. */
+export function taskHelperPath(bundled = BUNDLED_HELPER, sources = HELPER_SOURCES, fallback = SOURCE_HELPER): string {
+  try {
+    const built = statSync(bundled).mtimeMs;
+    for (const directory of sources) for (const name of readdirSync(directory)) {
+      if (name.endsWith('.ts') && statSync(join(directory, name)).mtimeMs > built) return fallback;
+    }
+    return bundled;
+  } catch { return fallback; }
+}
 function object(value: unknown, keys: string[]): Record<string, unknown> {
   if (!record(value) || Object.keys(value).some(key => !keys.includes(key))) throw new AppError('Invalid task tool arguments.');
   return value;
@@ -153,10 +168,8 @@ export function createTaskBroker(store: Store, run: Run, suppliedFence: RunFence
   let inputDirectory: TaskOutputDirectory | undefined;
 
   const capability = randomBytes(32).toString('hex');
-  const bundled = fileURLToPath(new URL('../dist/task-mcp-stdio.js', import.meta.url));
-  const helper = existsSync(bundled) ? bundled : fileURLToPath(new URL('./task-mcp-stdio.ts', import.meta.url));
   const agentConfig: TaskBridgeConfig = {
-    name: `brigd_task_${randomBytes(8).toString('hex')}`, command: process.execPath, args: [helper],
+    name: `brigd_task_${randomBytes(8).toString('hex')}`, command: process.execPath, args: [taskHelperPath()],
     env: { BRIGD_TASK_SOCKET: '', BRIGD_TASK_CAPABILITY: capability },
     context: { taskId, runId, turn: fence.turn, stepIndex: fence.currentStepIndex, attachments: inputs, outputDirectory: output.path },
   };
