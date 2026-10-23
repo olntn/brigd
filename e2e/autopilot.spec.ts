@@ -19,9 +19,9 @@ test.beforeEach(async ({ page, request }) => {
   await expect(page.getByRole('button', { name: 'Новая задача', exact: true })).toBeEnabled();
 });
 
-test('dependency picker, waiting reasons, manual warning and archived prerequisite problem', async ({ page, request }) => {
+test('dependency picker, waiting reasons, manual warning and archived prerequisite problem', async ({ page, request }, testInfo) => {
   const info = await (await request.get('/api/info')).json();
-  const prerequisiteTitle = unique('Зависимость');
+  const prerequisiteTitle = unique('Зависимость с длинным названием для проверки компактного поля запуска на узком экране');
   const title = unique('После зависимости');
   const created = await request.post('/api/tasks', { headers: origin, data: {
     title: prerequisiteTitle, instruction: 'Проверь проект.', provider: 'codex', cwd: info.cwd,
@@ -34,15 +34,44 @@ test('dependency picker, waiting reasons, manual warning and archived prerequisi
   const editor = page.getByRole('dialog', { name: 'Новая задача', exact: true });
   await editor.getByLabel('Название задачи').fill(title);
   await editor.getByLabel('Что нужно сделать?').fill('Проверь результат после первой задачи.');
-  const picker = editor.getByRole('group', { name: 'После задач…' });
+  const trigger = editor.getByRole('button', { name: /^Запуск после/ });
+  const picker = editor.getByRole('group', { name: 'Запуск после', exact: true });
+  await expect(editor.locator('.attachment-composer + .dependency-picker')).toBeVisible();
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  await expect(trigger).toContainText('Без зависимостей');
+  await expect(picker).toBeHidden();
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(picker.getByRole('searchbox')).toBeFocused();
   await picker.getByRole('searchbox').fill(prerequisiteTitle);
   await picker.getByRole('checkbox', { name: prerequisiteTitle, exact: true }).check();
   await expect(editor.getByText('Ручной запуск разрешён и может начаться до выполнения зависимостей.')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(editor).toBeVisible();
+  await expect(picker).toBeHidden();
+  await expect(trigger).toBeFocused();
+  await expect(trigger).toContainText(prerequisiteTitle);
+  await trigger.click();
+  await expect(picker.getByRole('checkbox', { name: prerequisiteTitle, exact: true })).toBeChecked();
+  await editor.getByLabel('Что нужно сделать?').click();
+  await expect(picker).toBeHidden();
   await editor.getByRole('button', { name: 'Автопилот', exact: true }).click();
   await editor.getByRole('button', { name: 'Создать задачу', exact: true }).click();
   const drawer = page.getByRole('dialog', { name: title, exact: true });
   await expect(drawer.getByText('Ручной запуск начнётся без ожидания зависимостей.')).toBeVisible();
   await expect(drawer.getByRole('button', { name: 'Запустить', exact: true })).toBeEnabled();
+  await drawer.getByRole('button', { name: 'Изменить', exact: true }).click();
+  const editDialog = page.getByRole('dialog', { name: 'Редактировать задачу', exact: true });
+  const editTrigger = editDialog.getByRole('button', { name: /^Запуск после/ });
+  await expect(editTrigger).toContainText(prerequisiteTitle);
+  await expect(editDialog.getByRole('group', { name: 'Запуск после', exact: true })).toBeHidden();
+  await page.setViewportSize({ width: 375, height: 812 });
+  await editTrigger.scrollIntoViewIfNeeded();
+  expect((await editTrigger.boundingBox())!.height).toBeLessThan(50);
+  expect(await editDialog.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('dependency-picker-mobile.png') });
+  await editDialog.getByRole('button', { name: 'Закрыть форму', exact: true }).click();
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await drawer.getByRole('link', { name: prerequisiteTitle, exact: true }).click();
   const prerequisiteDrawer = page.getByRole('dialog', { name: prerequisiteTitle, exact: true });
   await expect(prerequisiteDrawer).toBeVisible();

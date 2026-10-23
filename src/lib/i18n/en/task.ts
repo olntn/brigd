@@ -1,7 +1,8 @@
 import type { Dictionary } from './types';
 
 const dictionary: Dictionary = {
-  "После задач…": "After tasks\u2026",
+  "Запуск после": "Run after",
+  "Без зависимостей": "No dependencies",
   "Поиск задач по названию": "Search tasks by title",
   "Найти задачу…": "Find a task\u2026",
   "До 10 зависимостей. Автоматический запуск ждёт успешного результата и слияния.": "Up to 10 dependencies. Automatic starts wait for successful results and merges.",
