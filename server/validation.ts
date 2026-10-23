@@ -7,7 +7,6 @@ import { validateWorkflowSteps } from './workflows';
 import { attachmentIds } from './attachments';
 import { effortOptions, normalizeModel, normalizeWorkerDescription } from '../src/lib/workers';
 import { validateTagIds } from './tags';
-import { validateDocPageIds } from './docs';
 
 export function textField(value: unknown, label: string, max: number): string {
   if (typeof value !== 'string' || !value.trim() || value.length > max || value.includes('\0')) throw new AppError(`${label}: введите от 1 до ${max} символов`);
@@ -42,7 +41,7 @@ export async function validateTask(value: unknown): Promise<TaskInput> {
       firstRunAt = v.firstRunAt;
     }
   }
-  return { ...(v.tagIds !== undefined ? { tagIds: validateTagIds(v.tagIds) } : {}), ...(v.docPageIds !== undefined ? { docPageIds: validateDocPageIds(v.docPageIds) } : {}), ...(v.attachmentIds !== undefined ? { attachmentIds: attachmentIds(v.attachmentIds) } : {}), steps: validateWorkflowSteps(v.steps), workerId, title, instruction, provider: v.provider, cwd, ultracode, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
+  return { ...(v.tagIds !== undefined ? { tagIds: validateTagIds(v.tagIds) } : {}), ...(v.attachmentIds !== undefined ? { attachmentIds: attachmentIds(v.attachmentIds) } : {}), steps: validateWorkflowSteps(v.steps), workerId, title, instruction, provider: v.provider, cwd, ultracode, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
 }
 
 /** The autopilot switch. A stop time is optional; when enabling it must lie ahead and within a month. */

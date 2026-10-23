@@ -17,7 +17,6 @@ export const DOC_IMAGES_TOTAL_MAX_BYTES = 1024 * 1024 * 1024;
 /** An image nobody references for this long is removed on the next page save or upload. */
 export const DOC_IMAGE_ORPHAN_TTL_MS = 60 * 60 * 1000;
 export const DOC_MARKDOWN_LIMIT = 256 * 1024;
-export const DOC_TASK_PAGE_LIMIT = 20;
 export const DOC_SEARCH_LIMIT = 20;
 export const DOC_UNTITLED = 'Без названия';
 export const DOC_CALLOUT_COLORS: readonly DocCalloutColor[] = ['gray', 'blue', 'green', 'yellow', 'red'];

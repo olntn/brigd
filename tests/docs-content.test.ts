@@ -6,12 +6,11 @@ import sharp from 'sharp';
 import { prepareAttachment } from '../server/attachments';
 import { Engine, type AgentFactory } from '../server/engine';
 import { createHandler } from '../server/http';
-import { buildPrompt } from '../server/adapter';
 import { validateDocBlocks } from '../server/docs';
 import { AppError, Store } from '../server/store';
 import { docBlocksToMarkdown, markdownToDocBlocks } from '../src/lib/docs-markdown';
-import { createDocBlock, docHiddenBlockIds, docSearchText, retypeDocBlock, DOC_IMAGE_MAX_COUNT, DOC_IMAGE_ORPHAN_TTL_MS, DOC_TASK_PAGE_LIMIT } from '../src/lib/docs';
-import type { DocBlock, DocPage, DocPageExport, DocSearchHit, Task, TaskInput } from '../src/lib/types';
+import { createDocBlock, docHiddenBlockIds, docSearchText, retypeDocBlock, DOC_IMAGE_MAX_COUNT, DOC_IMAGE_ORPHAN_TTL_MS } from '../src/lib/docs';
+import type { DocBlock, DocPage, DocPageExport, DocSearchHit, TaskInput } from '../src/lib/types';
 
 const BASE = 1_700_000_000_000;
 const ORIGIN = 'http://127.0.0.1:4310';
@@ -221,44 +220,5 @@ describe('pages with content, search and images', () => {
     expect(saved.blocks[0]!.taskId).toBe(task.id);
     expect(store.exportDocPage(page.id).markdown).toBe(`@task(${task.id})\n`);
     expectError(() => store.saveDocPage(page.id, { title: 'Links', version: 2, blocks: [block({ type: 'task', text: '', taskId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' })] }), 400, /Задача из блока не найдена/);
-  });
-});
-
-describe('documentation attached to tasks', () => {
-  test('tasks keep page links, runs snapshot their titles and the prompt points the agent at them', async () => {
-    const guide = store.createDocPage({ title: 'Guide' }, BASE);
-    const style = store.createDocPage({ title: 'Style' }, BASE);
-    const response = await request('/api/tasks', 'POST', taskInput({ docPageIds: [guide.id, style.id] }));
-    expect(response.status).toBe(201);
-    const task = await response.json() as Task;
-    expect(task.docPageIds).toEqual([guide.id, style.id]);
-    expect(task.docPages).toEqual([{ id: guide.id, title: 'Guide' }, { id: style.id, title: 'Style' }]);
-    for (const value of [['missing'], ['bad id!'], [guide.id, guide.id], Array.from({ length: DOC_TASK_PAGE_LIMIT + 1 }, () => guide.id), 'guide']) {
-      expect((await request(`/api/tasks/${task.id}`, 'PATCH', { docPageIds: value })).status).toBe(400);
-    }
-    expect(store.getTask(task.id).docPageIds).toEqual([guide.id, style.id]);
-    store.deleteDocPage(style.id, BASE + 1);
-    expect(store.getTask(task.id)).toMatchObject({ docPageIds: [guide.id, style.id], docPages: [{ id: guide.id, title: 'Guide' }] });
-    // Links the task already holds survive the trash; newly added pages must be live.
-    expect((await request(`/api/tasks/${task.id}`, 'PATCH', { title: 'Renamed' })).status).toBe(200);
-    expect((await request(`/api/tasks/${task.id}`, 'PATCH', { docPageIds: [style.id] })).status).toBe(200);
-    const trashedLater = store.createDocPage({ title: 'Gone' }, BASE);
-    store.deleteDocPage(trashedLater.id, BASE + 1);
-    expect((await request(`/api/tasks/${task.id}`, 'PATCH', { docPageIds: [guide.id, trashedLater.id] })).status).toBe(400);
-    expect((await request(`/api/tasks/${task.id}`, 'PATCH', { docPageIds: [guide.id, style.id] })).status).toBe(200);
-    const run = store.startManual(task.id, true, BASE + 2);
-    expect(run.docs).toEqual([{ id: guide.id, title: 'Guide' }]);
-    store.saveDocPageMarkdown(guide.id, { title: 'Guide v2' });
-    expect(store.getRun(run.id).docs).toEqual([{ id: guide.id, title: 'Guide' }]);
-    expect(store.getTask(task.id).docPages).toEqual([{ id: guide.id, title: 'Guide v2' }]);
-    const prompt = buildPrompt({ provider: 'codex', cwd: folder, instruction: 'Do it', docs: run.docs });
-    expect(prompt).toContain('ATTACHED DOCUMENTATION PAGES');
-    expect(prompt).toContain(JSON.stringify([{ id: guide.id, title: 'Guide' }]));
-    expect(prompt).toContain('get_doc_page');
-    expect(buildPrompt({ provider: 'codex', cwd: folder, instruction: 'Do it' })).not.toContain('ATTACHED DOCUMENTATION');
-    expect(() => buildPrompt({ provider: 'codex', cwd: folder, instruction: 'Do it', docs: [{ id: 'bad id', title: 'x' }] })).toThrow(/documentation/);
-    expect(() => buildPrompt({ provider: 'codex', cwd: folder, instruction: 'Do it', docs: [{ id: guide.id, title: 'x', extra: 1 } as never] })).toThrow(/documentation/);
-    expect((await request(`/api/tasks/${task.id}`, 'PATCH', { docPageIds: [] })).status).toBe(200);
-    expect(store.getTask(task.id).docPageIds).toEqual([]);
   });
 });

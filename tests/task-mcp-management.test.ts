@@ -498,7 +498,7 @@ describe('official SDK management over stdio', () => {
 });
 
 describe('documentation tools', () => {
-  test('agents list, search, read, create, update and trash documentation pages and link them to cards', async () => {
+  test('agents list, search, read, create, update and trash documentation pages', async () => {
     const { broker } = setup();
     const root = await mutate(broker, 'create_doc_page', { data: { title: 'Guide', markdown: '# Setup\n\nRun **bun install**.' } });
     expect(root).toMatchObject({ title: 'Guide', parentId: null, position: 0 });
@@ -525,10 +525,7 @@ describe('documentation tools', () => {
     await mutate(broker, 'delete_doc_page', { doc_page_id: child.id });
     expect(store.getDocPage(child.id).deletedAt).not.toBeNull();
     expect(parse(await call(broker, 'list_doc_pages', {})).total).toBe(1);
-    const card = await createCard(broker, 'Documented card', crypto.randomUUID(), { docPageIds: [root.id] });
-    expect(store.getTask(card.id).docPages).toEqual([{ id: root.id, title: 'Guide v2' }]);
-    expect((await call(broker, 'create_task', { data: { title: 'Bad link', instruction: 'x', docPageIds: [child.id] }, idempotency_key: 'trashed-doc-link' })).isError).toBe(true);
-    const run = store.startManual(card.id, true);
-    expect(run.docs).toEqual([{ id: root.id, title: 'Guide v2' }]);
+    // Cards no longer carry documentation links; a page link belongs in the card's description.
+    expect((await call(broker, 'create_task', { data: { title: 'Doc link', instruction: 'x', docPageIds: [root.id] }, idempotency_key: 'doc-link' })).isError).toBe(true);
   });
 });

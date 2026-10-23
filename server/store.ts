@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CliAccessMode, Comment, ConcurrencySettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocReference, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
+import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CliAccessMode, Comment, ConcurrencySettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
 import type { IntegrationRecord, WorkspaceRun } from './workspace-storage';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
@@ -12,7 +12,7 @@ import { CONCURRENCY_LIMIT_MAX, validateConcurrencyLimit } from '../src/lib/conc
 import { DEFAULT_TAG_COLOR, TAG_COUNT_LIMIT } from '../src/lib/tags';
 import { tagNameKey, validateTag, validateTagIds, validateTagPatch } from './tags';
 import { validateInstruction, validateInstructionPatch, validateInstructionSnapshots } from './instructions';
-import { assertDocPageSize, docSearchQuery, validateDocBlocks, validateDocPageContent, validateDocPageCreate, validateDocPageIds, validateDocPageMarkdown, validateDocPageMove } from './docs';
+import { assertDocPageSize, docSearchQuery, validateDocBlocks, validateDocPageContent, validateDocPageCreate, validateDocPageMarkdown, validateDocPageMove } from './docs';
 import { DOC_DEPTH_LIMIT, DOC_IMAGE_MAX_COUNT, DOC_IMAGE_ORPHAN_TTL_MS, DOC_IMAGES_TOTAL_MAX_BYTES, DOC_PAGE_LIMIT, DOC_SEARCH_LIMIT, docSearchText } from '../src/lib/docs';
 import { docBlocksToMarkdown, markdownToDocBlocks } from '../src/lib/docs-markdown';
 import { AppError } from './errors';
@@ -313,8 +313,6 @@ export class Store {
         ['comments', 'step_index', 'INTEGER'],
         ['task_logs', 'error', 'TEXT'],
         ['tasks', 'archived_at', 'INTEGER'],
-        ['tasks', 'doc_page_ids', "TEXT NOT NULL DEFAULT '[]'"],
-        ['runs', 'docs_snapshot', "TEXT NOT NULL DEFAULT '[]'"],
         // NULL keeps the worker profile's setting, so existing cards and runs behave exactly as before.
         ['tasks', 'ultracode', 'INTEGER CHECK(ultracode IN (0,1))'],
         ['runs', 'ultracode', 'INTEGER CHECK(ultracode IN (0,1))'],
@@ -755,25 +753,6 @@ export class Store {
     const live = this.db.query('SELECT id FROM doc_pages WHERE deleted_at IS NULL').all() as Row[];
     if (indexed || !live.length) return;
     this.db.transaction(() => { for (const row of live) this.indexDocPage(row.id); }).immediate();
-  }
-  /** Pages a task points to; missing or trashed pages are left out so a stale link never breaks the card. */
-  private docReferences(ids: string[]): DocReference[] {
-    return ids.flatMap(id => {
-      const row = this.db.query('SELECT id,title FROM doc_pages WHERE id=? AND deleted_at IS NULL').get(id) as Row | null;
-      return row ? [{ id: row.id, title: row.title }] : [];
-    });
-  }
-  private taskDocReferences(taskId: string): DocReference[] {
-    const row = this.db.query('SELECT doc_page_ids FROM tasks WHERE id=?').get(taskId) as Row | null;
-    return this.docReferences(JSON.parse(row?.doc_page_ids ?? '[]') as string[]);
-  }
-  /** Newly added pages must be live; links a task already holds survive a page's trip through the trash. */
-  private taskDocPageIds(value: unknown, existing: string[] = []): string[] {
-    const ids = validateDocPageIds(value);
-    for (const id of ids) {
-      if (!existing.includes(id) && !this.db.query('SELECT 1 FROM doc_pages WHERE id=? AND deleted_at IS NULL').get(id)) throw new AppError('Выбранная страница документации не найдена. Обновите список страниц.');
-    }
-    return ids;
   }
   listDocPages(): DocPageSummary[] {
     return (this.db.query('SELECT id,parent_id,position,title,created_at,updated_at,deleted_at FROM doc_pages WHERE deleted_at IS NULL ORDER BY parent_id IS NOT NULL, position, seq').all() as Row[])
@@ -1487,7 +1466,7 @@ export class Store {
     const followup = followupSnapshot(row, worker as WorkerSnapshot | null);
     const reconcile = reconcileSnapshot(row, worker as WorkerSnapshot | null);
     const workspace = row.workspace_id ? this.getWorkspace(row.workspace_id) : null;
-    return { integration: this.integrationForRun(row.id), workspace, followup, reconcile, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], docs: JSON.parse(row.docs_snapshot ?? '[]') as DocReference[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, ultracode: readFlag(row.ultracode), fallbackTurn: row.fallback_turn ?? null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
+    return { integration: this.integrationForRun(row.id), workspace, followup, reconcile, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, ultracode: readFlag(row.ultracode), fallbackTurn: row.fallback_turn ?? null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
       trigger: row.trigger, scheduledFor: row.scheduled_for, status: row.status, sessionId: row.session_id,
       startedAt: row.started_at, updatedAt: row.updated_at, finishedAt: row.finished_at, summary: row.summary,
       error: row.error, turn: row.turn, mock: !!row.mock };
@@ -1502,8 +1481,7 @@ export class Store {
       queued: 'awaiting_merge', checking: 'integrating', merging: 'integrating', cancelling: 'integrating',
       conflict: 'merge_conflict', failed: 'merge_failed', blocked: 'merge_blocked', interrupted: 'merge_interrupted', cancelled: 'merge_blocked',
     };
-    const docPageIds = JSON.parse(row.doc_page_ids ?? '[]') as string[];
-    return { tagIds: tags.map(tag => tag.id), tags, docPageIds, docPages: this.docReferences(docPageIds), hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd, ultracode: readFlag(row.ultracode),
+    return { tagIds: tags.map(tag => tag.id), tags, hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd, ultracode: readFlag(row.ultracode),
       schedule: row.schedule, intervalMinutes: row.interval_minutes, firstRunAt: row.first_run_at,
       nextRunAt: row.next_run_at, paused: !!row.paused, createdAt: row.created_at, updatedAt: row.updated_at, archivedAt: row.archived_at ?? null,
       status: latestRun?.integration ? integrationStatuses[latestRun.integration.status] ?? latestRun.status : latest?.status ?? 'ready', latestRun,
@@ -1593,9 +1571,9 @@ export class Store {
       const worker = steps.length ? null : this.assignedWorker(input.workerId);
       const provider = steps.length ? this.getWorker(steps[0]!.workerId).provider : worker?.provider ?? input.provider;
       const ultracode = validatedTaskUltracode(input.ultracode);
-      this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template,doc_page_ids,ultracode,autopilot_position) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
+      this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template,ultracode,autopilot_position) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
         input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt,
-        input.schedule === 'interval' ? (input.firstRunAt ?? now) : null, +input.paused, now, now, worker?.id ?? null, JSON.stringify(steps), JSON.stringify(this.taskDocPageIds(input.docPageIds ?? [])), storedFlag(ultracode),
+        input.schedule === 'interval' ? (input.firstRunAt ?? now) : null, +input.paused, now, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode),
         input.schedule === 'auto' ? this.nextAutopilotPosition() : null);
       this.replaceTaskAttachments(id, input.attachmentIds, now);
       this.replaceTaskTags(id, input.tagIds === undefined ? [] : input.tagIds);
@@ -1612,13 +1590,12 @@ export class Store {
       const changedSchedule = input.schedule !== task.schedule || input.intervalMinutes !== task.intervalMinutes || input.firstRunAt !== task.firstRunAt;
       let next = task.nextRunAt;
       if (changedSchedule) next = input.schedule === 'interval' ? (input.firstRunAt ?? now) : null;
-      const docPageIds = input.docPageIds === undefined ? task.docPageIds ?? [] : this.taskDocPageIds(input.docPageIds, task.docPageIds ?? []);
       const ultracode = validatedTaskUltracode(input.ultracode === undefined ? task.ultracode : input.ultracode);
       // A card switched to the autopilot queues at the end; leaving it gives up its place.
       const position = input.schedule !== 'auto' ? null : task.schedule === 'auto'
         ? (this.db.query('SELECT autopilot_position FROM tasks WHERE id=?').get(id) as Row).autopilot_position : this.nextAutopilotPosition();
-      this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=?,doc_page_ids=?,ultracode=?,autopilot_position=? WHERE id=?`)
-        .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), JSON.stringify(docPageIds), storedFlag(ultracode), position, id);
+      this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=?,ultracode=?,autopilot_position=? WHERE id=?`)
+        .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode), position, id);
       this.replaceTaskAttachments(id, input.attachmentIds, now);
       if (input.tagIds !== undefined) this.replaceTaskTags(id, input.tagIds);
       return this.getTask(id);
@@ -1683,9 +1660,9 @@ export class Store {
     const worker = steps.length ? steps[0]!.worker : task.worker ? workerSnapshot(task.worker) : null;
     const instructions = this.enabledInstructions();
     // The task's ultra choice is frozen beside the worker snapshots: later card edits never change this run's mode.
-    this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,scheduled_for,status,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,steps_snapshot,current_step_index,workflow_version,docs_snapshot,ultracode) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?,?,?,?,?,?,?)`)
+    this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,scheduled_for,status,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,steps_snapshot,current_step_index,workflow_version,ultracode) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?,?,?,?,?,?)`)
       .run(id, task.id, worker?.provider ?? task.provider, task.cwd, task.instruction, trigger, scheduledFor, now, now, +mock, worker?.id ?? null,
-        worker ? JSON.stringify(worker) : null, JSON.stringify(instructions), JSON.stringify(steps), steps.length ? 0 : null, steps.length ? 1 : 0, JSON.stringify(this.taskDocReferences(task.id)), storedFlag(task.ultracode));
+        worker ? JSON.stringify(worker) : null, JSON.stringify(instructions), JSON.stringify(steps), steps.length ? 0 : null, steps.length ? 1 : 0, storedFlag(task.ultracode));
     for (const attachment of this.listTaskAttachments(task.id)) this.db.query('INSERT INTO run_attachment_inputs(run_id,turn,attachment_id) VALUES (?,1,?)').run(id, attachment.id);
     this.comment(task.id, id, 'system', mock ? 'Демо-запуск: используется тестовый агент, реальные CLI не вызываются.' : `Запуск ${worker?.provider === 'claude' || (!worker && task.provider === 'claude') ? 'Claude Code' : 'Codex'} через CLI.`, now);
     return this.getRun(id);
@@ -1739,10 +1716,10 @@ export class Store {
         workflow: selected ? { steps: source.steps, currentStepIndex: input.sourceStepIndex! } : source.followup?.workflow ?? null };
       if (followup.workflow) completedWorkflowSnapshot(followup.workflow);
       const id = crypto.randomUUID();
-      this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,status,session_id,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,followup_snapshot,docs_snapshot,ultracode)
-        VALUES (?,?,?,?,?,'followup','running',?,?,?,?,?,?,?,?,?,?)`)
+      this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,status,session_id,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,followup_snapshot,ultracode)
+        VALUES (?,?,?,?,?,'followup','running',?,?,?,?,?,?,?,?,?)`)
         .run(id, taskId, worker?.provider ?? source.provider, source.cwd, source.instruction, sessionId, now, now, +source.mock,
-          storedWorkerId(worker), worker ? JSON.stringify(worker) : null, JSON.stringify(source.instructions), JSON.stringify(followup), JSON.stringify(this.taskDocReferences(taskId)), storedFlag(source.ultracode));
+          storedWorkerId(worker), worker ? JSON.stringify(worker) : null, JSON.stringify(source.instructions), JSON.stringify(followup), storedFlag(source.ultracode));
       this.db.query('UPDATE runs SET workspace_id=(SELECT workspace_id FROM runs WHERE id=?) WHERE id=?').run(source.id, id);
       // Freeze only the selected saved turn's inputs. No current task edits or
       // later workflow stages may leak into an earlier stage's continuation.
@@ -1781,9 +1758,9 @@ export class Store {
       const reconcile: RunReconcile = { sourceRunId: source.id, integrationId: integration.id, targetBranch: source.workspace.targetBranch,
         targetCommit: integration.targetCommit, conflicts: integration.conflicts ?? [], depth };
       const id = crypto.randomUUID();
-      this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,status,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,reconcile_snapshot,workspace_id,docs_snapshot)
-        VALUES (?,?,?,?,?,'reconcile','running',?,?,?,NULL,?,?,?,?,?)`)
-        .run(id, task.id, worker.provider, source.cwd, source.instruction, now, now, +source.mock, JSON.stringify(worker), JSON.stringify(this.enabledInstructions()), JSON.stringify(reconcile), source.workspace.id, JSON.stringify(this.taskDocReferences(task.id)));
+      this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,status,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,reconcile_snapshot,workspace_id)
+        VALUES (?,?,?,?,?,'reconcile','running',?,?,?,NULL,?,?,?,?)`)
+        .run(id, task.id, worker.provider, source.cwd, source.instruction, now, now, +source.mock, JSON.stringify(worker), JSON.stringify(this.enabledInstructions()), JSON.stringify(reconcile), source.workspace.id);
       this.comment(task.id, id, 'system', `Интегратор разрешает конфликт слияния с веткой ${reconcile.targetBranch}${reconcile.conflicts.length ? `: ${reconcile.conflicts.slice(0, 10).join(', ')}` : ''}. Результат задачи остаётся в её worktree.`, now);
       return this.getRun(id);
     }).immediate();
