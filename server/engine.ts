@@ -450,7 +450,11 @@ export class Engine {
           this.store.db.transaction(() => {
             if (isCurrent()) this.store.log(run.taskId, run.id, entry, Date.now(), run.currentStepIndex);
           }).immediate();
-        }
+        },
+        onProgress: status => {
+          try { if (isCurrent()) this.store.setRunProgress(run.id, fence, status); }
+          catch { /* A display-only status never fails the turn. */ }
+        },
       });
       launch.handle = handle;
       if (launch.cancelRequested || this.closing || !isCurrent()) handle.cancel();

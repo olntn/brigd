@@ -840,6 +840,13 @@ describe('clearly labelled mock adapter', () => {
     expect(resumed.envelope.summary).toStartWith('Mock:');
     expect(callbacks.comments.every(c => c.startsWith('Mock:'))).toBe(true);
   });
+  test('the demo agent reports its stage like a real one would through set_progress', async () => {
+    const statuses: string[] = [];
+    const callbacks = { ...capture(), onProgress: (status: string) => { statuses.push(status); } };
+    const first = await startAgent(input, callbacks).result;
+    await startAgent({ ...input, sessionId: first.sessionId, answer: 'Prioritize tests.' }, callbacks).result;
+    expect(statuses).toEqual(['Демо: выполнение задачи', 'Демо: продолжение работы']);
+  });
   test('blocked and failed are separate outcomes', async () => {
     expect((await startAgent({ ...input, instruction: '[blocked]' }, capture()).result).envelope.status).toBe('blocked');
     await expect(startAgent({ ...input, instruction: '[fail]' }, capture()).result).rejects.toMatchObject({ code: 'MOCK_FAILURE' });
@@ -870,6 +877,7 @@ describe('ephemeral task attachment CLI configuration', () => {
     const args = buildArgv(full, provider, { ...caps, fullAccess: true });
     expect(args).toContain(provider === 'codex' ? '--dangerously-bypass-approvals-and-sandbox' : '--dangerously-skip-permissions');
     expect(args.at(-1)).toContain('When the user asks for a commit, call commit_changes');
+    expect(args.at(-1)).toContain('call set_progress with a short phrase');
     expect(args.at(-1)).not.toContain('Git metadata is read-only inside the sandbox');
     expect(JSON.stringify(args)).not.toContain(bridge.env.BRIGD_TASK_CAPABILITY);
     expect(JSON.stringify(args)).not.toContain(bridge.env.BRIGD_TASK_SOCKET);
