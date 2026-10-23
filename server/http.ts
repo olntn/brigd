@@ -265,6 +265,12 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректный BRIGD_INTEGRATION_CHECKS'); }
         return json(engine.setAutopilotSettings({ integrationChecks }));
       }
+      if (path === '/api/settings/check-triage' && method === 'GET') return json(engine.getCheckTriageSettings());
+      if (path === '/api/settings/check-triage' && method === 'PATCH') {
+        const value = await body(req);
+        if (Object.keys(value).length !== 1 || !Object.hasOwn(value, 'enabled')) throw new AppError('Укажите только поле enabled: true, false или null');
+        return json(engine.setCheckTriageSettings({ enabled: value.enabled }));
+      }
       if (path === '/api/settings/concurrency' && method === 'GET') return json(engine.getConcurrencySettings());
       if (path === '/api/settings/concurrency' && method === 'PATCH') return json(engine.setConcurrencySettings(await body(req)));
       if (path === '/api/autopilot' && method === 'GET') return json(engine.store.autopilotOverview());

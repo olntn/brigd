@@ -1,20 +1,20 @@
 import { expect, test, type Page } from '@playwright/test';
-import type { AppInfo, Integration, IntegrationStatus, Run, Task, TaskDetail, TaskStatus } from '../src/lib/types';
+import type { AppInfo, CheckTriage, Integration, IntegrationStatus, Run, Task, TaskDetail, TaskStatus } from '../src/lib/types';
 
 const now = Date.UTC(2026, 9, 11);
 const states: Record<IntegrationStatus, TaskStatus> = { queued: 'awaiting_merge', checking: 'integrating', merging: 'integrating', cancelling: 'integrating',
   merged: 'completed', conflict: 'merge_conflict', failed: 'merge_failed', blocked: 'merge_blocked', interrupted: 'merge_interrupted', cancelled: 'merge_blocked' };
-async function fixture(page: Page, status: IntegrationStatus, checks?: Integration['checks']) {
+async function fixture(page: Page, status: IntegrationStatus, checks?: Integration['checks'], patch: { integration?: Partial<Integration>; run?: Partial<Run>; english?: boolean } = {}) {
   const integration: Integration = { id: 'integration-fixture', runId: 'run-fixture', repositoryId: '/project/.git', status, attempt: 1,
     sourceCommit: 'a'.repeat(40), targetCommit: 'b'.repeat(40), resultCommit: status === 'merged' ? 'c'.repeat(40) : null,
     candidatePath: '/data/workspaces/project/integration-fixture-1', checks: checks ?? [{ argv: ['bun', 'test'], exitCode: status === 'failed' ? 1 : 0 }],
     error: status === 'failed' ? 'Проверка завершилась с кодом 1. Целевая ветка сохранена.' : status === 'conflict' ? 'Обнаружен конфликт слияния с веткой main: src/value.txt.' : null,
-    ...(status === 'conflict' ? { conflicts: ['src/value.txt', 'README.md'] } : {}), updatedAt: now };
+    ...(status === 'conflict' ? { conflicts: ['src/value.txt', 'README.md'] } : {}), updatedAt: now, ...patch.integration };
   const run: Run = { id: integration.runId, taskId: 'task-fixture', workerId: null, worker: null, steps: [], currentStepIndex: null, instructions: [],
     provider: 'codex', cwd: '/project', instruction: 'Добавь изолированное изменение.', trigger: 'manual', scheduledFor: null, status: 'completed',
     sessionId: 'saved-session', startedAt: now, updatedAt: now, finishedAt: now, summary: 'Изменения готовы.', error: null, turn: 1, mock: false, integration,
     workspace: { id: 'workspace-fixture', repositoryId: '/project/.git', repositoryRoot: '/project', projectCwd: '/project', path: '/data/workspaces/run-fixture',
-      cwd: '/data/workspaces/run-fixture', branch: 'brigd/run-fixture', baseCommit: 'b'.repeat(40), targetBranch: 'main', mode: 'worktree', prepared: true } };
+      cwd: '/data/workspaces/run-fixture', branch: 'brigd/run-fixture', baseCommit: 'b'.repeat(40), targetBranch: 'main', mode: 'worktree', prepared: true }, ...patch.run };
   const task: Task = { id: run.taskId, title: 'Изолированная задача', instruction: run.instruction, provider: 'codex', cwd: run.cwd, workerId: null, worker: null,
     steps: [], tagIds: [], tags: [], schedule: 'manual', priority: 'normal', intervalMinutes: null, firstRunAt: null, paused: false, nextRunAt: null, archivedAt: null,
     createdAt: now, updatedAt: now, status: states[status], latestRun: run, runCount: 1 };
@@ -32,12 +32,16 @@ async function fixture(page: Page, status: IntegrationStatus, checks?: Integrati
     else if (path === `/api/tasks/${task.id}`) await route.fulfill({ json: detail });
     else await route.fulfill({ json: [] });
   });
+  if (patch.english) await page.addInitScript(() => localStorage.setItem('brigd.locale', 'en'));
   await page.goto('/');
-  await page.getByRole('button', { name: `Открыть задачу: ${task.title}`, exact: true }).click();
+  const card = page.locator('.task-card').filter({ hasText: task.title });
+  await page.getByRole('button', { name: `${patch.english ? 'Open task' : 'Открыть задачу'}: ${task.title}`, exact: true }).click();
   const dialog = page.getByRole('dialog', { name: task.title, exact: true });
   await expect(dialog).toBeVisible();
-  return { dialog, actions };
+  return { dialog, actions, card };
 }
+const verify = ['bun', 'run', 'verify'];
+const triaged = (patch: Partial<CheckTriage>): CheckTriage => ({ stage: 'done', startedAt: now, limitMs: 30 * 60_000, spentMs: 95_000, retries: [], target: null, handback: null, outcome: null, ...patch });
 
 test('integration progress is visible and has its own cancellation action', async ({ page }) => {
   const { dialog, actions } = await fixture(page, 'checking');
@@ -102,4 +106,82 @@ test('merged history shows the checked result without active integration control
   await expect(history.getByRole('region', { name: 'Слияние результата', exact: true })).toContainText('cccccccccccc');
   await expect(history.getByRole('button', { name: /слияние/ })).toHaveCount(0);
   expect(await dialog.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+});
+
+test('a check that passed only on its rerun is marked on the board and in the card with both outputs', async ({ page }) => {
+  const triage = triaged({ retries: [{ check: 0, exitCode: 0, output: 'second attempt passed\n' }] });
+  const { dialog, card } = await fixture(page, 'merged', [{ argv: verify, exitCode: 1, output: 'first attempt failed\n' }], { integration: { triage } });
+  await expect(card.getByText('Проверка прошла со второй попытки', { exact: true })).toBeVisible();
+  const panel = dialog.getByRole('region', { name: 'Слияние результата', exact: true });
+  await expect(panel.getByRole('note')).toContainText('Проверка прошла со второй попытки');
+  await expect(panel.getByRole('note')).toContainText('Повтор мог скрыть гонку');
+  await expect(panel.locator('.integration-checks').first()).toContainText('Проверка 1: прошла со второй попытки');
+  await panel.getByText('Вывод первой попытки', { exact: true }).click();
+  await panel.getByText('Вывод повтора', { exact: true }).click();
+  await expect(panel.locator('.integration-output pre')).toHaveText(['first attempt failed\n', 'second attempt passed\n']);
+  const stages = panel.getByRole('region', { name: 'Разбор упавшей проверки', exact: true }).locator('.triage-stage');
+  await expect(stages).toHaveCount(3);
+  await expect(stages.nth(0)).toContainText('Повторпройдено');
+  await expect(stages.nth(1)).toContainText('Не понадобилась: проверка прошла со второй попытки.');
+  await expect(stages.nth(2)).toContainText('Возврат работнику 0 из 3');
+});
+
+test('the stages of a hand-back show the rerun, the target branch check and the return number', async ({ page }) => {
+  const triage = triaged({ retries: [{ check: 1, exitCode: 1, output: 'FAIL again\n' }], outcome: 'returned', handback: { returns: 2, limit: 3, runId: 'run-next' },
+    target: { commit: 'b'.repeat(40), passed: true, checks: [{ argv: ['bun', 'install'], exitCode: 0 }, { argv: verify, exitCode: 0, output: 'green on main\n' }] } });
+  const { dialog } = await fixture(page, 'failed', [{ argv: ['bun', 'install'], exitCode: 0 }, { argv: verify, exitCode: 1, output: 'FAIL\n' }], { integration: { triage,
+    error: 'Проверка 2 (bun run verify) завершилась с кодом 1, при повторе — с кодом 1, а на целевой ветке main проходит: причина в результате задачи. Задача возвращена работнику в его сохранённую сессию: возврат 2 из 3.' } });
+  const panel = dialog.getByRole('region', { name: 'Слияние результата', exact: true });
+  await expect(panel.getByRole('note')).toHaveCount(0);
+  const region = panel.getByRole('region', { name: 'Разбор упавшей проверки', exact: true });
+  const stages = region.locator('.triage-stage');
+  await expect(stages.nth(0)).toHaveClass(/triage-failed/); await expect(stages.nth(0)).toContainText('Проверка 2: снова код 1');
+  await expect(stages.nth(1)).toHaveClass(/triage-passed/); await expect(stages.nth(1)).toContainText('Проходит на коммите bbbbbbbbbbbb: ошибка в результате задачи.');
+  await expect(stages.nth(1).locator('.integration-checks li')).toHaveCount(2);
+  await expect(stages.nth(2)).toHaveClass(/triage-passed/);
+  await expect(stages.nth(2)).toContainText('Возврат работнику 2 из 3');
+  await expect(stages.nth(2)).toContainText('Отправлен в сохранённую сессию работника.');
+  await expect(region).toContainText('не дольше 30 мин');
+  await expect(panel).toContainText('Задача возвращена работнику в его сохранённую сессию: возврат 2 из 3.');
+});
+
+test('a broken target branch says the task was not handed back', async ({ page }) => {
+  const broken = triaged({ retries: [{ check: 0, exitCode: 3 }], outcome: 'target_failed', target: { commit: 'b'.repeat(40), passed: false, checks: [{ argv: verify, exitCode: 3 }] } });
+  const { dialog } = await fixture(page, 'failed', [{ argv: verify, exitCode: 3 }], { integration: { triage: broken,
+    error: `Целевая ветка main не проходит проверку bun run verify: код 3 на коммите ${'b'.repeat(12)}. Задача не возвращена работнику; исправьте целевую ветку и повторите проверку.` } });
+  const panel = dialog.getByRole('region', { name: 'Слияние результата', exact: true });
+  const stages = panel.locator('.triage-stage');
+  await expect(stages.nth(1)).toHaveClass(/triage-failed/);
+  await expect(stages.nth(1)).toContainText('Не проходит на коммите bbbbbbbbbbbb: bun run verify, код 3. Целевая ветка сломана, задача не возвращается.');
+  await expect(stages.nth(2)).toContainText('Не нужен: проверка не проходит и на целевой ветке.');
+  await expect(panel.locator('.integration-error')).toContainText('Целевая ветка main не проходит проверку bun run verify');
+});
+
+test('an exhausted hand-back limit waits for a person, in English too', async ({ page }) => {
+  const exhausted = triaged({ retries: [{ check: 0, exitCode: 1 }], outcome: 'limit', handback: { returns: 3, limit: 3, runId: null }, target: { commit: 'b'.repeat(40), passed: true, checks: [{ argv: verify, exitCode: 0 }] } });
+  const { dialog } = await fixture(page, 'failed', [{ argv: verify, exitCode: 1 }], { english: true, integration: { triage: exhausted,
+    error: 'Проверка 1 (bun run verify) завершилась с кодом 1, при повторе — с кодом 1, а на целевой ветке main проходит: причина в результате задачи. Лимит автоматических возвратов исчерпан: 3 из 3. Нужно решение человека: отправьте дополнительный запрос или исправьте результат вручную.' } });
+  const panel = dialog.getByRole('region', { name: 'Merging the result', exact: true });
+  const stages = panel.getByRole('region', { name: 'Failed check triage', exact: true }).locator('.triage-stage');
+  await expect(stages.nth(0)).toContainText('Check 1: exit code 1 again');
+  await expect(stages.nth(1)).toContainText('Passes on commit bbbbbbbbbbbb: the failure is in the task result.');
+  await expect(stages.nth(2)).toHaveClass(/triage-failed/);
+  await expect(stages.nth(2)).toContainText('Hand-back to the worker 3 of 3');
+  await expect(stages.nth(2)).toContainText('Limit reached: a person decides.');
+  await expect(panel.locator('.integration-error')).toHaveText('Check 1 (bun run verify) exited with code 1, with code 1 on its rerun, and passes on target branch main: the cause is in the task result. The automatic hand-back limit is reached: 3 of 3. A person decides: send a follow-up or fix the result by hand.');
+});
+
+test('a running hand-back shows its number, the failed command and the output given to the worker', async ({ page }) => {
+  const checkFailure = { integrationId: 'integration-before', round: 2, targetBranch: 'main', targetCommit: 'b'.repeat(40), argv: verify, exitCode: 1, output: 'FAIL value is kept\n', outputTruncated: false };
+  const { dialog, card } = await fixture(page, 'queued', [], { run: { trigger: 'followup', status: 'running', integration: null, finishedAt: null, summary: null,
+    followup: { sourceRunId: 'run-before', sourceStepIndex: null, request: 'Проверка слияния bun run verify не прошла и при повторе (код 1), а на целевой ветке main проходит. brigd возвращает задачу работнику: возврат 2 из 3.', workflow: null, checkFailure } } });
+  await expect(card.getByText('Возврат после упавшей проверки · 2 из 3', { exact: true })).toBeVisible();
+  const section = dialog.getByRole('region', { name: 'Возврат после упавшей проверки', exact: true });
+  await expect(section).toContainText('возврат 2 из 3');
+  await expect(section).toContainText('bun run verify · код 1');
+  await expect(section).toContainText('на целевой ветке main проходит');
+  await section.getByText('Вывод, переданный работнику', { exact: true }).click();
+  await expect(section.locator('pre')).toHaveText('FAIL value is kept\n');
+  await dialog.getByRole('tab', { name: /Запуски/ }).click();
+  await expect(dialog.getByRole('tabpanel', { name: /Запуски/ })).toContainText('Возврат после упавшей проверки · 2 из 3');
 });

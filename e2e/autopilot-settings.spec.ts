@@ -23,6 +23,35 @@ test.beforeEach(async ({ request }) => {
 
 test.afterEach(async ({ request }) => {
   expect((await request.patch('/api/settings/autopilot', { headers: origin, data: { integrationChecks: null } })).ok()).toBe(true);
+  expect((await request.patch('/api/settings/check-triage', { headers: origin, data: { enabled: null } })).ok()).toBe(true);
+});
+
+test('failed check triage is on by default, stays off once switched off and returns to the default', async ({ page, request }) => {
+  expect((await request.patch('/api/settings/check-triage', { headers: origin, data: { enabled: null } })).ok()).toBe(true);
+  await page.goto('/');
+  let dialog = await openSettings(page);
+  let section = dialog.getByRole('region', { name: 'Разбор упавших проверок', exact: true });
+  let toggle = section.getByRole('checkbox', { name: 'Разбирать упавшие проверки автоматически', exact: true });
+  await expect(toggle).toBeChecked();
+  await expect(section).toContainText('Используется значение по умолчанию: включено.');
+  await expect(section).toContainText('не больше 3 раз на один результат');
+  await expect(section).toContainText('не дольше 30 мин');
+  await expect(section).toContainText('Всего: прошли со второй попытки — 0');
+  await expect(section.getByRole('button', { name: 'Вернуть значение по умолчанию', exact: true })).toBeDisabled();
+  await toggle.uncheck();
+  await expect(section.getByRole('status')).toContainText('Разбор выключен');
+  expect(await (await request.get('/api/settings/check-triage')).json()).toMatchObject({ enabled: false, saved: false, defaultEnabled: true });
+
+  await page.reload();
+  dialog = await openSettings(page);
+  section = dialog.getByRole('region', { name: 'Разбор упавших проверок', exact: true });
+  toggle = section.getByRole('checkbox', { name: 'Разбирать упавшие проверки автоматически', exact: true });
+  await expect(toggle).not.toBeChecked();
+  await expect(section).toContainText('Сохранено в настройках.');
+  await section.getByRole('button', { name: 'Вернуть значение по умолчанию', exact: true }).click();
+  await expect(toggle).toBeChecked();
+  await expect(section.getByRole('status')).toContainText('Восстановлено значение по умолчанию.');
+  expect(await (await request.get('/api/settings/check-triage')).json()).toMatchObject({ enabled: true, saved: null });
 });
 
 test('missing checks block autopilot; valid settings persist and reset blocks it again', async ({ page, request }) => {

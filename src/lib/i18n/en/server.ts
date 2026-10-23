@@ -158,6 +158,10 @@ export const messages: Dictionary = {
   'brigd передаёт те же параметры флагами при каждом запуске: --sandbox workspace-write, approval_policy=on-request, сеть внутри песочницы.':
     'brigd passes the same settings as flags on every run: --sandbox workspace-write, approval_policy=on-request, network inside the sandbox.',
   'ожидается JSON-объект': 'expected a JSON object',
+
+  // Failed check triage settings (http.ts, store.ts).
+  'Укажите только поле enabled: true, false или null': 'Pass only the enabled field: true, false or null',
+  'enabled должен быть true, false или null': 'enabled must be true, false or null',
 };
 
 /** Field names that validation puts in front of a message. */

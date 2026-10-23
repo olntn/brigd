@@ -65,12 +65,17 @@ function summary(value: unknown): unknown {
   const result = Object.fromEntries(fields.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
   return Object.keys(result).length ? result : { updated: true };
 }
-/** A merge as get_run reports it: commits, conflicts, the reason it stopped and each check with the end of its output. */
+/** A merge as get_run reports it: commits, conflicts, the reason it stopped, each check with the end of its output and the failed-check triage. */
 function integrationDetails(job: Integration, output: boolean) {
+  const tail = <T extends { output?: string; outputTruncated?: boolean }>(item: T) =>
+    output && item.output !== undefined ? { output: item.output, ...(item.outputTruncated ? { outputTruncated: true } : {}) } : {};
+  const triage = job.triage;
   return { ...summary(job) as object, attempt: job.attempt, error: job.error, conflicts: job.conflicts ?? [],
     sourceCommit: job.sourceCommit, targetCommit: job.targetCommit, resultCommit: job.resultCommit,
-    checks: job.checks.map(check => ({ argv: check.argv, exitCode: check.exitCode,
-      ...(output && check.output !== undefined ? { output: check.output, ...(check.outputTruncated ? { outputTruncated: true } : {}) } : {}) })) };
+    checks: job.checks.map(check => ({ argv: check.argv, exitCode: check.exitCode, ...tail(check) })),
+    ...(triage ? { triage: { stage: triage.stage, outcome: triage.outcome, spentMs: triage.spentMs, limitMs: triage.limitMs, handback: triage.handback,
+      retries: triage.retries.map(retry => ({ check: retry.check, exitCode: retry.exitCode, ...tail(retry) })),
+      target: triage.target && { commit: triage.target.commit, passed: triage.target.passed, checks: triage.target.checks.map(check => ({ argv: check.argv, exitCode: check.exitCode, ...tail(check) })) } } } : {}) };
 }
 function page(values: unknown[], args: Record<string, unknown>, total = values.length, extra: Record<string, unknown> = {}): unknown {
   const offset = args.offset as number | undefined ?? 0, limit = args.limit as number | undefined ?? 20;

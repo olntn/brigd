@@ -113,9 +113,11 @@ test('autopilot tab shows the queue, starts pool tasks once enabled and reports 
   const report = page.getByRole('region', { name: 'Итоги сессии автопилота' });
   await expect(report.getByRole('button', { name: `Открыть: ${title}`, exact: true })).toBeVisible();
   await expect(report.getByText('Завершено', { exact: true })).toBeVisible();
+  await expect(report.getByLabel('Разбор упавших проверок за сессию', { exact: true })).toHaveText('Разбор упавших проверок: прошли со второй попытки — 0 · целевая ветка не проходит — 0 · возвращено работникам — 0 · исчерпан лимит возвратов — 0 · без возврата — 0 · остановлено — 0.');
 
   const overview = await (await request.get('/api/autopilot')).json() as AutopilotOverview;
   expect(overview.enabled).toBe(true);
+  expect(overview.triage).toEqual({ flaky: 0, targetFailed: 0, returned: 0, exhausted: 0, notReturned: 0, stopped: 0 });
   expect(overview.attempts.map(run => run.taskId)).toEqual([task.id]);
   const detail = await (await request.get(`/api/tasks/${task.id}`)).json() as TaskDetail;
   expect(detail.runs[0]).toMatchObject({ trigger: 'autopilot', status: 'completed', mock: true });

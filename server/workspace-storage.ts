@@ -50,7 +50,9 @@ export function candidateRetention(record: IntegrationRecord | undefined, attemp
   return { retained: true, reason: record.status === 'conflict' ? 'conflict' : record.status === 'interrupted' ? 'interrupted'
     : record.status === 'failed' || record.status === 'blocked' ? 'failed' : 'active' };
 }
-export const CANDIDATE_NAME = /^integration-([a-f0-9-]{36})-(\d+)$/;
+/** A candidate folder, or the clean target-commit worktree beside it that failed-check triage uses; both belong to one attempt. */
+export const CANDIDATE_NAME = /^integration-([a-f0-9-]{36})-(\d+)(?:-target)?$/;
+export const TARGET_SUFFIX = '-target';
 const BUCKET_NAME = /^[a-f0-9]{20}$/;
 /** Allocated size of a folder from an lstat walk that never follows symlinks; unreadable entries count as empty. */
 export async function measure(path: string): Promise<{ bytes: number; files: number }> {
@@ -71,6 +73,8 @@ export async function measure(path: string): Promise<{ bytes: number; files: num
 export const inside = (root: string, path: string) => { const sub = relative(root, path); return !!sub && sub !== '..' && !sub.startsWith(`..${sep}`) && !isAbsolute(sub); };
 function realpathOrNull(path: string): string | null { try { return realpathSync(path); } catch { return null; } }
 const samePath = (left: string, right: string) => resolve(left) === resolve(right) || !!realpathOrNull(left) && realpathOrNull(left) === realpathOrNull(right);
+/** The record of this attempt names another folder as its candidate, so this one is not brigd's. */
+const foreignCandidate = (record: IntegrationRecord, path: string) => !!record.candidatePath && !samePath(record.candidatePath, path) && !samePath(`${record.candidatePath}${TARGET_SUFFIX}`, path);
 /** Removes a directory tree without following symlinks; read-only folders left by tools are opened up first on a retry. */
 export function removeTree(path: string): void {
   const info = lstatSync(path);
@@ -170,9 +174,11 @@ export class WorkspaceStorage {
   async settleAttempt(run: Run, job: Integration): Promise<SettledFolders | null> {
     const workspace = run.workspace;
     if (workspace?.mode === 'worktree' && job.candidatePath && ['merged', 'queued', 'cancelled'].includes(job.status) &&
-        samePath(job.candidatePath, join(dirname(workspace.path), `integration-${job.id}-${job.attempt}`)) &&
-        inside(this.root, job.candidatePath) && !this.submoduleData(job.candidatePath, workspace.repositoryId)) {
-      await this.removeFolder(job.candidatePath, workspace?.repositoryId ?? null);
+        samePath(job.candidatePath, join(dirname(workspace.path), `integration-${job.id}-${job.attempt}`)) && inside(this.root, job.candidatePath)) {
+      // Triage removes its target worktree itself; one left by a stopped attempt goes with the candidate.
+      for (const path of [job.candidatePath, `${job.candidatePath}${TARGET_SUFFIX}`]) {
+        if (existsSync(path) && !this.submoduleData(path, workspace.repositoryId)) await this.removeFolder(path, workspace.repositoryId);
+      }
     }
     if (job.status !== 'merged' || workspace?.mode !== 'worktree') return null;
     const record = this.store.workspaceRecord(workspace.id);
@@ -258,7 +264,7 @@ export class WorkspaceStorage {
       const match = CANDIDATE_NAME.exec(name);
       const record = match ? records.get(match[1]!) : undefined;
       const path = join(bucket, name);
-      if (!record || !match || (record.attempt === Number(match[2]) && record.candidatePath && !samePath(record.candidatePath, path))) continue;
+      if (!record || !match || (record.attempt === Number(match[2]) && foreignCandidate(record, path))) continue;
       if (!candidateRetention(record, Number(match[2]), runs).retained && !this.submoduleData(path, repositoryId)) await this.removeFolder(path, repositoryId);
     }
   }
@@ -310,7 +316,7 @@ export class WorkspaceStorage {
       const owner = record ? workspaces.find(workspace => workspace.runs.some(run => run.id === record.runId)) : undefined;
       const run = owner?.runs.find(entry => entry.id === record!.runId);
       if (record && (!owner || owner.snapshot.mode !== 'worktree' || !samePath(dirname(owner.snapshot.path), dirname(item.path)) ||
-          record.attempt === Number(candidate[2]) && record.candidatePath && !samePath(record.candidatePath, item.path))) return base;
+          record.attempt === Number(candidate[2]) && foreignCandidate(record, item.path))) return base;
       if (!record && !ownedWorktree(item.path, repositoryIds)) return base;
       const retention = candidateRetention(record, Number(candidate[2]), owner?.runs);
       return { ...base, kind: 'candidate', ...retention, optional: retention.retained && retention.reason === 'failed', runId: record?.runId ?? null,
@@ -358,7 +364,7 @@ export class WorkspaceStorage {
       const record = this.store.listIntegrationRecords().find(item => item.id === match?.[1]);
       const owner = record ? this.store.listWorkspaceRecords().find(workspace => workspace.runs.some(run => run.id === record.runId)) : undefined;
       if (record && (!owner || !samePath(dirname(owner.snapshot.path), dirname(entry.path)) ||
-          record.attempt === Number(match?.[2]) && record.candidatePath && !samePath(record.candidatePath, entry.path))) return false;
+          record.attempt === Number(match?.[2]) && foreignCandidate(record, entry.path))) return false;
       const retention = candidateRetention(record, Number(match?.[2]), owner?.runs);
       return !retention.retained || !!options.includeCandidates && retention.reason === 'failed';
     }

@@ -209,6 +209,27 @@ export const messages: Dictionary = {
   'Для этого запуска нет сохранённого снимка изменений.': 'This run has no saved snapshot of changes.',
   'Итоговый снимок изменений этого запуска недоступен.': 'The final snapshot of this run’s changes is unavailable.',
 
+  // Failed check triage and hand-backs (integration.ts, store.ts, engine.ts).
+  'Не удалось подготовить отдельный worktree целевой ветки для разбора упавшей проверки.': 'Could not prepare a separate target branch worktree for failed check triage.',
+  'Возврат после упавшей проверки работает только с результатом в отдельном worktree.': 'A hand-back after a failed check works only with a result in its own worktree.',
+  'В worktree задачи осталось незавершённое объединение. Завершите или отмените его перед возвратом работнику.':
+    'An unfinished merge is left in the task worktree. Finish or abort it before handing the task back to the worker.',
+  'В worktree задачи остались несохранённые изменения. Сохраните или отмените их перед возвратом работнику.':
+    'Uncommitted changes are left in the task worktree. Commit or discard them before handing the task back to the worker.',
+  'Не удалось создать merge-коммит проверенной целевой ветки в worktree задачи. Проверьте Git-конфигурацию, hooks и нативные разрешения.':
+    'Could not create the merge commit of the tested target branch in the task worktree. Check the Git configuration, hooks and native permissions.',
+  'Автоматический возврат выключен в настройках → Автопилот. Отправьте дополнительный запрос работнику вручную.':
+    'Automatic hand-back is switched off in Settings → Autopilot. Send the worker a follow-up yourself.',
+  'Задача с этапами не возвращается автоматически: по коду возврата не видно, какой этап внёс ошибку. Выберите этап и отправьте дополнительный запрос.':
+    'A multi-stage task is not handed back automatically: an exit code does not show which stage introduced the failure. Choose a stage and send a follow-up.',
+  'Автоматический возврат не выполнен: CLI не сохранил ID сессии работника, а продолжить можно только её. Исправьте результат вручную или поставьте задачу заново.':
+    'Automatic hand-back not sent: the CLI did not save the worker’s session ID, and only that session can be continued. Fix the result by hand or set the task again.',
+  'в записи слияния нет данных упавшей проверки.': 'the merge record has no data of the failed check.',
+  'у результата нет сохранённой рабочей папки.': 'the result has no saved working folder.',
+  'Задача возвращена работнику после упавшей проверки': 'Task handed back to the worker after a failed check',
+  'Автоматический возврат после упавшей проверки не выполнен': 'No automatic hand-back after the failed check',
+  'Проверенная целевая ветка объединена в worktree задачи': 'The tested target branch was merged into the task worktree',
+  'Работник продолжит на том же коде, на котором упала проверка слияния.': 'The worker continues on the same code the merge check failed on.',
 };
 
 const blockedReasons: Dictionary = {
@@ -314,6 +335,28 @@ export const patterns: Pattern[] = [
   [/^Обнаружен конфликт слияния с веткой ([^:]+): (.+)\. Интегратор может разрешить его в исходном worktree; после ручного исправления повторите проверку\.$/, match =>
     `Merge conflict with branch ${match[1]}: ${files(match[2]!)}. The Integrator can resolve it in the source worktree; after a manual fix, check again.`],
   [/^Проверка (\d+) завершилась с кодом (-?\d+)\. Целевая ветка сохранена\.$/, 'Check $1 exited with code $2. The target branch is unchanged.'],
+
+  // Failed check triage (integration.ts) and its hand-back notes, appended with a space (store.ts).
+  [/^(Проверка \d+ \([\s\S]+\) завершилась с кодом -?\d+, при повторе — с кодом -?\d+, а на целевой ветке .+? проходит: причина в результате задачи\.) ([\s\S]+)$/,
+    (match, translate) => `${translate(match[1]!)} ${translate(match[2]!)}`],
+  [/^Проверка (\d+) \(([\s\S]+)\) завершилась с кодом (-?\d+), при повторе — с кодом (-?\d+), а на целевой ветке (.+?) проходит: причина в результате задачи\.$/,
+    'Check $1 ($2) exited with code $3, with code $4 on its rerun, and passes on target branch $5: the cause is in the task result.'],
+  [/^Целевая ветка (.+?) не проходит проверку ([\s\S]+): код (-?\d+) на коммите ([0-9a-f]+)\. Задача не возвращена работнику; исправьте целевую ветку и повторите проверку\.$/,
+    'Target branch $1 fails check $2: exit code $3 on commit $4. The task was not handed back to the worker; fix the target branch and check again.'],
+  [/^Разбор упавшей проверки (\d+) остановлен: повтор и проверка целевой ветки вместе превысили лимит (\d+) мин\. Задача не возвращена работнику\.$/,
+    'Triage of failed check $1 stopped: the rerun and the target branch check together exceeded the $2 min limit. The task was not handed back to the worker.'],
+  [/^Задача возвращена работнику в его сохранённую сессию: возврат (\d+) из (\d+)\.$/, 'The task was handed back to the worker’s saved session: hand-back $1 of $2.'],
+  [/^Лимит автоматических возвратов исчерпан: (\d+) из (\d+)\. Нужно решение человека: отправьте дополнительный запрос или исправьте результат вручную\.$/,
+    'The automatic hand-back limit is reached: $1 of $2. A person decides: send a follow-up or fix the result by hand.'],
+  [/^Автоматический возврат не выполнен: ([\s\S]+)$/, (match, translate) => `Automatic hand-back not sent: ${translate(match[1]!)}`],
+  [/^Проверка слияния ([\s\S]+) не прошла и при повторе \(код (-?\d+)\), а на целевой ветке (.+?) проходит\. brigd возвращает задачу работнику: возврат (\d+) из (\d+)\.$/,
+    'Merge check $1 failed again on its rerun (exit code $2) and passes on target branch $3. brigd hands the task back to the worker: hand-back $4 of $5.'],
+  [/^Повтор проверки (\d+): код (-?\d+)\.$/, 'Rerun of check $1: exit code $2.'],
+  [/^Повтор проверки (\d+) остановлен\.$/, 'Rerun of check $1 stopped.'],
+  [/^Целевая ветка на коммите ([0-9a-f]+): проверка (проходит|не проходит|остановлена)\.$/, match =>
+    `Target branch at commit ${match[1]}: the check ${match[2] === 'проходит' ? 'passes' : match[2] === 'не проходит' ? 'fails' : 'was stopped'}.`],
+  [/^Не удалось объединить проверенный коммит ветки (.+) с worktree задачи\. Разрешите расхождение вручную и отправьте дополнительный запрос\.$/,
+    'Could not merge the tested commit of branch $1 into the task worktree. Resolve the divergence by hand and send a follow-up.'],
 
   // Run working folders (workspaces.ts, workspace-storage.ts).
   [/^Ветка (.+) уже открыта в другом worktree\. Закройте её там, чтобы воссоздать рабочую папку запуска\.$/,
