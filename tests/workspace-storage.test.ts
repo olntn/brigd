@@ -384,6 +384,21 @@ describe('manual cleanup', () => {
     expect(await engine.cleanupStorage({ includeCandidates: true })).toMatchObject({ removed: 0 });
     expect(existsSync(failing.workspace!.path)).toBe(true);
   });
+  test('a deleted task leaves its worktree to the clean-up, which reclaims it even as the last record of its repository', async () => {
+    const cancelled = await start();
+    engine.cancel(cancelled.id);
+    await until(() => store.getRun(cancelled.id).status === 'cancelled');
+    engine.deleteTask(cancelled.taskId);
+    expect(existsSync(cancelled.workspace!.path)).toBe(true);
+    const overview = await engine.storageOverview();
+    expect(entry(overview, cancelled.workspace!.path)).toMatchObject({ kind: 'worktree', retained: false, reason: 'deleted', runId: null, taskId: null, taskTitle: null });
+    expect(await engine.cleanupStorage()).toMatchObject({ removed: 1, failures: [] });
+    expect(existsSync(cancelled.workspace!.path)).toBe(false);
+    expect(git(root, 'worktree', 'list', '--porcelain')).not.toContain(cancelled.workspace!.path);
+    // The task branch is not merged anywhere, so it stays in the project.
+    expect(git(root, 'rev-parse', `refs/heads/${cancelled.workspace!.branch}`)).toBe(cancelled.workspace!.baseCommit!);
+    expect(store.workspaceRecord(cancelled.workspace!.id)!.snapshot).toMatchObject({ removedBy: 'cleanup' });
+  });
   test('a root that holds the database or a home directory is reported and never scanned', async () => {
     const storage = new WorkspaceStorage(folder, store);
     const overview = await storage.overview();

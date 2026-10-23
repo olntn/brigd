@@ -278,7 +278,7 @@ export interface WorkspaceSnapshot {
   recreatedAt?: number | null;
 }
 /** Why a folder under the workspaces root is kept or may be reclaimed. */
-export type StorageReason = 'active' | 'interrupted' | 'conflict' | 'failed' | 'unmerged' | 'submodules' | 'moved' | 'foreign' | 'merged' | 'cancelled' | 'stale' | 'unknown';
+export type StorageReason = 'active' | 'interrupted' | 'conflict' | 'failed' | 'unmerged' | 'submodules' | 'moved' | 'foreign' | 'merged' | 'cancelled' | 'deleted' | 'stale' | 'unknown';
 export interface StorageEntry {
   path: string;
   kind: 'worktree' | 'candidate' | 'unknown';
