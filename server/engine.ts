@@ -182,6 +182,21 @@ export class Engine {
   private assertTaskSettled(taskId: string) {
     if ([...this.handles.values()].some(launch => launch.taskId === taskId)) throw new AppError('Предыдущий CLI-процесс этой задачи ещё завершается', 409);
   }
+  /** Cards whose CLI process or merge is still finishing in this service, even though the database already lets them go. */
+  private unsettledTaskIds(): string[] {
+    const runs = [...this.integrationHandles.keys()];
+    const merging = runs.length ? (this.store.db.query(`SELECT DISTINCT task_id FROM runs WHERE id IN (${runs.map(() => '?').join(',')})`).all(...runs) as { task_id: string }[]).map(row => row.task_id) : [];
+    return [...new Set([...[...this.handles.values()].map(launch => launch.taskId), ...merging])];
+  }
+  deleteTask(taskId: string): void {
+    if (this.closing) throw new AppError('Сервис останавливается', 503);
+    if (this.unsettledTaskIds().includes(taskId)) throw new AppError('Процессы этой задачи ещё завершаются. Повторите через несколько секунд.', 409);
+    this.store.deleteTask(taskId);
+  }
+  deleteArchivedTasks(archivedBefore: number): { deleted: number; skipped: number } {
+    if (this.closing) throw new AppError('Сервис останавливается', 503);
+    return this.store.deleteArchivedTasks(archivedBefore, this.unsettledTaskIds());
+  }
   start(taskId: string): Run {
     if (this.closing) throw new AppError('Сервис останавливается', 503);
     this.assertIntegrationChecks();

@@ -11,7 +11,7 @@ export interface WorkspaceRun { id: string; status: RunStatus; integrationStatus
 export interface Retention { retained: boolean; reason: StorageReason; }
 const ACTIVE_RUNS: readonly RunStatus[] = ['queued', 'preparing', 'running', 'cancelling', 'waiting_input'];
 const HOLDING_INTEGRATIONS: readonly IntegrationStatus[] = ['queued', 'checking', 'merging', 'cancelling'];
-const RANK: Record<StorageReason, number> = { active: 9, interrupted: 8, submodules: 7, moved: 7, foreign: 7, conflict: 4, failed: 3, unmerged: 2, merged: 0, cancelled: 0, stale: 0, unknown: 0 };
+const RANK: Record<StorageReason, number> = { active: 9, interrupted: 8, submodules: 7, moved: 7, foreign: 7, conflict: 4, failed: 3, unmerged: 2, merged: 0, cancelled: 0, deleted: 0, stale: 0, unknown: 0 };
 /** Retained while any run holds the folder (open, interrupted or merging), and while anything after the last merged result can
  * still be continued, retried, merged or reconciled; cancelled runs never can. */
 export function workspaceRetention(runs: readonly WorkspaceRun[]): Retention {
@@ -320,7 +320,8 @@ export class WorkspaceStorage {
     const latest = record.runs.at(-1);
     const common = { ...base, kind: 'worktree' as const, runId: latest?.id ?? null, taskId: record.taskId, taskTitle: record.taskTitle, startedAt: latest?.startedAt ?? null };
     if (record.snapshot.mode !== 'worktree' || !samePath(record.snapshot.path, item.path)) return { ...common, reason: 'moved' };
-    const retention = workspaceRetention(record.runs);
+    // A record without runs outlived its deleted task: nothing can continue or merge the folder any more.
+    const retention: Retention = record.runs.length ? workspaceRetention(record.runs) : { retained: false, reason: 'deleted' };
     if (!retention.retained) {
       const owned = ownedWorktree(item.path, [record.snapshot.repositoryId]);
       if (owned && hasSubmoduleData(owned.admin)) return { ...common, retained: true, reason: 'submodules' };
@@ -361,7 +362,7 @@ export class WorkspaceStorage {
       return !retention.retained || !!options.includeCandidates && retention.reason === 'failed';
     }
     const record = this.store.workspaceRecord(name);
-    if (entry.kind === 'worktree' && entry.runId) {
+    if (entry.kind === 'worktree' && (entry.runId || entry.reason === 'deleted')) {
       if (!record || !samePath(record.snapshot.path, entry.path) || workspaceRetention(record.runs).retained) return false;
       // Marked first: a crash halfway through must not leave a continuation refusing to recreate the folder.
       this.store.markWorkspaceRemoved(record.snapshot.id, Date.now(), null, 'cleanup');
@@ -372,7 +373,7 @@ export class WorkspaceStorage {
   private async removeEntry(entry: StorageEntry): Promise<void> {
     if (!inside(this.root, entry.path) || lstatSync(entry.path).isSymbolicLink()) throw new Error('Папка находится вне каталога рабочих папок.');
     const name = basename(entry.path);
-    const record = entry.kind === 'worktree' && entry.runId ? this.store.workspaceRecord(name) : null;
+    const record = entry.kind === 'worktree' && (entry.runId || entry.reason === 'deleted') ? this.store.workspaceRecord(name) : null;
     const repositoryIds = record ? [record.snapshot.repositoryId] : [...new Set(this.store.listWorkspaceRecords().map(workspace => workspace.snapshot.repositoryId))];
     // Git is only ever invoked for a repository brigd recorded, never for one named by the folder's own .git file.
     await this.removeFolder(entry.path, record?.snapshot.repositoryId ?? ownedWorktree(entry.path, repositoryIds)?.repositoryId ?? null);

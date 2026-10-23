@@ -7,12 +7,16 @@
   import { effortOptions, effortLabel, modelLabel, normalizeModel, INTEGRATOR_WORKER, MODEL_ID_LIMIT } from './workers';
   import type { Effort, IntegratorMode, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, Provider, Worker, WorkerInput } from './types';
 
-  let { workers, loading, error, retry, onchange, notify, models, modelsLoading, modelsError, retryModels }: {
+  let { workers, loading, error, retry, onchange, ondelete, notify, models, modelsLoading, modelsError, retryModels }: {
     workers: Worker[]; loading: boolean; error: string; retry: () => void;
-    onchange: (worker: Worker) => void; notify: (message: string, type?: 'success' | 'error') => void;
+    onchange: (worker: Worker) => void; ondelete: (id: string) => void; notify: (message: string, type?: 'success' | 'error') => void;
     models: ModelCatalogEntry[]; modelsLoading: boolean; modelsError: string; retryModels: () => void;
   } = $props();
   let dialog: HTMLDialogElement;
+  let confirmation: HTMLDialogElement;
+  let deleting = $state<Worker | null>(null);
+  let deleteError = $state('');
+  let removing = $state(false);
   let editing = $state(false);
   let editingId = $state<string | null>(null);
   let name = $state('');
@@ -307,17 +311,47 @@
     finally { pending = pending.filter(id => id !== worker.id); }
   }
 
-  function backdropClick(event: MouseEvent) {
-    if (event.target !== dialog) return;
-    const rect = dialog.getBoundingClientRect();
-    if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeEditor();
+  async function askDelete(worker: Worker) {
+    if (pending.includes(worker.id) || removing) return;
+    deleting = worker;
+    deleteError = '';
+    await tick();
+    confirmation.showModal();
+    confirmation.querySelector<HTMLButtonElement>('[data-cancel-delete]')?.focus();
+  }
+  function closeDelete() {
+    if (removing) return;
+    confirmation.close();
+    deleting = null;
+  }
+  async function remove(event: SubmitEvent) {
+    event.preventDefault();
+    const worker = deleting;
+    if (!worker || removing || pending.includes(worker.id)) return;
+    removing = true;
+    deleteError = '';
+    pending = [...pending, worker.id];
+    try {
+      await request<{ ok: true }>(`/api/workers/${encodeURIComponent(worker.id)}/purge`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      removing = false;
+      closeDelete();
+      ondelete(worker.id);
+      notify('Работник удалён. История запусков сохранила его имя и настройки.');
+    } catch (failure) { deleteError = failure instanceof Error ? failure.message : 'Не удалось удалить работника'; }
+    finally { removing = false; pending = pending.filter(id => id !== worker.id); }
+  }
+
+  function backdropClick(event: MouseEvent, target = dialog, close = closeEditor) {
+    if (event.target !== target) return;
+    const rect = target.getBoundingClientRect();
+    if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) close();
   }
 </script>
 
 {#snippet workerCard(worker: Worker)}
   <article class="worker-card" class:archived-worker={worker.archived} aria-label={'Работник: ' + worker.name}>
     <div class="worker-card-heading"><WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={64} /><div><h2>{worker.name}</h2><p class="worker-description" class:empty-description={!worker.description?.trim()}>{worker.description?.trim() || 'Описание не задано'}</p><p>{providerName(worker.provider)} <span>·</span> <span class="worker-model-label" title={worker.model ?? undefined}>{modelLabel(worker.model, models, worker.provider)}</span></p><p>Усилия: {effortLabel(worker.effort)}</p>{#if worker.fallbackWorkerId}<p class="worker-fallback-label">Замена при лимитах: {fallbackLabel(worker)}</p>{/if}</div>{#if worker.archived}<span class="worker-archived-label">В архиве</span>{/if}</div>
-    <div class="worker-card-actions"><button class="button secondary" disabled={pending.includes(worker.id)} onclick={() => openEditor(worker)} aria-label={'Изменить работника: ' + worker.name}><Icon name="edit" size={14} />Изменить</button><button class="button text-button" disabled={pending.includes(worker.id)} onclick={() => setArchived(worker)} aria-label={(worker.archived ? 'Восстановить работника: ' : 'В архив: ') + worker.name}><Icon name={pending.includes(worker.id) ? 'refresh' : worker.archived ? 'refresh' : 'inbox'} size={14} class={pending.includes(worker.id) ? 'spin' : ''} />{worker.archived ? 'Восстановить' : 'В архив'}</button></div>
+    <div class="worker-card-actions"><button class="button secondary" disabled={pending.includes(worker.id)} onclick={() => openEditor(worker)} aria-label={'Изменить работника: ' + worker.name}><Icon name="edit" size={14} />Изменить</button><button class="button text-button" disabled={pending.includes(worker.id)} onclick={() => setArchived(worker)} aria-label={(worker.archived ? 'Восстановить работника: ' : 'В архив: ') + worker.name}><Icon name={pending.includes(worker.id) ? 'refresh' : worker.archived ? 'refresh' : 'inbox'} size={14} class={pending.includes(worker.id) ? 'spin' : ''} />{worker.archived ? 'Восстановить' : 'В архив'}</button><button class="button text-button danger-hover" disabled={pending.includes(worker.id)} onclick={() => askDelete(worker)} aria-label={'Удалить работника: ' + worker.name}><Icon name="trash" size={14} />Удалить</button></div>
   </article>
 {/snippet}
 
@@ -338,7 +372,20 @@
 </section>
 {#if archivedWorkers.length}<section class="archive-section"><button class="archive-toggle" aria-expanded={archivedVisible} onclick={() => archivedVisible = !archivedVisible}><Icon name={archivedVisible ? 'down' : 'chevron'} size={16} /><strong>Архив работников</strong></button>{#if archivedVisible}<p class="workers-archive-help">Архивные работники сохраняются в назначенных задачах и истории; их расписания продолжают работать. Для новых назначений восстановите профиль.</p><div class="workers-grid">{#each archivedWorkers as worker (worker.id)}{@render workerCard(worker)}{/each}</div>{/if}</section>{/if}
 
-<dialog bind:this={dialog} class="editor-dialog worker-editor" aria-labelledby="worker-editor-title" oncancel={(event) => { event.preventDefault(); closeEditor(); }} onclick={backdropClick}>
+<dialog bind:this={confirmation} class="editor-dialog instruction-delete-dialog" aria-labelledby="worker-delete-title" aria-describedby="worker-delete-description" oncancel={(event) => { event.preventDefault(); closeDelete(); }} onclick={(event) => backdropClick(event, confirmation, closeDelete)}>
+  {#if deleting}
+    <form class="editor-form" onsubmit={remove} aria-busy={removing}>
+      <header class="editor-header"><h2 id="worker-delete-title">Удалить работника навсегда?</h2><button type="button" class="icon-button" aria-label="Закрыть удаление" disabled={removing} onclick={closeDelete}><Icon name="close" size={21} /></button></header>
+      <div class="editor-fields">
+        {#if deleteError}<div class="form-error" role="alert"><Icon name="alert" size={17} /><span>{deleteError}</span></div>{/if}
+        <p id="worker-delete-description">Профиль «{deleting.name}» исчезнет из списка без возможности восстановления. История прошлых запусков сохранит его имя, аватар и настройки. Если работник выбран заменой при лимитах или работником по умолчанию, этот выбор очистится. Работника, назначенного в задачах, сначала замените в них или удалите эти задачи.</p>
+      </div>
+      <footer class="editor-footer"><button type="button" data-cancel-delete class="button secondary" disabled={removing} onclick={closeDelete}>Отмена</button><button type="submit" class="button danger" disabled={removing}>{#if removing}<Icon name="refresh" class="spin" size={16} />{/if}{removing ? 'Удаляем…' : 'Удалить навсегда'}</button></footer>
+    </form>
+  {/if}
+</dialog>
+
+<dialog bind:this={dialog} class="editor-dialog worker-editor" aria-labelledby="worker-editor-title" oncancel={(event) => { event.preventDefault(); closeEditor(); }} onclick={(event) => backdropClick(event)}>
   {#if editing}<form class="editor-form" onsubmit={saveWorker}>
     <header class="editor-header"><div><h2 id="worker-editor-title">{editingBuiltin ? 'Настройки Интегратора' : editingId ? 'Редактировать работника' : 'Новый работник'}</h2></div><button class="icon-button" type="button" aria-label="Закрыть профиль" disabled={submitting} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
     <div class="editor-fields">
