@@ -13,6 +13,7 @@ import { restoreBackup } from './backup-restore';
 import { AppError } from './errors';
 import type { AppAccess } from './task-mcp-app';
 import { createMcpHandler } from './mcp';
+import { EventStreams } from './events';
 
 const root = resolve(import.meta.dir, '..');
 const { mode, cliAccess, port, hostname, allowedHosts, allowedOrigins, dbPath, dev, defaultCwd, workspacesDir, maxParallel, maxPerRepository, integrationChecks, autoReconcile, cliHome, updateBackupDir, mcpToken } = readConfig(root);
@@ -30,7 +31,9 @@ if (process.platform !== 'win32') chmodSync(dbPath, 0o600);
 let lease = store.acquireLease();
 const createEngine = (database: Store) => new Engine(database, mode === 'mock', undefined, undefined, { cliAccess, maxParallel, maxPerRepository, integrationChecks, autoReconcile, ...(mode === 'cli' ? { workspaces: new GitWorkspaces(workspacesDir, () => database.getIntegrationChecks() ?? integrationChecks) } : {}) });
 let engine = createEngine(store);
-const backups = new BackupManager({ dbPath, updateBackupDir });
+const backups = new BackupManager({ dbPath, updateBackupDir, onChange: () => store.changed('backups') });
+// Change streams follow the current Store; they end whenever it or its handler is replaced.
+const events = new EventStreams();
 const backupAutoUpdater = new BackupAutoUpdater(backups, () => store.db, error => {
   console.error('[brigd] Не удалось автоматически обновить выбранный бэкап:', error instanceof Error ? error.message : error);
 });
@@ -43,7 +46,7 @@ const internalHost = allowedHosts?.[0] ?? `127.0.0.1:${port}`;
 const internalOrigin = allowedOrigins?.[0] ?? `http://${internalHost}`;
 const createAppHandler = (): ReturnType<typeof createHandler> => {
   const owner = engine;
-  const options: HttpOptions = { port, root, dev, allowedHosts, allowedOrigins, defaultCwd, cliHome, updateBackupDir, backupManager: backups, startedAt: Date.now(),
+  const options: HttpOptions = { port, root, dev, allowedHosts, allowedOrigins, defaultCwd, cliHome, updateBackupDir, backupManager: backups, events, startedAt: Date.now(),
   async restoreBackup(backups, id) {
     if (restoring || exiting) throw new AppError('Дождитесь завершения восстановления.', 409);
     restoring = true;
@@ -80,7 +83,7 @@ const createAppHandler = (): ReturnType<typeof createHandler> => {
           lease = nextLease;
           engine = nextEngine;
           engineStopped = false;
-          handler = createAppHandler();
+          replaceHandler();
         } catch (error) { database.close(); throw error; }
       },
       resume() {
@@ -89,7 +92,7 @@ const createAppHandler = (): ReturnType<typeof createHandler> => {
         if (engineStopped && storeOpen) {
           engine = createEngine(store);
           engineStopped = false;
-          handler = createAppHandler();
+          replaceHandler();
         }
         activate();
       },
@@ -162,14 +165,20 @@ const createAppHandler = (): ReturnType<typeof createHandler> => {
   return appHandler;
 };
 let handler = createAppHandler();
+/** Streams opened through the old handler report the old Store; ending them makes clients reconnect to the new one. */
+function replaceHandler() {
+  events.closeAll();
+  handler = createAppHandler();
+}
 function listen() {
   try {
     return Bun.serve({
       hostname, port, maxRequestBodySize: Math.max(ATTACHMENT_MAX_BYTES, BACKUP_MAX_BYTES),
-      async fetch(req) {
+      async fetch(req, server) {
         if (!active) return new Response(restoring ? 'brigd восстанавливает бэкап' : 'brigd запускается', { status: 503 });
+        // An event stream counts only until its response starts: restoration never waits for open streams.
         requests++;
-        try { return await handler(req); }
+        try { return await handler(req, server); }
         finally { requests--; }
       },
     });
@@ -208,6 +217,7 @@ async function shutdown() {
   active = false;
   backupAutoUpdater.stop();
   clearInterval(attachmentCleanup);
+  events.closeAll();
   server.stop();
   // A paused candidate has not started work. Keep the pre-update DB state intact.
   if (restoreInFlight) await restoreInFlight.catch(() => {});

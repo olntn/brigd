@@ -8,6 +8,7 @@ import { BACKUP_MAX_BYTES, BackupManager } from '../server/backups';
 import { Engine } from '../server/engine';
 import { createHandler } from '../server/http';
 import { Store } from '../server/store';
+import { readEvents } from './sse';
 
 const servers: { child: ReturnType<typeof Bun.spawn>; folder: string }[] = [];
 afterEach(async () => {
@@ -271,3 +272,43 @@ test('renamed backups download with the new name and keep it through restore, au
   for (const [id, name] of renamed) expect(overview.backups.find(entry => entry.id === id)?.name).toBe(name);
   expect(overview.backups.find(entry => entry.id === manual.id)).toMatchObject({ selected: true, autoUpdate: true });
 }, 20_000);
+
+test('restoring with an open event stream completes, ends the stream and reconnects to the restored data', async () => {
+  const app = await start();
+  const original = await app.task('Before the snapshot');
+  const backup = await app.json<BackupEntry>('/api/backups', 'POST');
+  const stream = readEvents(await app.request('/api/events'));
+  const ready = await stream.next();
+  expect(ready?.event).toBe('ready');
+  await app.task('After the snapshot');
+  expect((await stream.next())?.data.scopes).toEqual(['tasks']);
+  // An open stream must not hold restoration, which waits for in-flight requests.
+  const restored = await Promise.race([app.json<BackupEntry>(`/api/backups/${backup.id}/select`, 'POST'), Bun.sleep(10_000).then(() => null)]);
+  expect(restored?.selected).toBe(true);
+  let block = await stream.next();
+  while (block?.event === 'change' || block?.comment) block = await stream.next();
+  expect(block).toBeNull();
+  const next = readEvents(await app.request('/api/events'));
+  try {
+    const reconnected = await next.next();
+    expect(reconnected?.event).toBe('ready');
+    expect(reconnected?.data.instance).not.toBe(ready?.data.instance);
+    expect((await app.json<Task[]>('/api/tasks')).map(task => task.id)).toEqual([original.id]);
+    await app.task('After the restore');
+    expect((await next.next())?.data.scopes).toEqual(['tasks']);
+  } finally { await next.cancel(); }
+}, 20_000);
+
+test('stopping the service ends open event streams', async () => {
+  const app = await start();
+  const streams = await Promise.all([0, 1].map(async () => readEvents(await app.request('/api/events'))));
+  for (const stream of streams) expect((await stream.next())?.event).toBe('ready');
+  app.child.kill('SIGTERM');
+  for (const stream of streams) {
+    let block: Awaited<ReturnType<typeof stream.next>>;
+    try { do block = await stream.next(); while (block?.comment); }
+    catch (error) { block = error instanceof Error && error.message.includes('in time') ? { comment: 'stalled' } : null; }
+    expect(block).toBeNull();
+  }
+  expect(await Promise.race([app.child.exited, Bun.sleep(5_000).then(() => 'running')])).toBe(0);
+}, 15_000);

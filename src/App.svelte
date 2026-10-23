@@ -36,6 +36,7 @@
   import { followupTargets, followupFingerprint, followupStage, runWorkflowSteps, taskHasCompletedRun, resolveFollowupTarget, followupSessionKey, type FollowupTarget } from './lib/followups';
   import { applyTheme, readTheme, saveTheme, themes, themeStorageKey, type Theme } from './lib/theme';
   import { applyLocale, formatDate, getLocale, localeStorageKey, locales, plural, readLocale, saveLocale, serverText, setLocale, t, tk, type Locale } from './lib/i18n';
+  import { subscribe } from './lib/events';
   import type { AppInfo, Attachment, AutopilotSettings as AutopilotSettingsValue, AutopilotState, Comment, FollowupInput, GeneralSettings as GeneralSettingsValue, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskPriority, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
 
   type Scope = 'all' | 'scheduled' | 'autopilot' | 'attention' | 'completed';
@@ -290,7 +291,7 @@
   }
 
   async function loadTags() {
-    if (tagMutationPending || tagReadSequence !== null) return;
+    if (tagMutationPending || tagReadSequence !== null) return false;
     const sequence = ++tagSequence;
     tagReadSequence = sequence;
     try {
@@ -352,7 +353,7 @@
 
   async function loadModels() {
     // Do not read midway through a write. Its result invalidates every older read.
-    if (modelMutationPending || modelReadSequence !== null) return;
+    if (modelMutationPending || modelReadSequence !== null) return false;
     const sequence = ++modelSequence;
     modelReadSequence = sequence;
     try {
@@ -423,7 +424,7 @@
   }
 
   async function loadAutopilotSettings() {
-    if (autopilotSettingsMutationPending || autopilotSettingsReadSequence !== null) return;
+    if (autopilotSettingsMutationPending || autopilotSettingsReadSequence !== null) return false;
     const sequence = ++autopilotSettingsSequence;
     autopilotSettingsReadSequence = sequence;
     try {
@@ -486,15 +487,16 @@
   }
 
   function autopilotStatusChanged(enabled: boolean | null) {
-    // A response from the open page supersedes any older navigation poll.
+    // A response from the open page supersedes any older navigation read.
     autopilotStatusSequence++;
     autopilotEnabled = enabled;
     autopilotStatusLoading = false;
   }
 
   async function loadAutopilotStatus() {
-    // The autopilot page already polls and reports successful changes immediately.
-    if (page === 'autopilot' || autopilotStatusReading) return;
+    // The autopilot page already follows changes and reports them immediately.
+    if (page === 'autopilot') return;
+    if (autopilotStatusReading) return false;
     autopilotStatusReading = true;
     const sequence = ++autopilotStatusSequence;
     try {
@@ -533,12 +535,20 @@
     window.addEventListener('hashchange', onHash);
     void loadInfo();
     void refresh();
-    const interval = setInterval(() => {
-      if (document.visibilityState === 'visible') { void refresh(); if (!info) void loadInfo(); }
-    }, 2000);
-    const onVisible = () => { if (document.visibilityState === 'visible') void refresh(); };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => { clearInterval(interval); clearTimeout(toastTimer); document.removeEventListener('visibilitychange', onVisible); window.removeEventListener('storage', onThemeStorage); window.removeEventListener('hashchange', onHash); };
+    // Cards embed their worker and tags; the drawer follows the same changes as the board.
+    const board = ['tasks', 'workers', 'tags'] as const;
+    const unsubscribe = [
+      subscribe(board, () => { if (!info) void loadInfo(); return loadTasks(); }),
+      subscribe(board, () => selectedId ? loadDetail() : undefined),
+      subscribe(['workers'], loadWorkers),
+      subscribe(['tags'], loadTags),
+      subscribe(['settings'], loadModels),
+      // An in-flight read may predate the change: wait for it, then read again.
+      subscribe(['settings'], () => generalSettingsMutationPending || generalSettingsRequest ? false : loadGeneralSettings()),
+      subscribe(['settings'], loadAutopilotSettings),
+      subscribe(['autopilot'], loadAutopilotStatus),
+    ];
+    return () => { for (const stop of unsubscribe) stop(); clearTimeout(toastTimer); window.removeEventListener('storage', onThemeStorage); window.removeEventListener('hashchange', onHash); };
   });
   $effect(() => { if (page !== 'docs' && location.hash.startsWith('#/docs')) history.replaceState(null, '', location.pathname + location.search); });
 
@@ -903,7 +913,7 @@
     try {
       const run = await api<Run>(`/api/tasks/${encodeURIComponent(task.id)}/followups`, { method: 'POST', body: JSON.stringify(attempt.payload) });
       attachments?.finish(true);
-      // Immediately lock task actions, before polling catches up with the new run.
+      // Immediately lock task actions, before the next reload catches up with the new run.
       taskSequence++;
       drawerSequence++;
       const updateTask = (item: Task): Task => item.id === task.id ? { ...item, latestRun: run, status: run.status, hasCompletedRun: true } : item;
@@ -913,7 +923,7 @@
         comment = '';
         followupAttempt = null;
         // Keep the explicitly selected recipient while the new request runs.
-        // Completed-target polling will rebind its source ID in the same session.
+        // The next reload of completed targets will rebind its source ID in the same session.
         // Resetting here would select another worker's last completed run.
         followupTargetKey = target.key;
         followupRecipientSession = followupSessionKey(target);

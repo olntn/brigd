@@ -374,10 +374,12 @@ test('pending delete cannot submit twice or dismiss settings', async ({ page, re
   } finally { deleteGate.release(); }
 });
 
-test('a slow first read remains single-flight across polling and eventually loads the catalog', async ({ page, request }) => {
+test('a slow first read remains single-flight across reloads and eventually loads the catalog', async ({ page, request }) => {
   const entries = await catalog(request);
   const readGate = gate();
   let reads = 0;
+  // The open page rereads the catalog after the changes above; count only the reads of a fresh page.
+  await page.goto('about:blank');
   await page.route(modelsRoute, async route => {
     if (route.request().method() === 'GET') {
       reads++;
@@ -387,13 +389,14 @@ test('a slow first read remains single-flight across polling and eventually load
   });
   try {
     await page.clock.install();
-    await page.reload();
+    await page.goto('/');
     const settings = await openSettings(page);
     await expect(settings.getByRole('status')).toContainText('Загружаем список моделей');
     await expect(settings.locator('.model-catalog-empty')).toHaveCount(0);
     await expect.poll(() => reads).toBe(1);
+    // The fallback reload rereads the board while the catalog read is still pending.
     const poll = page.waitForResponse(response => new URL(response.url()).pathname === '/api/tasks');
-    await page.clock.fastForward(6500);
+    await page.clock.fastForward(21_000);
     await (await poll).finished();
     expect(reads).toBe(1);
     readGate.release();
@@ -440,8 +443,10 @@ for (const state of ['empty', 'error'] as const) {
     await expect(edit.getByLabel('ID модели', { exact: true })).toHaveValue(modelId);
     useRealCatalog = true;
     if (state === 'error') {
-      await edit.getByRole('button', { name: 'Повторить загрузку моделей', exact: true }).click();
-      await expect(edit.getByRole('button', { name: 'Повторить загрузку моделей', exact: true })).toHaveCount(0);
+      const retry = edit.getByRole('button', { name: 'Повторить загрузку моделей', exact: true });
+      // A background reload that is already due may restore the catalog before the click; the result is the same.
+      await retry.click({ timeout: 5_000 }).catch(async (error: unknown) => { if (await retry.count()) throw error; });
+      await expect(retry).toHaveCount(0);
       await expect(edit.locator('[name="workerModel"] option')).toHaveText([
         'По умолчанию CLI', ...entries.filter(row => row.provider === worker.provider).map(row => `${row.label} · ${row.modelId}`), 'Другая модель…',
       ]);
@@ -479,7 +484,9 @@ for (const change of ['rename', 'ID edit', 'move', 'delete', 'read error'] as co
         else await route.continue();
       });
     }
-    // Exercise the ordinary poll while this editor remains open, without resetting the draft.
+    // Exercise the ordinary reload while this editor remains open, without resetting the draft. A failed read reports
+    // no change event, so return to the tab to reread, as a person would after a network problem.
+    if (change === 'read error') await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
     if (change === 'rename') {
       await expect(editor.locator(`[name="workerModel"] option[value="${entry.modelId}"]`)).toContainText('Новое название', { timeout: 10_000 });
       await expect(editor.getByLabel('Модель', { exact: true })).toHaveValue(entry.modelId);

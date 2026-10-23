@@ -3,6 +3,7 @@
   import Icon from './Icon.svelte';
   import { INSTRUCTION_TITLE_LIMIT, INSTRUCTION_BODY_LIMIT, INSTRUCTION_COUNT_LIMIT, INSTRUCTION_ENABLED_TEXT_LIMIT, INSTRUCTION_ENABLED_BYTES_LIMIT } from './instructions';
   import { formatNumber, serverText, t, tc } from './i18n';
+  import { subscribe } from './events';
   import type { Instruction, InstructionInput } from './types';
 
   let { notify }: { notify: (message: string, type?: 'success' | 'error') => void } = $props();
@@ -49,7 +50,7 @@
   }
 
   async function load() {
-    if (reading || pending) return;
+    if (reading || pending) return false;
     reading = true;
     const readSequence = ++sequence;
     try {
@@ -68,10 +69,8 @@
 
   onMount(() => {
     void load();
-    const interval = setInterval(() => { if (document.visibilityState === 'visible') void load(); }, 2000);
-    const onVisible = () => { if (document.visibilityState === 'visible') void load(); };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => { alive = false; sequence++; clearInterval(interval); document.removeEventListener('visibilitychange', onVisible); };
+    const unsubscribe = subscribe(['instructions'], load);
+    return () => { alive = false; sequence++; unsubscribe(); };
   });
 
   function savedInstruction(saved: Instruction) {

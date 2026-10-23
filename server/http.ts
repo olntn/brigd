@@ -19,6 +19,7 @@ import { validateTag, validateTagPatch, validateTaskTags } from './tags';
 import { claudeStatus, codexStatus, configureClaude, configureCodex } from './cli-config';
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
 import { BackupManager, BACKUP_MAX_BYTES } from './backups';
+import { EventStreams } from './events';
 
 export interface HttpOptions { port: number; dev?: boolean; root?: string; startedAt?: number; allowedHosts?: string[]; allowedOrigins?: string[]; defaultCwd?: string;
   /** Home folder whose ~/.claude and ~/.codex the CLI setup buttons check and edit. */
@@ -30,7 +31,11 @@ export interface HttpOptions { port: number; dev?: boolean; root?: string; start
   authorizeMutation?: () => void;
   /** Authenticated external MCP, independent of task invocations. */
   mcp?: (req: Request) => Promise<Response>;
+  /** Shared by every handler of one service, so its limit and shutdown cover all `/api/events` streams. */
+  events?: EventStreams;
 }
+/** The part of Bun's server a handler needs: a stream must outlive the idle timeout between heartbeats. */
+export interface RequestServer { timeout(request: Request, seconds: number): void; }
 const JSON_LIMIT = 32_768;
 const securityHeaders = {
   'X-Content-Type-Options': 'nosniff',
@@ -85,8 +90,10 @@ export function createHandler(engine: Engine, options: HttpOptions) {
   let backupUploading = false;
   let backups = options.backupManager;
   const backupManager = () => backups ??= new BackupManager({ dbPath: engine.store.db.filename,
-    updateBackupDir: options.updateBackupDir ?? resolve(options.root ?? process.cwd(), '.brigd-updates/backup') });
-  return async (req: Request): Promise<Response> => {
+    updateBackupDir: options.updateBackupDir ?? resolve(options.root ?? process.cwd(), '.brigd-updates/backup'),
+    onChange: () => engine.store.changed('backups') });
+  let events = options.events;
+  return async (req: Request, server?: RequestServer): Promise<Response> => {
     try {
       const url = new URL(req.url);
       if (!hostnames.has(req.headers.get('host') ?? url.host)) throw new AppError('Недопустимый Host', 403);
@@ -99,6 +106,12 @@ export function createHandler(engine: Engine, options: HttpOptions) {
       if (!['GET', 'HEAD'].includes(req.method) && (!origin || !origins.has(origin))) throw new AppError('Изменения разрешены только из локального интерфейса (Origin обязателен)', 403);
       const path = url.pathname;
       const method = req.method;
+      if (path === '/api/events' && method === 'GET') {
+        const response = (events ??= new EventStreams()).open(engine.store, securityHeaders, req.signal);
+        // Bun's idle timeout ignores server writes and would cut the stream between heartbeats.
+        server?.timeout(req, 0);
+        return response;
+      }
       if (path === '/api/backups' && method === 'GET') return json(backupManager().list());
       if (path === '/api/backups' && method === 'POST') {
         const value = await body(req);

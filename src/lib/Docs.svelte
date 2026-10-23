@@ -6,6 +6,7 @@
   import { buildDocTree, docPageTitle, DOC_PAGE_LIMIT, DOC_UNTITLED, type DocHeading } from './docs';
   import { docsFailureMessage, docsRequest } from './docs-client';
   import { t } from './i18n';
+  import { subscribe } from './events';
   import type { DocPage, DocPageMoveInput, DocPageSummary, DocSearchHit } from './types';
 
   let { notify, onopentask }: { notify: (message: string, type?: 'success' | 'error') => void; onopentask?: (id: string) => void } = $props();
@@ -91,10 +92,9 @@
     void load();
     const onHash = () => { const id = readHash(); if (id !== selectedId) { selectedId = id; headings = []; } };
     window.addEventListener('hashchange', onHash);
-    const interval = setInterval(() => { if (document.visibilityState === 'visible' && !pending) void load(); }, 5000);
-    const onVisible = () => { if (document.visibilityState === 'visible') void load(); };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => { alive = false; sequence++; clearInterval(interval); window.removeEventListener('hashchange', onHash); document.removeEventListener('visibilitychange', onVisible); };
+    // A change in progress reloads the list itself when it finishes.
+    const unsubscribe = subscribe(['docs'], () => pending ? false : load());
+    return () => { alive = false; sequence++; unsubscribe(); window.removeEventListener('hashchange', onHash); };
   });
 
   async function mutate<T>(action: () => Promise<T>, success?: string): Promise<T | undefined> {
