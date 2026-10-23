@@ -73,7 +73,7 @@
   --claude-bg: #3b2e29;
   --overlay: #080c12a6;
 }
-/* Palettes are built in the spirit of ARC Raiders: each changes structure, not just hue.
+/* Atmospheric palettes each change structure, not just hue.
    They inherit the light or dark status colors unless their page tone needs deeper signals.
    A `.sidebar` block recolors the app chrome; its navigation reads tokens from that scope. */
 /* spaceport: white hull, navy chrome, international orange for actions. */
@@ -215,7 +215,7 @@
   --error: #9a4b44;
   --stripe: linear-gradient(90deg, #e3a600 0 40%, #3c7393 40% 75%, #16242d 75%);
 }
-/* speranza: the underground city with warm lamplight, brown walls and painted teal shutters. */
+/* speranza: warm lamplight, brown walls and painted teal shutters. */
 :root[data-theme='speranza'] {
   --page: #1b1511;
   --surface: #251d17;
