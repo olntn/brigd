@@ -71,6 +71,8 @@ export interface IntegratorProfile extends IntegratorProfileInput { model: strin
 /** Which worker picks up a fresh run when a provider's CLI reports exhausted usage limits; null leaves the run failed. */
 export interface FallbackWorkers { codex: string | null; claude: string | null; }
 export interface GeneralSettings {
+  webhookUrl: string;
+  webhookSecret: string;
   /** null leaves agent turns unlimited; a task may override this value. */
   agentTimeLimitMinutes: number | null;
   /** Per invocation of a merge-check command; null leaves it unlimited. */

@@ -9,7 +9,8 @@
   import { usageDetails, usageLine } from './usage';
   import type { AutopilotInput, AutopilotOverview, AutopilotSettings, Run, Task, TaskStatus } from './types';
 
-  let { tasks, settings, checksRequired, notify, onopen, onchanged, onsettings, onstatus }: {
+  import { readNotificationPreferences } from './browser-notifications';
+  let { tasks, settings, checksRequired, notify, onopen, onchanged, onsettings, onstatus, onoverview }: {
     tasks: Task[];
     settings: AutopilotSettings | null;
     checksRequired: boolean;
@@ -18,6 +19,7 @@
     onchanged: (task: Task) => void;
     onsettings: (section: 'autopilot' | 'permissions') => void;
     onstatus: (enabled: boolean | null) => void;
+    onoverview: (overview: AutopilotOverview) => void;
   } = $props();
   let overview = $state<AutopilotOverview | null>(null);
   let loading = $state(true);
@@ -90,6 +92,7 @@
   }
 
   function apply(result: AutopilotOverview) {
+    onoverview(result);
     overview = result;
     onstatus(result.enabled);
     error = '';
@@ -116,7 +119,7 @@
   onMount(() => {
     void load();
     // The queue and the report show task cards, their runs and workers.
-    const unsubscribe = subscribe(['autopilot', 'tasks', 'workers'], () => load());
+    const unsubscribe = subscribe(['autopilot', 'tasks', 'workers'], () => load(), () => { const preferences = readNotificationPreferences(); return preferences.browser || preferences.sound; });
     return () => { alive = false; sequence++; unsubscribe(); };
   });
 

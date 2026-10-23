@@ -32,14 +32,37 @@ afterEach(async () => {
 });
 
 describe('general settings', () => {
+  test('webhook settings validate, save atomically, persist and can be disabled', async () => {
+    const patch = (value: unknown) => request('/api/settings/general', 'PATCH', value);
+    const saved = await patch({ webhookUrl: ' http://127.0.0.1:9876/events ', webhookSecret: 'секрет' });
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ webhookUrl: 'http://127.0.0.1:9876/events', webhookSecret: 'секрет' });
+    for (const webhookUrl of [null, 12, {}, [], 'invalid', 'ftp://example.com', 'file:///tmp/test', 'javascript:alert(1)', 'https://user:pass@example.com', 'http://user@example.com', 'x'.repeat(4097)]) {
+      expect((await patch({ webhookUrl, webhookSecret: 'changed', defaultSchedule: 'auto' })).status).toBe(400);
+      expect(store.getWebhookSettings()).toEqual({ webhookUrl: 'http://127.0.0.1:9876/events', webhookSecret: 'секрет' });
+      expect(store.getDefaultSchedule()).toBe('manual');
+    }
+    for (const webhookSecret of [null, 12, {}, 's'.repeat(4097)]) {
+      expect((await patch({ webhookUrl: 'https://example.com', webhookSecret })).status).toBe(400);
+      expect(store.getWebhookSettings().webhookUrl).toBe('http://127.0.0.1:9876/events');
+    }
+    await engine.shutdown(); store.close();
+    store = new Store(join(folder, 'settings.sqlite'));
+    engine = new Engine(store, true);
+    handler = createHandler(engine, { port: 4310, root: folder });
+    expect(await (await request()).json()).toMatchObject({ webhookUrl: 'http://127.0.0.1:9876/events', webhookSecret: 'секрет' });
+    expect((await patch({ webhookUrl: 'https://example.com/events', webhookSecret: '' })).status).toBe(200);
+    expect((await patch({ webhookUrl: '' })).status).toBe(200);
+    expect(store.getWebhookSettings()).toEqual({ webhookUrl: '', webhookSecret: '' });
+  });
   test('the effective default folder falls back to configured cwd, then process cwd', async () => {
     expect(store.getDefaultCwd()).toBeNull();
     expect(store.getDefaultSchedule()).toBe('manual');
-    expect(await (await request()).json()).toEqual({ agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: process.cwd(), defaultSchedule: 'manual', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
+    expect(await (await request()).json()).toEqual({ webhookUrl: '', webhookSecret: '', agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: process.cwd(), defaultSchedule: 'manual', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
     expect(await (await request('/api/info')).json()).toMatchObject({ cwd: process.cwd() });
 
     handler = createHandler(engine, { port: 4310, root: folder, defaultCwd: folder });
-    expect(await (await request()).json()).toEqual({ agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: folder, defaultSchedule: 'manual', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
+    expect(await (await request()).json()).toEqual({ webhookUrl: '', webhookSecret: '', agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: folder, defaultSchedule: 'manual', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
     expect(await (await request('/api/info')).json()).toMatchObject({ cwd: folder });
   });
 
@@ -58,7 +81,7 @@ describe('general settings', () => {
     engine = new Engine(store, true);
     handler = createHandler(engine, { port: 4310, root: folder, defaultCwd: folder });
     expect(store.getDefaultCwd()).toBe(cwd);
-    expect(await (await request()).json()).toEqual({ agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: cwd, defaultSchedule: 'manual', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
+    expect(await (await request()).json()).toEqual({ webhookUrl: '', webhookSecret: '', agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: cwd, defaultSchedule: 'manual', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
     expect(await (await request('/api/info')).json()).toMatchObject({ cwd });
   });
 
@@ -72,8 +95,8 @@ describe('general settings', () => {
 
     const saved = await request('/api/settings/general', 'PATCH', { defaultCwd: ` ${project} ` });
     expect(saved.status).toBe(200);
-    expect(await saved.json()).toEqual({ agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: cwd, defaultSchedule: 'manual', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
-    expect(await (await request()).json()).toEqual({ agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: cwd, defaultSchedule: 'manual', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
+    expect(await saved.json()).toEqual({ webhookUrl: '', webhookSecret: '', agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: cwd, defaultSchedule: 'manual', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
+    expect(await (await request()).json()).toEqual({ webhookUrl: '', webhookSecret: '', agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: cwd, defaultSchedule: 'manual', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
     expect(await (await request('/api/info')).json()).toMatchObject({ cwd });
     expect(store.getTask(task.id).cwd).toBe(folder);
 
@@ -109,7 +132,7 @@ describe('general settings', () => {
   test.each(['auto', 'manual', 'interval'] as const)('the %s default launch type persists after reopening', async schedule => {
     const saved = await request('/api/settings/general', 'PATCH', { defaultSchedule: schedule });
     expect(saved.status).toBe(200);
-    expect(await saved.json()).toEqual({ agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: process.cwd(), defaultSchedule: schedule, defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
+    expect(await saved.json()).toEqual({ webhookUrl: '', webhookSecret: '', agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: process.cwd(), defaultSchedule: schedule, defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
     expect(store.getDefaultSchedule()).toBe(schedule);
     expect(store.getDefaultCwd()).toBeNull();
 
@@ -119,7 +142,7 @@ describe('general settings', () => {
     engine = new Engine(store, true);
     handler = createHandler(engine, { port: 4310, root: folder });
     expect(store.getDefaultSchedule()).toBe(schedule);
-    expect(await (await request()).json()).toEqual({ agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: process.cwd(), defaultSchedule: schedule, defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
+    expect(await (await request()).json()).toEqual({ webhookUrl: '', webhookSecret: '', agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: process.cwd(), defaultSchedule: schedule, defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
   });
 
   test('partial writes preserve the other setting and combined writes save both', async () => {
@@ -130,15 +153,15 @@ describe('general settings', () => {
 
     const scheduleOnly = await request('/api/settings/general', 'PATCH', { defaultSchedule: 'auto' });
     expect(scheduleOnly.status).toBe(200);
-    expect(await scheduleOnly.json()).toEqual({ agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: realpathSync(folder), defaultSchedule: 'auto', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
+    expect(await scheduleOnly.json()).toEqual({ webhookUrl: '', webhookSecret: '', agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: realpathSync(folder), defaultSchedule: 'auto', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
 
     const cwdOnly = await request('/api/settings/general', 'PATCH', { defaultCwd: project });
     expect(cwdOnly.status).toBe(200);
-    expect(await cwdOnly.json()).toEqual({ agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: cwd, defaultSchedule: 'auto', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
+    expect(await cwdOnly.json()).toEqual({ webhookUrl: '', webhookSecret: '', agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: cwd, defaultSchedule: 'auto', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
 
     const combined = await request('/api/settings/general', 'PATCH', { defaultCwd: folder, defaultSchedule: 'interval' });
     expect(combined.status).toBe(200);
-    expect(await combined.json()).toEqual({ agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: realpathSync(folder), defaultSchedule: 'interval', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
+    expect(await combined.json()).toEqual({ webhookUrl: '', webhookSecret: '', agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: realpathSync(folder), defaultSchedule: 'interval', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } });
   });
 
   test('invalid launch types leave both settings intact, including combined patches', async () => {
@@ -209,7 +232,7 @@ describe('replacement workers for exhausted limits', () => {
     expect(store.getFallbackWorkers()).toEqual({ codex: null, claude: null });
     const saved = await request('/api/settings/general', 'PATCH', { fallbackWorkers: { codex: claude.id } });
     expect(saved.status).toBe(200);
-    expect(await saved.json()).toEqual({ agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: process.cwd(), defaultSchedule: 'manual', defaultWorkerId: null, fallbackWorkers: { codex: claude.id, claude: null } });
+    expect(await saved.json()).toEqual({ webhookUrl: '', webhookSecret: '', agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: process.cwd(), defaultSchedule: 'manual', defaultWorkerId: null, fallbackWorkers: { codex: claude.id, claude: null } });
     const both = await request('/api/settings/general', 'PATCH', { defaultSchedule: 'auto', fallbackWorkers: { claude: codex.id } });
     expect(both.status).toBe(200);
     expect(await both.json()).toMatchObject({ defaultSchedule: 'auto', fallbackWorkers: { codex: claude.id, claude: codex.id } });
@@ -247,7 +270,7 @@ describe('default worker for new cards', () => {
     expect(store.getDefaultWorkerId()).toBeNull();
     const saved = await request('/api/settings/general', 'PATCH', { defaultWorkerId: sol.id });
     expect(saved.status).toBe(200);
-    expect(await saved.json()).toEqual({ agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: process.cwd(), defaultSchedule: 'manual', defaultWorkerId: sol.id, fallbackWorkers: { codex: null, claude: null } });
+    expect(await saved.json()).toEqual({ webhookUrl: '', webhookSecret: '', agentTimeLimitMinutes: null, integrationCheckTimeLimitMinutes: null, defaultCwd: process.cwd(), defaultSchedule: 'manual', defaultWorkerId: sol.id, fallbackWorkers: { codex: null, claude: null } });
     expect(await (await request('/api/settings/general', 'PATCH', { defaultSchedule: 'auto', fallbackWorkers: { codex: opus.id } })).json())
       .toMatchObject({ defaultSchedule: 'auto', defaultWorkerId: sol.id, fallbackWorkers: { codex: opus.id } });
 

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHmac } from 'node:crypto';
 import { AgentRunError, buildPrompt, type AgentCallbacks, type AgentInput, type AgentOutcome } from '../server/adapter';
 import { Engine, type AgentFactory } from '../server/engine';
 import { ProtocolError, UsageLimitError } from '../server/protocol';
@@ -60,6 +61,41 @@ afterEach(async () => {
 });
 
 describe('agent lifecycle orchestration', () => {
+  test('a failed webhook retries without affecting a question or failed run; payload contains metadata only', async () => {
+    const received: { body: string; signature: string | null }[] = [];
+    const receiver = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
+      received.push({ body: await request.text(), signature: request.headers.get('X-Brigd-Signature') });
+      return new Response(null, { status: 503 });
+    } });
+    try {
+      store.updateGeneralSettings({ webhookUrl: `http://127.0.0.1:${receiver.port}/events`, webhookSecret: 'test-secret' });
+      const task = store.createTask(input(folder, { title: 'Needs attention', instruction: 'PRIVATE instructions' }));
+      const run = engine.start(task.id);
+      expect(() => store.db.transaction(() => { store.finish(run.id, 'waiting_input', null, null); throw new Error('rollback'); }).immediate()).toThrow('rollback');
+      await store.notifications.idle();
+      expect(received).toHaveLength(0);
+      expect(store.getRun(run.id).status).toBe('running');
+      agent.calls[0]!.resolve(outcome('needs_input'));
+      await flush();
+      await store.notifications.idle();
+      expect(store.getRun(run.id).status).toBe('waiting_input');
+      expect(received).toHaveLength(2);
+      expect(JSON.parse(received[0]!.body)).toEqual({ event: 'run.waiting_input', taskId: task.id, title: task.title, worker: 'codex', status: 'waiting_input', at: store.getRun(run.id).updatedAt });
+      expect(received[0]!.signature).toBe(createHmac('sha256', 'test-secret').update(received[0]!.body).digest('hex'));
+      expect(received[0]!.body).not.toContain('PRIVATE');
+      store.finish(run.id, 'waiting_input', null, null); // stale finish cannot emit again
+      await store.notifications.idle();
+      expect(received).toHaveLength(2);
+      engine.resume(run.id, 'PRIVATE answer', false);
+      agent.calls[1]!.reject(new Error('PRIVATE failure details'));
+      await flush();
+      await store.notifications.idle();
+      expect(store.getRun(run.id).status).toBe('failed');
+      expect(received).toHaveLength(4);
+      expect(JSON.parse(received[2]!.body)).toMatchObject({ event: 'run.failed', status: 'failed' });
+      expect(received[2]!.body).not.toContain('PRIVATE');
+    } finally { receiver.stop(true); }
+  });
   test('manual launch passes a persisted snapshot and records streamed progress and result', async () => {
     const task = store.createTask(input(folder));
     const run = engine.start(task.id);
@@ -504,6 +540,35 @@ describe('scheduler and restart safety', () => {
 });
 
 describe('autopilot', () => {
+  test('webhook reports the settled empty queue and an automatic stop once each', async () => {
+    const events: { event: string }[] = [];
+    const receiver = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
+      events.push(await request.json() as { event: string });
+      return new Response(null, { status: 204 });
+    } });
+    try {
+      store.updateGeneralSettings({ webhookUrl: `http://127.0.0.1:${receiver.port}/events` });
+      store.createTask(input(folder, { schedule: 'auto' }));
+      engine.setAutopilot({ enabled: true, until: null });
+      engine.tick();
+      await store.notifications.idle();
+      expect(events).toHaveLength(0);
+      agent.calls[0]!.resolve(outcome());
+      await flush();
+      engine.tick();
+      await store.notifications.idle();
+      expect(events.map(event => event.event)).toEqual(['autopilot.empty']);
+      engine.tick();
+      await store.notifications.idle();
+      expect(events).toHaveLength(1);
+      store.stopAutopilot('until');
+      await store.notifications.idle();
+      expect(events.map(event => event.event)).toEqual(['autopilot.empty', 'autopilot.until']);
+      store.stopAutopilot('until');
+      await store.notifications.idle();
+      expect(events).toHaveLength(2);
+    } finally { receiver.stop(true); }
+  });
   test('claims pool tasks oldest first and one per repository, keeps the rest editable, and continues as slots free up', async () => {
     const now = Date.now();
     const other = join(folder, 'other');

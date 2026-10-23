@@ -15,6 +15,7 @@ import { GitIntegrator, type Integrator } from './integration';
 import { RunCodeDiffs } from './code-diff';
 import { UNAVAILABLE_STORAGE, WorkspaceStorage, type CleanupOptions } from './workspace-storage';
 import { clock } from './clock';
+import { autopilotQueueEmpty } from '../src/lib/notification-events';
 
 export type AgentFactory = (input: AgentInput, callbacks: AgentCallbacks) => AgentHandle;
 export type TaskBridgeFactory = (store: Store, run: Run, fence: RunFence, appAccess?: TaskAppAccess) => ReturnType<typeof createTaskBridge>;
@@ -52,6 +53,7 @@ export class Engine {
   private taskAppAccess?: TaskAppAccess;
   /** Repository identity per task folder, so a busy pool does not spawn Git every second. */
   private locations = new Map<string, { location: RepositoryLocation; at: number }>();
+  private emptyQueueKey: string | null = null;
   constructor(readonly store: Store, readonly mock = false, private factory: AgentFactory = startAgent, private bridgeFactory?: TaskBridgeFactory, options: EngineOptions = {}) {
     this.codeDiffs = new RunCodeDiffs(store);
     this.environmentChecks = options.integrationChecks === undefined ? undefined : validateIntegrationChecks(options.integrationChecks);
@@ -172,7 +174,9 @@ export class Engine {
     if (state.until !== null && now >= state.until) { this.store.stopAutopilot('until', now); return; }
     const { maxParallel, maxPerRepository } = this.limits();
     let capacity = this.store.autopilotCapacity(maxParallel);
-    for (const task of this.store.autopilotCandidates(state.startedAt)) {
+    const candidates = this.store.autopilotCandidates(state.startedAt);
+    if (candidates.length) this.emptyQueueKey = null;
+    for (const task of candidates) {
       if (capacity < 1) return;
       if (settling.includes(task.id)) continue;
       let location: RepositoryLocation;
@@ -189,6 +193,11 @@ export class Engine {
         continue;
       }
       if (this.store.claimAutopilot(task.id, location, this.mock, maxParallel, maxPerRepository, now)) capacity--;
+    }
+    if (!candidates.length && this.store.getWebhookSettings().webhookUrl) {
+      const attempts = this.store.autopilotAttempts(state.startedAt);
+      const event = autopilotQueueEmpty({ ...state, pool: [], attempts }, attempts.map(run => this.store.getTask(run.taskId)));
+      if (event && event.key !== this.emptyQueueKey) { this.emptyQueueKey = event.key; this.store.notifyAutopilotQueueEmpty(event); }
     }
   }
   private locate(cwd: string, now: number): RepositoryLocation {

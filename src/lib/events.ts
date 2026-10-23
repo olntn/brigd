@@ -12,6 +12,7 @@ const RETRY_MAX_MS = 15_000;
 /** Returning `false` (or a promise of it) means the subscriber was busy and wants another try shortly. */
 export type Reload = () => unknown;
 interface Subscriber {
+  background?: () => boolean;
   scopes: ReadonlySet<ChangeScope>;
   reload: Reload;
   timer?: ReturnType<typeof setTimeout>;
@@ -30,8 +31,8 @@ let seen: ReadyEvent | null = null;
 /** Calls `reload` shortly after the server reports a change in one of `scopes`, after a reconnect that may have missed
  * changes, once the service turns out to be unreachable, when the tab becomes visible again, and every FALLBACK_INTERVAL_MS.
  * Returns the unsubscribe function. */
-export function subscribe(scopes: readonly ChangeScope[], reload: Reload): () => void {
-  const subscriber: Subscriber = { scopes: new Set(scopes), reload, running: false, dirty: false, last: -Infinity };
+export function subscribe(scopes: readonly ChangeScope[], reload: Reload, background?: () => boolean): () => void {
+  const subscriber: Subscriber = { scopes: new Set(scopes), reload, background, running: false, dirty: false, last: -Infinity };
   subscribers.add(subscriber);
   if (subscribers.size === 1) start();
   return () => {
@@ -63,10 +64,10 @@ async function run(subscriber: Subscriber) {
   else if (subscriber.dirty) schedule(subscriber);
 }
 
-/** `null` reloads every subscriber. A hidden tab skips the work: it reloads everything when it becomes visible. */
+/** `null` reloads every subscriber. Hidden tabs refresh only subscribers with notifications enabled. */
 function notify(scopes: readonly ChangeScope[] | null) {
-  if (document.visibilityState === 'hidden') return;
   for (const subscriber of subscribers) {
+    if (document.visibilityState === 'hidden' && !subscriber.background?.()) continue;
     if (!scopes || scopes.some(scope => subscriber.scopes.has(scope))) schedule(subscriber);
   }
 }

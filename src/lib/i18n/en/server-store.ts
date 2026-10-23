@@ -2,6 +2,9 @@ import type { Dictionary, Pattern } from './types';
 
 /** Fixed server messages. */
 export const messages: Dictionary = {
+  'Укажите поддерживаемые поля общих настроек': 'Specify supported general settings fields',
+  'URL webhook: укажите http:// или https:// без учётных данных': 'Webhook URL: use http:// or https:// without credentials',
+  'Секрет webhook: не больше 4096 символов': 'Webhook secret: at most 4096 characters',
   // Settings and validation.
   'Некорректная модель': 'Invalid model',
   'Некорректное описание': 'Invalid description',

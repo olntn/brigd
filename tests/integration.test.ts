@@ -47,6 +47,29 @@ async function settled(run: Run) {
   return store.integrationForRun(run.id)!;
 }
 
+test.each(['merged', 'failed'] as const)('webhook reports a %s integration once with metadata only', async status => {
+  const events: Record<string, unknown>[] = [];
+  const receiver = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
+    events.push(await request.json() as Record<string, unknown>);
+    return new Response(null, { status: 204 });
+  } });
+  try {
+    if (status === 'failed') await configure([command('process.exit(7)')]);
+    store.updateGeneralSettings({ webhookUrl: `http://127.0.0.1:${receiver.port}/events` });
+    const run = await start();
+    complete(run);
+    const integration = await settled(run);
+    await store.notifications.idle();
+    expect(integration.status).toBe(status);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ event: status === 'merged' ? 'task.merged' : 'merge_failed', taskId: run.taskId, title: 'Isolated work', status: status === 'merged' ? 'completed' : 'merge_failed' });
+    expect(Object.keys(events[0]!).sort()).toEqual(['at', 'event', 'status', 'taskId', 'title', 'worker']);
+    store.noteIntegration(integration.id, integration.attempt, 'Additional internal details');
+    await store.notifications.idle();
+    expect(events).toHaveLength(1);
+  } finally { receiver.stop(true); }
+});
+
 test('combined candidate is checked before a clean target receives the saved result, excluding task artifacts', async () => {
   const marker = join(folder, 'checked');
   await configure([command(`const fs = require('node:fs'); if (fs.readFileSync('src/value.txt','utf8') !== 'worker result\\n' || fs.readFileSync('external.txt','utf8') !== 'external') process.exit(9); fs.writeFileSync(${JSON.stringify(marker)}, 'passed');`)]);

@@ -1,6 +1,32 @@
 import type { Dictionary } from './types';
 
 const dictionary: Dictionary = {
+  "Уведомления": "Notifications",
+  "Выбор сохраняется в этом браузере. Уведомления работают, пока открыта хотя бы одна вкладка brigd.": "Preferences are saved in this browser. Notifications work while at least one brigd tab is open.",
+  "Уведомления в браузере": "Browser notifications",
+  "Разрешение: получено": "Permission: granted",
+  "Разрешение: запрещено в настройках браузера": "Permission: blocked in browser settings",
+  "Браузер не поддерживает уведомления в этом контексте": "This browser does not support notifications in this context",
+  "Разрешение: ещё не запрошено": "Permission: not requested yet",
+  "Звук": "Sound",
+  "Звук доступен после первого взаимодействия с этой вкладкой.": "Sound is available after your first interaction with this tab.",
+  "Вопросы агента": "Agent questions",
+  "Ошибки, блокировки и прерывания запусков": "Failed, blocked and interrupted runs",
+  "Слияние требует внимания": "Merge needs attention",
+  "Остановка автопилота и конец очереди": "Autopilot stops and queue completion",
+  "Задача завершена и слита": "Task completed and merged",
+  "Браузер не смог сохранить настройки уведомлений.": "The browser could not save notification preferences.",
+  "Запуск требует внимания": "Run needs attention",
+  "Очередь автопилота закончилась": "Autopilot queue completed",
+  "Автопилот остановлен по времени": "Autopilot reached its stop time",
+  "Автопилот остановлен перезапуском": "Autopilot stopped after a restart",
+  "Автопилот выключен предохранителем": "Autopilot circuit breaker triggered",
+  "Webhook": "Webhook",
+  "URL webhook": "Webhook URL",
+  "Секрет": "Secret",
+  "Сервер отправляет события на этот адрес независимо от вкладок браузера. Пустой URL отключает отправку.": "The server sends events to this address independently of browser tabs. An empty URL disables delivery.",
+  "Необязателен. Подписывает тело запроса HMAC-SHA256 в заголовке X-Brigd-Signature.": "Optional. Signs the request body with HMAC-SHA256 in the X-Brigd-Signature header.",
+
   // Shared by the settings panels.
   'Повторить загрузку настроек': 'Reload settings',
   'Дождитесь ответа сервера, прежде чем закрывать настройки.': 'Wait for the server to respond before closing the settings.',
