@@ -4,6 +4,7 @@
   import { AUTOPILOT_FAILURE_LIMIT, AUTOPILOT_STOP_REASONS, defaultAutopilotUntil } from './autopilot';
   import { TASK_STATUS_LABELS } from './status';
   import { DEFAULT_TASK_PRIORITY, TASK_PRIORITIES, TASK_PRIORITY_LABELS } from './priority';
+  import { formatDate, serverText, t } from './i18n';
   import type { AutopilotInput, AutopilotOverview, AutopilotSettings, Run, Task, TaskStatus } from './types';
 
   let { tasks, settings, checksRequired, notify, onopen, onchanged, onsettings, onstatus }: {
@@ -51,33 +52,38 @@
   // Hoisted declarations: the state initializer above runs before any const below is defined.
   function pad(value: number) { return String(value).padStart(2, '0'); }
   function toInput(date: Date) { return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`; }
-  const dateTime = (timestamp: number | null) => timestamp === null ? '—' : new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(timestamp);
+  const dateTime = (timestamp: number | null) => timestamp === null ? '—' : formatDate(timestamp, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const shortPath = (path: string) => { const parts = path.replace(/\\/g, '/').split('/').filter(Boolean); return parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : path; };
   const taskOf = (run: Run) => tasks.find(task => task.id === run.taskId) ?? null;
   const priorityRank = (task: Task) => TASK_PRIORITIES.indexOf(task.priority);
   /** Pool tasks of the same priority: a task moves only among them. */
   const samePriority = (task: Task) => (overview?.pool ?? []).filter(item => item.priority === task.priority);
-  const openLabel = (task: Task) => `Открыть: ${task.title}${task.priority === DEFAULT_TASK_PRIORITY ? '' : `, приоритет ${TASK_PRIORITY_LABELS[task.priority].toLowerCase()}`}`;
+  const openLabel = (task: Task) => task.priority === DEFAULT_TASK_PRIORITY ? t('Открыть: {title}', { title: task.title })
+    : t('Открыть: {title}, приоритет {priority}', { title: task.title, priority: t(TASK_PRIORITY_LABELS[task.priority]).toLowerCase() });
   /** The task's current status covers the merge and the integrator; the run alone is the fallback for a deleted task. */
   const outcome = (run: Run): TaskStatus => taskOf(run)?.status ?? run.status;
   const message = (failure: unknown) => failure instanceof TypeError
-    ? 'Нет связи с сервером. Проверьте подключение и повторите попытку.'
-    : failure instanceof Error ? failure.message : 'Не удалось сохранить изменения. Попробуйте ещё раз.';
+    ? t('Нет связи с сервером. Проверьте подключение и повторите попытку.')
+    : failure instanceof Error ? failure.message : t('Не удалось сохранить изменения. Попробуйте ещё раз.');
 
   function statusLine(state: AutopilotOverview): string {
     if (state.enabled) {
-      const window = state.until !== null ? `до ${dateTime(state.until)}` : 'без ограничения по времени';
-      return `Работает ${window}, с ${dateTime(state.startedAt)}.${state.failures ? ` Ошибок подряд: ${state.failures} из ${AUTOPILOT_FAILURE_LIMIT}.` : ''}`;
+      const running = state.until !== null
+        ? t('Работает до {until}, с {since}.', { until: dateTime(state.until), since: dateTime(state.startedAt) })
+        : t('Работает без ограничения по времени, с {since}.', { since: dateTime(state.startedAt) });
+      return state.failures ? `${running} ${t('Ошибок подряд: {count} из {limit}.', { count: state.failures, limit: AUTOPILOT_FAILURE_LIMIT })}` : running;
     }
-    if (state.stoppedAt !== null && state.stopReason) return `Остановлен ${dateTime(state.stoppedAt)}: ${AUTOPILOT_STOP_REASONS[state.stopReason]}.`;
-    return 'Включите перед уходом: задачи из очереди будут запускаться в пределах лимитов из настроек «Параллельность», а результаты по одному проходить проверку и слияние.';
+    if (state.stoppedAt !== null && state.stopReason) {
+      return t('Остановлен {time}: {reason}.', { time: dateTime(state.stoppedAt), reason: t(AUTOPILOT_STOP_REASONS[state.stopReason], { limit: AUTOPILOT_FAILURE_LIMIT }) });
+    }
+    return t('Включите перед уходом: задачи из очереди будут запускаться в пределах лимитов из настроек «Параллельность», а результаты по одному проходить проверку и слияние.');
   }
 
   async function request<T>(path: string, options?: RequestInit): Promise<T> {
     const response = await fetch(path, { ...options, headers: options?.method ? { 'Content-Type': 'application/json', ...options.headers } : options?.headers });
     let result;
-    try { result = await response.json(); } catch { throw new Error('Сервер вернул неожиданный ответ. Попробуйте ещё раз.'); }
-    if (!response.ok) throw new Error(result.error || `Ошибка запроса (${response.status})`);
+    try { result = await response.json(); } catch { throw new Error(t('Сервер вернул неожиданный ответ. Попробуйте ещё раз.')); }
+    if (!response.ok) throw new Error(result.error ? serverText(result.error) : t('Ошибка запроса ({status})', { status: response.status }));
     return result as T;
   }
 
@@ -129,14 +135,14 @@
 
   function enable(event: SubmitEvent) {
     event.preventDefault();
-    if (!checksConfigured) { formError = 'Сначала задайте BRIGD_INTEGRATION_CHECKS в настройках автопилота.'; return; }
+    if (!checksConfigured) { formError = t('Сначала задайте BRIGD_INTEGRATION_CHECKS в настройках автопилота.'); return; }
     let until: number | null = null;
     if (limited) {
       until = untilInput ? new Date(untilInput).getTime() : Number.NaN;
-      if (!Number.isFinite(until)) { formError = 'Укажите время остановки или снимите ограничение.'; return; }
-      if (until <= Date.now()) { formError = 'Время остановки уже прошло.'; return; }
+      if (!Number.isFinite(until)) { formError = t('Укажите время остановки или снимите ограничение.'); return; }
+      if (until <= Date.now()) { formError = t('Время остановки уже прошло.'); return; }
     }
-    void save({ enabled: true, until }, overview?.enabled ? 'Время остановки обновлено' : 'Автопилот включён');
+    void save({ enabled: true, until }, overview?.enabled ? t('Время остановки обновлено') : t('Автопилот включён'));
   }
 
   async function setPaused(task: Task, paused: boolean) {
@@ -147,7 +153,7 @@
       const saved = await request<Task>(`/api/tasks/${encodeURIComponent(task.id)}`, { method: 'PATCH', body: JSON.stringify({ paused }) });
       if (!alive) return;
       onchanged(saved);
-      notify(paused ? 'Задача отложена: автопилот её не возьмёт' : 'Задача возвращена в очередь');
+      notify(paused ? t('Задача отложена: автопилот её не возьмёт') : t('Задача возвращена в очередь'));
       await load(true);
     } catch (failure) { if (alive) notify(message(failure), 'error'); }
     finally { if (alive) pending = null; }
@@ -216,69 +222,69 @@
 </script>
 
 <section class="page-heading">
-  <div><h1 tabindex="-1">Автопилот</h1><p>Разбирает очередь задач, пока вас нет за компьютером: берёт следующую задачу, когда освобождается место, и отправляет результат на проверку и слияние.</p></div>
+  <div><h1 tabindex="-1">{t('Автопилот')}</h1><p>{t('Разбирает очередь задач, пока вас нет за компьютером: берёт следующую задачу, когда освобождается место, и отправляет результат на проверку и слияние.')}</p></div>
 </section>
-{#if error}<div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{error}</span><button onclick={() => { void load(true); }}>Повторить</button></div>{/if}
+{#if error}<div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{error}</span><button onclick={() => { void load(true); }}>{t('Повторить')}</button></div>{/if}
 {#if loading && !overview}
-  <div class="detail-loading" role="status"><Icon name="refresh" class="spin" />Загружаем автопилот…</div>
+  <div class="detail-loading" role="status"><Icon name="refresh" class="spin" />{t('Загружаем автопилот…')}</div>
 {:else if overview}
-  <section class="autopilot-status" class:is-enabled={overview.enabled} aria-label="Состояние автопилота" aria-busy={pending === 'switch'}>
+  <section class="autopilot-status" class:is-enabled={overview.enabled} aria-label={t('Состояние автопилота')} aria-busy={pending === 'switch'}>
     <div class="autopilot-status-main">
       <span class="autopilot-status-icon"><Icon name={overview.enabled ? 'moon' : 'pause'} size={22} /></span>
-      <div><strong>{overview.enabled ? 'Включён' : 'Выключен'}</strong><span>{statusLine(overview)}</span></div>
+      <div><strong>{overview.enabled ? t('Включён') : t('Выключен')}</strong><span>{statusLine(overview)}</span></div>
     </div>
     <form class="autopilot-form" onsubmit={enable}>
-      <label class="autopilot-limit"><input type="checkbox" bind:checked={limited} disabled={!!pending} /><span>Остановить в</span></label>
-      <input type="datetime-local" aria-label="Время остановки" bind:value={untilInput} disabled={!!pending || !limited} />
+      <label class="autopilot-limit"><input type="checkbox" bind:checked={limited} disabled={!!pending} /><span>{t('Остановить в')}</span></label>
+      <input type="datetime-local" aria-label={t('Время остановки')} bind:value={untilInput} disabled={!!pending || !limited} />
       {#if overview.enabled}
-        <button type="submit" class="button secondary" disabled={!!pending || !checksConfigured}><Icon name="check" size={15} />Обновить время</button>
-        <button type="button" class="button secondary danger-hover" disabled={!!pending} onclick={() => { void save({ enabled: false, until: null }, 'Автопилот выключен. Начатые запуски доработают.'); }}><Icon name="stop" size={14} />Выключить автопилот</button>
+        <button type="submit" class="button secondary" disabled={!!pending || !checksConfigured}><Icon name="check" size={15} />{t('Обновить время')}</button>
+        <button type="button" class="button secondary danger-hover" disabled={!!pending} onclick={() => { void save({ enabled: false, until: null }, t('Автопилот выключен. Начатые запуски доработают.')); }}><Icon name="stop" size={14} />{t('Выключить автопилот')}</button>
       {:else}
-        <button type="submit" class="button primary" disabled={!!pending || !checksConfigured}><Icon name={pending === 'switch' ? 'refresh' : 'moon'} size={15} class={pending === 'switch' ? 'spin' : ''} />Включить автопилот</button>
+        <button type="submit" class="button primary" disabled={!!pending || !checksConfigured}><Icon name={pending === 'switch' ? 'refresh' : 'moon'} size={15} class={pending === 'switch' ? 'spin' : ''} />{t('Включить автопилот')}</button>
       {/if}
     </form>
-    {#if !checksConfigured}<p class="autopilot-help autopilot-form-error" role="status">Сначала задайте BRIGD_INTEGRATION_CHECKS: <button type="button" class="inline-link" onclick={() => onsettings('autopilot')}>открыть настройки автопилота</button>. Без команд проверки запуск недоступен.</p>{/if}
+    {#if !checksConfigured}<p class="autopilot-help autopilot-form-error" role="status">{t('Сначала задайте BRIGD_INTEGRATION_CHECKS:')} <button type="button" class="inline-link" onclick={() => onsettings('autopilot')}>{t('открыть настройки автопилота')}</button>. {t('Без команд проверки запуск недоступен.')}</p>{/if}
     {#if formError}<div class="form-error autopilot-form-error" role="alert"><Icon name="alert" size={17} /><span>{formError}</span></div>{/if}
   </section>
 
-  <section class="autopilot-section" aria-label="Очередь автопилота">
-    <h2>Очередь <span class="autopilot-count">{overview.pool.length}</span></h2>
-    <p class="autopilot-help">Задачи с режимом «Автопилот»: первой запускается верхняя. Сначала идут задачи с приоритетом «Критический», затем «Высокий», «Обычный» и «Низкий». Перетащите задачу, чтобы изменить порядок среди задач того же приоритета, или нажимайте ↑ и ↓ на значке перемещения; чтобы поднять задачу выше, повысьте её приоритет в форме задачи. Новые задачи встают в конец своего приоритета. Задача занятого репозитория пропускается, пока он занят. Задача, которую автопилот уже брал в этой сессии, второй раз не запускается.</p>
+  <section class="autopilot-section" aria-label={t('Очередь автопилота')}>
+    <h2>{t('Очередь')} <span class="autopilot-count">{overview.pool.length}</span></h2>
+    <p class="autopilot-help">{t('Задачи с режимом «Автопилот»: первой запускается верхняя. Сначала идут задачи с приоритетом «Критический», затем «Высокий», «Обычный» и «Низкий». Перетащите задачу, чтобы изменить порядок среди задач того же приоритета, или нажимайте ↑ и ↓ на значке перемещения; чтобы поднять задачу выше, повысьте её приоритет в форме задачи. Новые задачи встают в конец своего приоритета. Задача занятого репозитория пропускается, пока он занят. Задача, которую автопилот уже брал в этой сессии, второй раз не запускается.')}</p>
     {#if overview.pool.length}
       <ol class="autopilot-list" bind:this={queueList}>
         {#each overview.pool as task, index (task.id)}
           <li class="autopilot-row autopilot-queue-row" class:dragging={dragId === task.id} class:drop-before={dropTarget?.id === task.id && dropTarget.zone === 'before'} class:drop-after={dropTarget?.id === task.id && dropTarget.zone === 'after'} aria-busy={pending === task.id} draggable={!pending} ondragstart={(event) => dragStart(event, task.id)} ondragend={dragEnd} ondragover={(event) => dragOver(event, task.id)} ondrop={drop}>
-            <button type="button" class="autopilot-handle" data-queue-handle={task.id} aria-label={`Переместить: ${task.title}, место ${index + 1} из ${overview.pool.length}`} aria-keyshortcuts="ArrowUp ArrowDown" title="Перетащите или нажмите ↑ и ↓, чтобы изменить порядок среди задач того же приоритета" onkeydown={(event) => handleKey(event, task)}><Icon name="grip" size={15} /><span class="autopilot-position">{index + 1}</span></button>
-            <button class="autopilot-task" onclick={() => onopen(task)} aria-label={openLabel(task)}><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}<span class="priority-badge priority-{task.priority}">{TASK_PRIORITY_LABELS[task.priority]}</span>{/if}{shortPath(task.cwd)}{#if task.worker}{' · '}{task.worker.name}{/if}</small></button>
-            <span class="status-badge status-{task.status}"><span class="status-dot"></span>{TASK_STATUS_LABELS[task.status]}</span>
-            <button class="button secondary" disabled={!!pending} onclick={() => setPaused(task, true)} aria-label={'Отложить: ' + task.title}><Icon name="pause" size={14} />Отложить</button>
+            <button type="button" class="autopilot-handle" data-queue-handle={task.id} aria-label={t('Переместить: {title}, место {position} из {total}', { title: task.title, position: index + 1, total: overview.pool.length })} aria-keyshortcuts="ArrowUp ArrowDown" title={t('Перетащите или нажмите ↑ и ↓, чтобы изменить порядок среди задач того же приоритета')} onkeydown={(event) => handleKey(event, task)}><Icon name="grip" size={15} /><span class="autopilot-position">{index + 1}</span></button>
+            <button class="autopilot-task" onclick={() => onopen(task)} aria-label={openLabel(task)}><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}<span class="priority-badge priority-{task.priority}">{t(TASK_PRIORITY_LABELS[task.priority])}</span>{/if}{shortPath(task.cwd)}{#if task.worker}{' · '}{task.worker.name}{/if}</small></button>
+            <span class="status-badge status-{task.status}"><span class="status-dot"></span>{t(TASK_STATUS_LABELS[task.status])}</span>
+            <button class="button secondary" disabled={!!pending} onclick={() => setPaused(task, true)} aria-label={t('Отложить: {title}', { title: task.title })}><Icon name="pause" size={14} />{t('Отложить')}</button>
           </li>
         {/each}
       </ol>
     {:else}
-      <div class="no-results autopilot-empty"><span class="empty-icon"><Icon name="inbox" size={27} /></span><h3>Очередь пуста</h3><p>В форме задачи выберите «Автопилот» в разделе «Когда запускать», и задача появится здесь.</p></div>
+      <div class="no-results autopilot-empty"><span class="empty-icon"><Icon name="inbox" size={27} /></span><h3>{t('Очередь пуста')}</h3><p>{t('В форме задачи выберите «Автопилот» в разделе «Когда запускать», и задача появится здесь.')}</p></div>
     {/if}
     {#if deferred.length}
-      <h3 class="autopilot-subheading">Отложены</h3>
+      <h3 class="autopilot-subheading">{t('Отложены')}</h3>
       <ul class="autopilot-list">
         {#each deferred as task (task.id)}
           <li class="autopilot-row" aria-busy={pending === task.id}>
             <span class="autopilot-position"><Icon name="pause" size={13} /></span>
-            <button class="autopilot-task" onclick={() => onopen(task)} aria-label={openLabel(task)}><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}<span class="priority-badge priority-{task.priority}">{TASK_PRIORITY_LABELS[task.priority]}</span>{/if}{shortPath(task.cwd)}{#if task.worker}{' · '}{task.worker.name}{/if}</small></button>
-            <span class="status-badge status-{task.status}"><span class="status-dot"></span>{TASK_STATUS_LABELS[task.status]}</span>
-            <button class="button secondary" disabled={!!pending} onclick={() => setPaused(task, false)} aria-label={'Вернуть в очередь: ' + task.title}><Icon name="play" size={14} />Вернуть в очередь</button>
+            <button class="autopilot-task" onclick={() => onopen(task)} aria-label={openLabel(task)}><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}<span class="priority-badge priority-{task.priority}">{t(TASK_PRIORITY_LABELS[task.priority])}</span>{/if}{shortPath(task.cwd)}{#if task.worker}{' · '}{task.worker.name}{/if}</small></button>
+            <span class="status-badge status-{task.status}"><span class="status-dot"></span>{t(TASK_STATUS_LABELS[task.status])}</span>
+            <button class="button secondary" disabled={!!pending} onclick={() => setPaused(task, false)} aria-label={t('Вернуть в очередь: {title}', { title: task.title })}><Icon name="play" size={14} />{t('Вернуть в очередь')}</button>
           </li>
         {/each}
       </ul>
     {/if}
   </section>
 
-  <section class="autopilot-section" aria-label="Итоги сессии автопилота">
-    <h2>Итоги сессии</h2>
+  <section class="autopilot-section" aria-label={t('Итоги сессии автопилота')}>
+    <h2>{t('Итоги сессии')}</h2>
     {#if overview.startedAt === null}
-      <p class="autopilot-help">Автопилот ещё не включали. После первой сессии здесь будет список взятых задач и их результаты.</p>
+      <p class="autopilot-help">{t('Автопилот ещё не включали. После первой сессии здесь будет список взятых задач и их результаты.')}</p>
     {:else}
-      <p class="autopilot-help">С {dateTime(overview.startedAt)}{#if overview.stoppedAt !== null} по {dateTime(overview.stoppedAt)}{/if}. Готово: {summary.done} · Ждут ответа: {summary.waiting} · Ошибки и блокировки: {summary.failed} · Проблемы слияния: {summary.merge} · В работе: {summary.active}.{#if archivedAttempts} Задачи из архива не показаны: {archivedAttempts}.{/if}</p>
+      <p class="autopilot-help">{overview.stoppedAt !== null ? t('С {start} по {end}.', { start: dateTime(overview.startedAt), end: dateTime(overview.stoppedAt) }) : t('С {start}.', { start: dateTime(overview.startedAt) })} {t('Готово: {done} · Ждут ответа: {waiting} · Ошибки и блокировки: {failed} · Проблемы слияния: {merge} · В работе: {active}.', { done: summary.done, waiting: summary.waiting, failed: summary.failed, merge: summary.merge, active: summary.active })}{#if archivedAttempts} {t('Задачи из архива не показаны: {count}.', { count: archivedAttempts })}{/if}</p>
       {#if attempts.length}
         <ul class="autopilot-list">
           {#each attempts as run (run.id)}
@@ -287,30 +293,30 @@
             <li class="autopilot-row">
               <span class="autopilot-position"><Icon name="play" size={13} /></span>
               {#if task}
-                <button class="autopilot-task" onclick={() => onopen(task)} aria-label={'Открыть: ' + task.title}><strong>{task.title}</strong><small>Запуск {dateTime(run.startedAt)}{#if run.summary}{' · '}{run.summary}{:else if run.error}{' · '}{run.error}{/if}</small></button>
+                <button class="autopilot-task" onclick={() => onopen(task)} aria-label={t('Открыть: {title}', { title: task.title })}><strong>{task.title}</strong><small>{t('Запуск {time}', { time: dateTime(run.startedAt) })}{#if run.summary}{' · '}{run.summary}{:else if run.error}{' · '}{serverText(run.error)}{/if}</small></button>
               {:else}
-                <span class="autopilot-task"><strong>Задача недоступна</strong><small>Запуск {dateTime(run.startedAt)}</small></span>
+                <span class="autopilot-task"><strong>{t('Задача недоступна')}</strong><small>{t('Запуск {time}', { time: dateTime(run.startedAt) })}</small></span>
               {/if}
-              <span class="status-badge status-{status}"><span class="status-dot"></span>{TASK_STATUS_LABELS[status]}</span>
+              <span class="status-badge status-{status}"><span class="status-dot"></span>{t(TASK_STATUS_LABELS[status])}</span>
               <span></span>
             </li>
           {/each}
         </ul>
       {:else if !archivedAttempts}
-        <p class="autopilot-help">Автопилот пока не взял ни одной задачи в этой сессии.</p>
+        <p class="autopilot-help">{t('Автопилот пока не взял ни одной задачи в этой сессии.')}</p>
       {/if}
     {/if}
   </section>
 
-  <section class="autopilot-section" aria-label="Перед ночной сессией">
-    <h2>Перед тем как уйти</h2>
+  <section class="autopilot-section" aria-label={t('Перед ночной сессией')}>
+    <h2>{t('Перед тем как уйти')}</h2>
     <ul class="autopilot-checklist">
-      <li><strong>Разрешения CLI.</strong> Полный доступ Codex и Claude Code включён по умолчанию: подтверждения и песочницы CLI отключены. Если выбрали ограниченный режим, заранее настройте правила Claude Code и учтите песочницу Codex. Общий переключатель и инструкция — в <button type="button" class="inline-link" aria-label="Открыть раздел Разрешения" onclick={() => onsettings('permissions')}>настройках, раздел «Разрешения»</button>.</li>
-      <li><strong>Чистая целевая ветка.</strong> Если ветка открыта в рабочей папке, перенос результата требует чистого состояния Git. Закоммитьте или уберите незакоммиченные правки.</li>
-      <li><strong>Команды проверки.</strong> Задайте BRIGD_INTEGRATION_CHECKS в <button type="button" class="inline-link" onclick={() => onsettings('autopilot')}>настройках автопилота</button>. В рабочем режиме без этой настройки автопилот и зависимые процессы недоступны.</li>
-      <li><strong>Компьютер не должен уснуть.</strong> Очередь разбирается, только пока запущен сервер brigd.</li>
-      <li><strong>Вопросы ждут до утра.</strong> Задача со статусом «Нужен ответ» остаётся занятой, автопилот переходит к следующей. Общая инструкция «принимай разумные решения вместо вопросов» уменьшит число таких остановок.</li>
-      <li><strong>Предохранитель.</strong> После {AUTOPILOT_FAILURE_LIMIT} ошибок или блокировок подряд автопилот выключается сам, чтобы не прогнать всю очередь впустую. Перезапуск сервиса тоже выключает его.</li>
+      <li><strong>{t('Разрешения CLI.')}</strong> {t('Полный доступ Codex и Claude Code включён по умолчанию: подтверждения и песочницы CLI отключены. Если выбрали ограниченный режим, заранее настройте правила Claude Code и учтите песочницу Codex.')} {t('Общий переключатель и инструкция — в')} <button type="button" class="inline-link" aria-label={t('Открыть раздел Разрешения')} onclick={() => onsettings('permissions')}>{t('настройках, раздел «Разрешения»')}</button>.</li>
+      <li><strong>{t('Чистая целевая ветка.')}</strong> {t('Если ветка открыта в рабочей папке, перенос результата требует чистого состояния Git. Закоммитьте или уберите незакоммиченные правки.')}</li>
+      <li><strong>{t('Команды проверки.')}</strong> {t('Задайте BRIGD_INTEGRATION_CHECKS в')} <button type="button" class="inline-link" onclick={() => onsettings('autopilot')}>{t('настройках автопилота')}</button>. {t('В рабочем режиме без этой настройки автопилот и зависимые процессы недоступны.')}</li>
+      <li><strong>{t('Компьютер не должен уснуть.')}</strong> {t('Очередь разбирается, только пока запущен сервер brigd.')}</li>
+      <li><strong>{t('Вопросы ждут до утра.')}</strong> {t('Задача со статусом «Нужен ответ» остаётся занятой, автопилот переходит к следующей. Общая инструкция «принимай разумные решения вместо вопросов» уменьшит число таких остановок.')}</li>
+      <li><strong>{t('Предохранитель.')}</strong> {t('После {limit} ошибок или блокировок подряд автопилот выключается сам, чтобы не прогнать всю очередь впустую. Перезапуск сервиса тоже выключает его.', { limit: AUTOPILOT_FAILURE_LIMIT })}</li>
     </ul>
   </section>
 {/if}

@@ -1,27 +1,27 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
   import Icon from './Icon.svelte';
-  import { formatBytes, plural } from './format';
+  import { formatDate, formatNumber, formatSize, plural, serverText, t, tk } from './i18n';
   import type { StorageCleanupResult, StorageEntry, StorageOverview, StorageReason } from './types';
 
   let { active, busy = $bindable(false) }: { active: boolean; busy?: boolean } = $props();
   const reasonLabels: Record<StorageReason, string> = {
-    active: 'Запуск выполняется, ожидает очереди или ответа', interrupted: 'Запуск или слияние прерваны', conflict: 'Конфликт слияния',
-    failed: 'Ошибка запуска или проверки', unmerged: 'Результат ещё не перенесён в целевую ветку', submodules: 'Содержит репозитории подмодулей Git',
-    moved: 'Путь в базе отличается от каталога', foreign: 'Создано не brigd',
-    merged: 'Результат перенесён в целевую ветку', cancelled: 'Запуск отменён', deleted: 'Задача удалена', stale: 'Кандидат слияния устарел', unknown: 'Нет записи в базе brigd',
+    active: tk('Запуск выполняется, ожидает очереди или ответа'), interrupted: tk('Запуск или слияние прерваны'), conflict: tk('Конфликт слияния'),
+    failed: tk('Ошибка запуска или проверки'), unmerged: tk('Результат ещё не перенесён в целевую ветку'), submodules: tk('Содержит репозитории подмодулей Git'),
+    moved: tk('Путь в базе отличается от каталога'), foreign: tk('Создано не brigd'),
+    merged: tk('Результат перенесён в целевую ветку'), cancelled: tk('Запуск отменён'), deleted: tk('Задача удалена'), stale: tk('Кандидат слияния устарел'), unknown: tk('Нет записи в базе brigd'),
   };
   const hints: Partial<Record<StorageReason, string>> = {
-    active: 'Дождитесь завершения или ответьте агенту в карточке задачи.',
-    interrupted: 'Подтвердите в карточке, что прежние процессы остановлены, затем продолжите, повторите или отмените запуск.',
-    conflict: 'Поручите конфликт Интегратору или повторите слияние в карточке задачи.',
-    failed: 'Повторите запуск или проверку в карточке задачи либо отмените запуск. Кандидаты неудачных проверок можно удалить по галочке в подтверждении очистки.',
-    unmerged: 'Нажмите «Повторить проверку и слияние» в карточке задачи или отмените слияние.',
-    submodules: 'Коммиты подмодулей хранятся только здесь. Перенесите их в репозитории подмодулей и удалите папку вручную.',
-    moved: 'Папка записана по другому пути: база перенесена или изменён BRIGD_WORKSPACES_DIR. Проверьте настройку; brigd не трогает такие папки.',
-    foreign: 'Файлы, ссылки и папки, которые создал не brigd, не удаляются и не учитываются в объёме.',
+    active: tk('Дождитесь завершения или ответьте агенту в карточке задачи.'),
+    interrupted: tk('Подтвердите в карточке, что прежние процессы остановлены, затем продолжите, повторите или отмените запуск.'),
+    conflict: tk('Поручите конфликт Интегратору или повторите слияние в карточке задачи.'),
+    failed: tk('Повторите запуск или проверку в карточке задачи либо отмените запуск. Кандидаты неудачных проверок можно удалить по галочке в подтверждении очистки.'),
+    unmerged: tk('Нажмите «Повторить проверку и слияние» в карточке задачи или отмените слияние.'),
+    submodules: tk('Коммиты подмодулей хранятся только здесь. Перенесите их в репозитории подмодулей и удалите папку вручную.'),
+    moved: tk('Папка записана по другому пути: база перенесена или изменён BRIGD_WORKSPACES_DIR. Проверьте настройку; brigd не трогает такие папки.'),
+    foreign: tk('Файлы, ссылки и папки, которые создал не brigd, не удаляются и не учитываются в объёме.'),
   };
-  const kindLabels = { worktree: 'worktree', candidate: 'кандидат слияния', unknown: 'папка' } as const;
+  const kindLabels = { worktree: tk('worktree'), candidate: tk('кандидат слияния'), unknown: tk('папка') } as const;
   let overview = $state<StorageOverview | null>(null);
   let loading = $state(true);
   let loadError = $state('');
@@ -43,15 +43,15 @@
   onDestroy(() => { readController?.abort(); });
 
   function message(error: unknown, fallback: string) {
-    return error instanceof TypeError ? 'Нет связи с сервером. Проверьте подключение и повторите попытку.'
+    return error instanceof TypeError ? t('Нет связи с сервером. Проверьте подключение и повторите попытку.')
       : error instanceof Error ? error.message : fallback;
   }
   async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     const response = await fetch(path, options);
     let body;
     try { body = await response.json(); }
-    catch { throw new Error('Сервер вернул неожиданный ответ. Попробуйте ещё раз.'); }
-    if (!response.ok) throw new Error(body.error || `Ошибка запроса (${response.status})`);
+    catch { throw new Error(t('Сервер вернул неожиданный ответ. Попробуйте ещё раз.')); }
+    if (!response.ok) throw new Error(body.error ? serverText(body.error) : t('Ошибка запроса ({status})', { status: response.status }));
     return body as T;
   }
   async function load() {
@@ -68,7 +68,7 @@
       if (controller.signal.aborted) return;
       overview = next;
     } catch (error) {
-      if (!controller.signal.aborted) loadError = message(error, 'Не удалось подсчитать занятое место. Попробуйте ещё раз.');
+      if (!controller.signal.aborted) loadError = message(error, t('Не удалось подсчитать занятое место. Попробуйте ещё раз.'));
     } finally {
       if (readController === controller) { loading = false; readController = null; }
     }
@@ -103,20 +103,20 @@
         outcome.removed ? `${plural(outcome.removed, 'Удалена', 'Удалены', 'Удалено')} ${count(outcome.removed)}.` : '',
         outcome.removedBranches ? `${plural(outcome.removedBranches, 'Удалена', 'Удалены', 'Удалено')} ${branchCount(outcome.removedBranches)}.` : '',
       ].filter(Boolean);
-      status = removed.length ? `${removed.join(' ')} Освобождено ${formatBytes(outcome.freedBytes)}.`
-        : outcome.failures.length ? '' : 'Нечего удалять: все папки и ветки ещё нужны.';
-      if (outcome.failures.length) actionError = `Не удалось удалить: ${outcome.failures.map(failure => `${failure.path} — ${failure.error}`).join('; ')}`;
-    } catch (error) { actionError = message(error, 'Не удалось очистить хранилище. Попробуйте ещё раз.'); }
+      status = removed.length ? `${removed.join(' ')} ${t('Освобождено {size}.', { size: formatSize(outcome.freedBytes) })}`
+        : outcome.failures.length ? '' : t('Нечего удалять: все папки и ветки ещё нужны.');
+      if (outcome.failures.length) actionError = t('Не удалось удалить: {items}', { items: outcome.failures.map(failure => `${failure.path} — ${serverText(failure.error)}`).join('; ') });
+    } catch (error) { actionError = message(error, t('Не удалось очистить хранилище. Попробуйте ещё раз.')); }
     finally { busy = false; }
     await tick();
     cleanupButton?.focus();
   }
-  const count = (value: number) => `${value.toLocaleString('ru-RU')} ${plural(value, 'папка', 'папки', 'папок')}`;
-  const accusative = (value: number) => `${value.toLocaleString('ru-RU')} ${plural(value, 'папку', 'папки', 'папок')}`;
-  const branchCount = (value: number) => `${value.toLocaleString('ru-RU')} ${plural(value, 'ветка', 'ветки', 'веток')}`;
-  const accusativeBranches = (value: number) => `${value.toLocaleString('ru-RU')} ${plural(value, 'ветку', 'ветки', 'веток')}`;
+  const count = (value: number) => `${formatNumber(value)} ${plural(value, 'папка', 'папки', 'папок')}`;
+  const accusative = (value: number) => `${formatNumber(value)} ${plural(value, 'папку', 'папки', 'папок')}`;
+  const branchCount = (value: number) => `${formatNumber(value)} ${plural(value, 'ветка', 'ветки', 'веток')}`;
+  const accusativeBranches = (value: number) => `${formatNumber(value)} ${plural(value, 'ветку', 'ветки', 'веток')}`;
   function dateLabel(timestamp: number, includeSeconds = false) {
-    return new Date(timestamp).toLocaleString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', second: includeSeconds ? '2-digit' : undefined });
+    return formatDate(timestamp, { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', second: includeSeconds ? '2-digit' : undefined });
   }
   interface Group { reason: StorageReason; retained: boolean; entries: StorageEntry[]; bytes: number; }
   function grouped(entries: StorageEntry[]): Group[] {
@@ -129,7 +129,7 @@
     return [...groups.values()].sort((left, right) => Number(left.retained) - Number(right.retained) || right.bytes - left.bytes);
   }
   function entryTitle(entry: StorageEntry) {
-    const run = entry.runId ? `Запуск ${entry.runId.slice(0, 8)}${entry.startedAt ? ` · ${dateLabel(entry.startedAt)}` : ''}` : '';
+    const run = entry.runId ? `${t('Запуск {id}', { id: entry.runId.slice(0, 8) })}${entry.startedAt ? ` · ${dateLabel(entry.startedAt)}` : ''}` : '';
     return entry.taskTitle ? `${entry.taskTitle}${run ? ` · ${run}` : ''}` : run || (entry.path.split(/[\\/]/).pop() ?? entry.path);
   }
   const sum = (entries: StorageEntry[]) => entries.reduce((total, entry) => total + entry.bytes, 0);
@@ -140,56 +140,56 @@
   let selectedBytes = $derived(sum(reclaimable) + (includeCandidates ? sum(optional) : 0));
   let selectedCount = $derived(reclaimable.length + (includeCandidates ? optional.length : 0));
   let selectedDescription = $derived(reclaimableBranches.length
-    ? `${selectedCount ? `${accusative(selectedCount)} и ` : ''}${accusativeBranches(reclaimableBranches.length)}`
+    ? selectedCount ? t('{folders} и {branches}', { folders: accusative(selectedCount), branches: accusativeBranches(reclaimableBranches.length) }) : accusativeBranches(reclaimableBranches.length)
     : accusative(selectedCount));
-  let cleanupLabel = $derived(reclaimableBranches.length ? selectedCount ? 'Удалить папки и ветки' : 'Удалить ветки' : 'Удалить папки');
+  let cleanupLabel = $derived(reclaimableBranches.length ? selectedCount ? t('Удалить папки и ветки') : t('Удалить ветки') : t('Удалить папки'));
   let groups = $derived(overview ? grouped(overview.entries) : []);
 </script>
 
 <section class="storage-settings model-settings" aria-labelledby="storage-settings-title" aria-busy={busy || loading}>
-  <div class="model-settings-heading"><Icon name="folder" size={22} /><div><h3 id="storage-settings-title">Хранилище</h3><p>Рабочие папки запусков (Git worktree) и кандидаты слияния. После переноса результата в целевую ветку ненужная папка запуска и его ветка удаляются автоматически. Используемые worktree, папки с подмодулями и ветки с неперенесёнными изменениями сохраняются, как и папки активных, прерванных, конфликтных, завершившихся ошибкой или блокировкой и ещё не перенесённых запусков.</p></div></div>
-  {#if loadError}<div class="model-load-error" role="alert"><span>{loadError}</span><button type="button" class="button secondary" disabled={busy || loading} onclick={() => { void load(); }}>Повторить подсчёт</button></div>{/if}
-  {#if loading}<p class="model-catalog-status" role="status"><Icon name="refresh" class="spin" size={16} /><span>Подсчитываем занятое место…</span></p>{/if}
-  {#if busy}<p class="model-catalog-status" role="status"><Icon name="refresh" class="spin" size={16} /><span>Очищаем хранилище… Дождитесь ответа сервера, прежде чем закрывать настройки.</span></p>{/if}
+  <div class="model-settings-heading"><Icon name="folder" size={22} /><div><h3 id="storage-settings-title">{t('Хранилище')}</h3><p>{t('Рабочие папки запусков (Git worktree) и кандидаты слияния. После переноса результата в целевую ветку ненужная папка запуска и его ветка удаляются автоматически. Используемые worktree, папки с подмодулями и ветки с неперенесёнными изменениями сохраняются, как и папки активных, прерванных, конфликтных, завершившихся ошибкой или блокировкой и ещё не перенесённых запусков.')}</p></div></div>
+  {#if loadError}<div class="model-load-error" role="alert"><span>{loadError}</span><button type="button" class="button secondary" disabled={busy || loading} onclick={() => { void load(); }}>{t('Повторить подсчёт')}</button></div>{/if}
+  {#if loading}<p class="model-catalog-status" role="status"><Icon name="refresh" class="spin" size={16} /><span>{t('Подсчитываем занятое место…')}</span></p>{/if}
+  {#if busy}<p class="model-catalog-status" role="status"><Icon name="refresh" class="spin" size={16} /><span>{t('Очищаем хранилище… Дождитесь ответа сервера, прежде чем закрывать настройки.')}</span></p>{/if}
   {#if status}<p class="model-catalog-status success" role="status"><Icon name="check" size={16} /><span>{status}</span></p>{/if}
   {#if actionError}<div class="form-error storage-action-error" role="alert"><Icon name="alert" size={17} /><span>{actionError}</span></div>{/if}
   {#if overview && !overview.available}
-    <p class="model-catalog-note">{overview.note ?? 'В этом режиме отдельные worktree не создаются, поэтому очищать нечего. В рабочем режиме здесь показано место, занятое папками запусков.'}{#if overview.root} Каталог: <code>{overview.root}</code>.{/if}</p>
+    <p class="model-catalog-note">{overview.note != null ? serverText(overview.note) : t('В этом режиме отдельные worktree не создаются, поэтому очищать нечего. В рабочем режиме здесь показано место, занятое папками запусков.')}{#if overview.root} {t('Каталог:')} <code>{overview.root}</code>.{/if}</p>
   {:else if overview}
-    <dl class="storage-summary" aria-label="Занятое место">
-      <div><dt>Занято</dt><dd>{formatBytes(overview.totalBytes)}</dd></div>
-      <div><dt>Можно освободить</dt><dd>{formatBytes(overview.reclaimableBytes)}</dd></div>
-      <div><dt>Ещё нужно</dt><dd>{formatBytes(overview.retainedBytes)}</dd></div>
+    <dl class="storage-summary" aria-label={t('Занятое место')}>
+      <div><dt>{t('Занято')}</dt><dd>{formatSize(overview.totalBytes)}</dd></div>
+      <div><dt>{t('Можно освободить')}</dt><dd>{formatSize(overview.reclaimableBytes)}</dd></div>
+      <div><dt>{t('Ещё нужно')}</dt><dd>{formatSize(overview.retainedBytes)}</dd></div>
     </dl>
-    <p class="model-catalog-note storage-root">Каталог: <code>{overview.root}</code>{#if overview.scannedAt} · подсчитано {dateLabel(overview.scannedAt, true)}{/if}</p>
+    <p class="model-catalog-note storage-root">{t('Каталог:')} <code>{overview.root}</code>{#if overview.scannedAt} · {t('подсчитано {date}', { date: dateLabel(overview.scannedAt, true) })}{/if}</p>
     <div class="backup-toolbar storage-toolbar">
-      <button bind:this={cleanupButton} type="button" class="button secondary danger-hover" disabled={busy || loading || !selectable.length && !reclaimableBranches.length || confirming} onclick={confirmCleanup}><Icon name="trash" size={16} />Очистить</button>
-      <button type="button" class="button secondary" disabled={busy || loading} onclick={() => { void load(); }}><Icon name="refresh" size={16} />Пересчитать</button>
+      <button bind:this={cleanupButton} type="button" class="button secondary danger-hover" disabled={busy || loading || !selectable.length && !reclaimableBranches.length || confirming} onclick={confirmCleanup}><Icon name="trash" size={16} />{t('Очистить')}</button>
+      <button type="button" class="button secondary" disabled={busy || loading} onclick={() => { void load(); }}><Icon name="refresh" size={16} />{t('Пересчитать')}</button>
     </div>
     {#if confirming}
       <div class="model-delete-confirm storage-confirm">
-        <p>Удалить {selectedDescription} и освободить {formatBytes(selectedBytes)}? Папки отменённых запусков и уже перенесённых результатов, устаревшие кандидаты слияния и папки запусков без записи в базе будут удалены без возможности восстановления. Незакоммиченная работа отменённых запусков будет потеряна. Ветки <code>brigd/run-…</code> удаляются только для уже перенесённых результатов, если они не изменились после переноса и больше нигде не используются. Остальные ветки и история задач останутся. Папки активных, прерванных, конфликтных, завершившихся ошибкой или блокировкой и ещё не перенесённых запусков не трогаются.</p>
-        {#if optional.length}<label class="storage-option"><input type="checkbox" bind:checked={includeCandidates} disabled={busy} /><span>Также удалить кандидаты неудачных проверок и заблокированных переносов ({count(optional.length)}, {formatBytes(sum(optional))}). Папки самих запусков останутся для повтора.</span></label>{/if}
-        <div class="model-catalog-actions"><button type="button" class="button secondary" disabled={busy} onclick={cancelCleanup}>Отмена очистки</button><button bind:this={confirmButton} type="button" class="button danger" disabled={busy || loading || !selectedCount && !reclaimableBranches.length} onclick={cleanup}>{busy ? 'Удаляем…' : cleanupLabel}</button></div>
+        <p>{t('Удалить {items} и освободить {size}?', { items: selectedDescription, size: formatSize(selectedBytes) })} {t('Папки отменённых запусков и уже перенесённых результатов, устаревшие кандидаты слияния и папки запусков без записи в базе будут удалены без возможности восстановления. Незакоммиченная работа отменённых запусков будет потеряна.')} {t('Ветки')} <code>brigd/run-…</code> {t('удаляются только для уже перенесённых результатов, если они не изменились после переноса и больше нигде не используются.')} {t('Остальные ветки и история задач останутся. Папки активных, прерванных, конфликтных, завершившихся ошибкой или блокировкой и ещё не перенесённых запусков не трогаются.')}</p>
+        {#if optional.length}<label class="storage-option"><input type="checkbox" bind:checked={includeCandidates} disabled={busy} /><span>{t('Также удалить кандидаты неудачных проверок и заблокированных переносов ({count}, {size}). Папки самих запусков останутся для повтора.', { count: count(optional.length), size: formatSize(sum(optional)) })}</span></label>{/if}
+        <div class="model-catalog-actions"><button type="button" class="button secondary" disabled={busy} onclick={cancelCleanup}>{t('Отмена очистки')}</button><button bind:this={confirmButton} type="button" class="button danger" disabled={busy || loading || !selectedCount && !reclaimableBranches.length} onclick={cleanup}>{busy ? t('Удаляем…') : cleanupLabel}</button></div>
       </div>
     {/if}
-    {#if !overview.entries.length}<p class="model-catalog-empty storage-empty">Рабочих папок в этом каталоге нет.</p>{/if}
+    {#if !overview.entries.length}<p class="model-catalog-empty storage-empty">{t('Рабочих папок в этом каталоге нет.')}</p>{/if}
     {#if reclaimableBranches.length}
       <section class="storage-branches" aria-labelledby="storage-branches-title">
-        <h4 id="storage-branches-title">Ветки после слияния</h4>
-        <p>Можно удалить {accusativeBranches(reclaimableBranches.length)}. Их коммиты сохранены в целевых ветках; при продолжении задачи ветка запуска создастся заново. Объём выше относится к рабочим папкам.</p>
+        <h4 id="storage-branches-title">{t('Ветки после слияния')}</h4>
+        <p>{t('Можно удалить {branches}. Их коммиты сохранены в целевых ветках; при продолжении задачи ветка запуска создастся заново. Объём выше относится к рабочим папкам.', { branches: accusativeBranches(reclaimableBranches.length) })}</p>
         <ul>{#each reclaimableBranches as branch}<li><code>{branch}</code></li>{/each}</ul>
       </section>
     {/if}
     {#if groups.length}
-      <ul class="storage-groups" aria-label="Папки по состоянию">
+      <ul class="storage-groups" aria-label={t('Папки по состоянию')}>
         {#each groups as group (group.reason)}
           <li class="storage-group" class:reclaimable={!group.retained}>
-            <div class="storage-group-heading"><Icon name={group.retained ? 'lock' : 'trash'} size={15} /><h4>{reasonLabels[group.reason]}</h4><span class="storage-group-meta">{count(group.entries.length)} · {group.reason === 'foreign' ? 'объём не учитывается' : formatBytes(group.bytes)} · {group.retained ? group.entries.some(entry => entry.optional) ? 'сохраняется, кандидаты — по галочке' : 'сохраняется' : 'будет удалена'}</span></div>
-            {#if hints[group.reason]}<p class="storage-group-hint">{hints[group.reason]}</p>{/if}
+            <div class="storage-group-heading"><Icon name={group.retained ? 'lock' : 'trash'} size={15} /><h4>{t(reasonLabels[group.reason])}</h4><span class="storage-group-meta">{count(group.entries.length)} · {group.reason === 'foreign' ? t('объём не учитывается') : formatSize(group.bytes)} · {group.retained ? group.entries.some(entry => entry.optional) ? t('сохраняется, кандидаты — по галочке') : t('сохраняется') : t('будет удалена')}</span></div>
+            {#if hints[group.reason]}<p class="storage-group-hint">{t(hints[group.reason]!)}</p>{/if}
             <ul class="storage-entries">
               {#each group.entries as entry (entry.path)}
-                <li class="storage-entry"><span class="storage-entry-title">{entryTitle(entry)}</span><span class="storage-entry-meta">{kindLabels[entry.kind]}{#if group.reason !== 'foreign'} · {formatBytes(entry.bytes)}{/if}{#if entry.optional} · удаляется по галочке{/if}</span><code class="storage-entry-path" title={entry.path}>{entry.path}</code></li>
+                <li class="storage-entry"><span class="storage-entry-title">{entryTitle(entry)}</span><span class="storage-entry-meta">{t(kindLabels[entry.kind])}{#if group.reason !== 'foreign'} · {formatSize(entry.bytes)}{/if}{#if entry.optional} · {t('удаляется по галочке')}{/if}</span><code class="storage-entry-path" title={entry.path}>{entry.path}</code></li>
               {/each}
             </ul>
           </li>

@@ -678,6 +678,9 @@ dialog::backdrop { background: var(--overlay); }
 .theme-preview { grid-column: 1 / -1; grid-row: 1; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); height: 34px; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
 .theme-name { grid-column: 1; grid-row: 2; min-width: 0; font-size: .85rem; font-weight: 500; overflow-wrap: anywhere; }
 .settings-warning { color: var(--warning); font-size: .85rem; margin: 18px 0 0; }
+.language-options { margin-top: 18px; }
+.language-option { grid-template-columns: minmax(0, 1fr) auto; }
+.language-option input, .language-option .theme-name { grid-row: 1; }
 .settings-header h2 { min-width: 0; }
 .model-settings { min-width: 0; }
 .model-settings-heading { display: flex; align-items: flex-start; gap: 12px; }

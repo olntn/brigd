@@ -1,4 +1,5 @@
 import MarkdownIt from 'markdown-it';
+import { t } from './i18n';
 
 // Comment bodies are untrusted. Keep raw HTML disabled and retain the parser's
 // default URL validation when customizing how links and images are displayed.
@@ -19,7 +20,7 @@ markdown.renderer.rules.image = (tokens, index, options, env, renderer) => {
   return renderImage(tokens, index, options, env, renderer);
 };
 
-markdown.renderer.rules.table_open = () => '<div class="comment-table" tabindex="0" role="region" aria-label="Таблица в комментарии"><table>\n';
+markdown.renderer.rules.table_open = () => `<div class="comment-table" tabindex="0" role="region" aria-label="${markdown.utils.escapeHtml(t('Таблица в комментарии'))}"><table>\n`;
 markdown.renderer.rules.table_close = () => '</table></div>\n';
 
 export function renderCommentMarkdown(body: string): string {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { AVATAR_SIZE, avatarCropRect, defaultAvatarCrop, drawAvatar, exportAvatar, type AvatarCrop } from './avatar';
+  import { serverText, t } from './i18n';
 
   let { image, crop = $bindable(defaultAvatarCrop()), disabled = false, onpreview, onbusy, onerror }: {
     image: ImageBitmap; crop?: AvatarCrop; disabled?: boolean;
@@ -20,7 +21,7 @@
     onbusy(true);
     try { drawAvatar(canvas, source, selection); }
     catch (error) {
-      onerror(error instanceof Error ? error.message : 'Не удалось подготовить аватар.');
+      onerror(error instanceof Error ? serverText(error.message) : t('Не удалось подготовить аватар.'));
       onbusy(false);
       return;
     }
@@ -31,7 +32,7 @@
       onbusy(false);
     }).catch(error => {
       if (current !== sequence) return;
-      onerror(error instanceof Error ? error.message : 'Не удалось подготовить аватар.');
+      onerror(error instanceof Error ? serverText(error.message) : t('Не удалось подготовить аватар.'));
       onbusy(false);
     });
   });
@@ -56,15 +57,15 @@
 </script>
 
 <fieldset class="avatar-editor" disabled={disabled}>
-  <legend>Размер и область аватара</legend>
+  <legend>{t('Размер и область аватара')}</legend>
   <div class="avatar-editor-layout">
-    <canvas bind:this={canvas} width={AVATAR_SIZE} height={AVATAR_SIZE} aria-label="Предпросмотр области аватара" onpointerdown={startDrag} onpointermove={moveDrag} onpointerup={stopDrag} onpointercancel={stopDrag} onlostpointercapture={stopDrag}>Предпросмотр аватара. Для изменения области используйте ползунки ниже.</canvas>
+    <canvas bind:this={canvas} width={AVATAR_SIZE} height={AVATAR_SIZE} aria-label={t('Предпросмотр области аватара')} onpointerdown={startDrag} onpointermove={moveDrag} onpointerup={stopDrag} onpointercancel={stopDrag} onlostpointercapture={stopDrag}>{t('Предпросмотр аватара. Для изменения области используйте ползунки ниже.')}</canvas>
     <div class="avatar-editor-controls">
-      <label class="form-field"><span>Масштаб <output>{Math.round(crop.zoom * 100)}%</output></span><input aria-label="Масштаб аватара" type="range" min="0.25" max="3" step="0.01" bind:value={crop.zoom} /></label>
-      <label class="form-field"><span>По горизонтали</span><input aria-label="Положение аватара по горизонтали" type="range" min="0" max="1" step="0.01" bind:value={crop.x} disabled={disabled || image.width === rect.size} /></label>
-      <label class="form-field"><span>По вертикали</span><input aria-label="Положение аватара по вертикали" type="range" min="0" max="1" step="0.01" bind:value={crop.y} disabled={disabled || image.height === rect.size} /></label>
-      <button type="button" class="button secondary" onclick={() => crop = defaultAvatarCrop()}>Сбросить кадрирование</button>
+      <label class="form-field"><span>{t('Масштаб')} <output>{Math.round(crop.zoom * 100)}%</output></span><input aria-label={t('Масштаб аватара')} type="range" min="0.25" max="3" step="0.01" bind:value={crop.zoom} /></label>
+      <label class="form-field"><span>{t('По горизонтали')}</span><input aria-label={t('Положение аватара по горизонтали')} type="range" min="0" max="1" step="0.01" bind:value={crop.x} disabled={disabled || image.width === rect.size} /></label>
+      <label class="form-field"><span>{t('По вертикали')}</span><input aria-label={t('Положение аватара по вертикали')} type="range" min="0" max="1" step="0.01" bind:value={crop.y} disabled={disabled || image.height === rect.size} /></label>
+      <button type="button" class="button secondary" onclick={() => crop = defaultAvatarCrop()}>{t('Сбросить кадрирование')}</button>
     </div>
   </div>
-  <p class="worker-image-status">Перетащите изображение или используйте ползунки. Выбранная область сохранится как аватар 256 × 256.</p>
+  <p class="worker-image-status">{t('Перетащите изображение или используйте ползунки. Выбранная область сохранится как аватар 256 × 256.')}</p>
 </fieldset>

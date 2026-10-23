@@ -1,12 +1,14 @@
+import { tk } from './i18n/key';
 import type { Attachment, Comment, TaskDetail, TaskLog } from './types';
 
 export interface ActivityLog extends TaskLog { attachments?: Attachment[]; }
 
-const legacyActions = new Map([
-  ['Agent is working with local tools.', 'Работник использует локальные инструменты'],
-  ['Agent is working on project files.', 'Работник изменяет файлы проекта'],
-  ['Agent is checking an external source.', 'Работник проверяет внешний источник'],
-  ['Mock: simulating an agent turn. No CLI or model is called.', 'Демонстрация работы агента'],
+// Summaries stay Russian like the server's own log entries; the log view translates both.
+const legacyActions = new Map<string, string>([
+  ['Agent is working with local tools.', tk('Работник использует локальные инструменты')],
+  ['Agent is working on project files.', tk('Работник изменяет файлы проекта')],
+  ['Agent is checking an external source.', tk('Работник проверяет внешний источник')],
+  ['Mock: simulating an agent turn. No CLI or model is called.', tk('Демонстрация работы агента')],
 ]);
 const legacyStartup = /^Starting (Codex|Claude Code)( in the saved session)?\. Native CLI permission rules remain active\.$/;
 
@@ -44,8 +46,8 @@ export function taskActivity(detail: TaskDetail | null): { comments: Comment[]; 
     logs.push({
       id: `comment-${entry.id}`, taskId: entry.taskId, runId: entry.runId,
       stepIndex: entry.stepIndex, kind: entry.kind === 'system' ? 'system' : 'legacy',
-      summary: legacyActions.get(entry.body) ?? (legacyStartup.test(entry.body) ? 'Запуск CLI работника' : entry.body),
-      details: entry.kind === 'system' ? [entry.body] : [entry.body, 'Дополнительные детали этого действия не были сохранены.'],
+      summary: legacyActions.get(entry.body) ?? (legacyStartup.test(entry.body) ? tk('Запуск CLI работника') : entry.body),
+      details: entry.kind === 'system' ? [entry.body] : [entry.body, tk('Дополнительные детали этого действия не были сохранены.')],
       createdAt: entry.createdAt, attachments: entry.attachments,
     });
   }

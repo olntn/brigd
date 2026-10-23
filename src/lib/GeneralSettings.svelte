@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
+  import { serverText, t, tk } from './i18n';
   import type { FallbackWorkers, GeneralSettings, Provider, Worker } from './types';
 
   let { settings, loading, error, retry, onchange, onmutation, workers = [], busy = $bindable(false) }: {
@@ -25,8 +26,8 @@
   let applied = '';
   const providerName = (provider: Provider) => provider === 'codex' ? 'Codex' : 'Claude Code';
   const fallbackProviders: { provider: Provider; label: string }[] = [
-    { provider: 'codex', label: 'Если у Codex закончились лимиты' },
-    { provider: 'claude', label: 'Если у Claude Code закончились лимиты' },
+    { provider: 'codex', label: tk('Если у Codex закончились лимиты') },
+    { provider: 'claude', label: tk('Если у Claude Code закончились лимиты') },
   ];
   /** Active workers first; a saved but archived choice keeps its option so the form never silently drops it. */
   function workerOptions(selected: string): Worker[] {
@@ -34,17 +35,17 @@
   }
   function defaultWorkerHint(selected: string): string {
     const worker = workers.find(item => item.id === selected);
-    if (!selected) return 'В новой задаче работник не выбран: укажите его или провайдера в форме.';
-    if (!worker) return 'Работник не найден в списке. Выберите другого или оставьте поле пустым.';
-    if (worker.archived) return `${worker.name} в архиве и не подставляется в новые задачи. Восстановите профиль или выберите другого.`;
-    return `${worker.name} подставляется в поле «Работник» у новых простых задач. Его можно изменить в форме задачи.`;
+    if (!selected) return t('В новой задаче работник не выбран: укажите его или провайдера в форме.');
+    if (!worker) return t('Работник не найден в списке. Выберите другого или оставьте поле пустым.');
+    if (worker.archived) return t('{name} в архиве и не подставляется в новые задачи. Восстановите профиль или выберите другого.', { name: worker.name });
+    return t('{name} подставляется в поле «Работник» у новых простых задач. Его можно изменить в форме задачи.', { name: worker.name });
   }
   function fallbackHint(provider: Provider, selected: string): string {
     const worker = workers.find(item => item.id === selected);
-    if (!worker) return `Запуск останется с ошибкой, пока лимиты ${providerName(provider)} не восстановятся.`;
-    if (worker.archived) return `${worker.name} в архиве: восстановите работника или выберите другого, иначе замена не сработает.`;
-    if (worker.provider === provider) return `${worker.name} тоже использует ${providerName(provider)}: лимиты аккаунта общие, выберите работника другого провайдера.`;
-    return `${worker.name} (${providerName(worker.provider)}) подхватит новую сессию вместо работника ${providerName(provider)}.`;
+    if (!worker) return t('Запуск останется с ошибкой, пока лимиты {provider} не восстановятся.', { provider: providerName(provider) });
+    if (worker.archived) return t('{name} в архиве: восстановите работника или выберите другого, иначе замена не сработает.', { name: worker.name });
+    if (worker.provider === provider) return t('{name} тоже использует {provider}: лимиты аккаунта общие, выберите работника другого провайдера.', { name: worker.name, provider: providerName(provider) });
+    return t('{name} ({workerProvider}) подхватит новую сессию вместо работника {provider}.', { name: worker.name, workerProvider: providerName(worker.provider), provider: providerName(provider) });
   }
 
   $effect(() => {
@@ -67,7 +68,7 @@
     formError = '';
     status = '';
     const defaultCwd = value.trim();
-    if (!defaultCwd) { formError = 'Укажите рабочую папку по умолчанию.'; return; }
+    if (!defaultCwd) { formError = t('Укажите рабочую папку по умолчанию.'); return; }
     const fallbackWorkers: FallbackWorkers = { codex: fallback.codex || null, claude: fallback.claude || null };
     busy = true;
     onmutation();
@@ -76,8 +77,8 @@
         method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ defaultCwd, defaultSchedule, defaultWorkerId: defaultWorker || null, fallbackWorkers }),
       });
       let body;
-      try { body = await response.json(); } catch { throw new Error('Сервер вернул неожиданный ответ. Попробуйте ещё раз.'); }
-      if (!response.ok) throw new Error(body.error || `Ошибка запроса (${response.status})`);
+      try { body = await response.json(); } catch { throw new Error(t('Сервер вернул неожиданный ответ. Попробуйте ещё раз.')); }
+      if (!response.ok) throw new Error(body.error ? serverText(body.error) : t('Ошибка запроса ({status})', { status: response.status }));
       const saved = body as GeneralSettings;
       dirty = false;
       value = saved.defaultCwd;
@@ -85,37 +86,37 @@
       defaultWorker = saved.defaultWorkerId ?? '';
       fallback = { codex: saved.fallbackWorkers?.codex ?? '', claude: saved.fallbackWorkers?.claude ?? '' };
       onchange(saved);
-      status = 'Настройки сохранены';
+      status = t('Настройки сохранены');
     } catch (failure) {
-      formError = failure instanceof TypeError ? 'Нет связи с сервером. Проверьте подключение и повторите попытку.'
-        : failure instanceof Error ? failure.message : 'Не удалось сохранить настройки. Попробуйте ещё раз.';
+      formError = failure instanceof TypeError ? t('Нет связи с сервером. Проверьте подключение и повторите попытку.')
+        : failure instanceof Error ? failure.message : t('Не удалось сохранить настройки. Попробуйте ещё раз.');
     } finally { busy = false; }
   }
 </script>
 
 <section class="general-settings model-settings" aria-labelledby="general-settings-title" aria-busy={busy || loading}>
-  <div class="model-settings-heading"><Icon name="sliders" size={22} /><div><h3 id="general-settings-title">Общие</h3><p>Параметры для новых задач и замена работников при исчерпании лимитов.</p></div></div>
-  {#if error}<div class="model-load-error" role="alert"><span>{error}</span><button type="button" class="button secondary" disabled={busy} onclick={retry}>Повторить загрузку настроек</button></div>{/if}
-  {#if loading}<p class="model-catalog-status" role="status"><Icon name="refresh" class="spin" size={16} />Загружаем общие настройки…</p>{/if}
+  <div class="model-settings-heading"><Icon name="sliders" size={22} /><div><h3 id="general-settings-title">{t('Общие')}</h3><p>{t('Параметры для новых задач и замена работников при исчерпании лимитов.')}</p></div></div>
+  {#if error}<div class="model-load-error" role="alert"><span>{error}</span><button type="button" class="button secondary" disabled={busy} onclick={retry}>{t('Повторить загрузку настроек')}</button></div>{/if}
+  {#if loading}<p class="model-catalog-status" role="status"><Icon name="refresh" class="spin" size={16} />{t('Загружаем общие настройки…')}</p>{/if}
   {#if status}<p class="model-catalog-status success" role="status"><Icon name="check" size={16} /><span>{status}</span></p>{/if}
-  {#if busy}<p class="model-catalog-status" role="status"><Icon name="refresh" class="spin" size={16} /><span>Сохраняем настройки…</span></p>{/if}
-  <form class="general-settings-form" aria-label="Общие настройки" onsubmit={save}>
+  {#if busy}<p class="model-catalog-status" role="status"><Icon name="refresh" class="spin" size={16} /><span>{t('Сохраняем настройки…')}</span></p>{/if}
+  <form class="general-settings-form" aria-label={t('Общие настройки')} onsubmit={save}>
     {#if formError}<div class="form-error" role="alert"><Icon name="alert" size={17} /><span>{formError}</span></div>{/if}
-    <label class="form-field"><span>Рабочая папка по умолчанию</span><div class="input-with-icon"><Icon name="folder" size={16} /><input name="defaultCwd" aria-label="Рабочая папка по умолчанию" aria-describedby="default-cwd-description" bind:value oninput={touched} maxlength="4096" placeholder="/workspace/projects/my-project" required disabled={busy || loading || !settings} spellcheck="false" autocapitalize="off" /></div><small id="default-cwd-description">Абсолютный путь к папке на компьютере, где запущен brigd. Подставляется при создании задачи; его можно изменить в форме.</small></label>
-    <label class="form-field"><span>Тип запуска по умолчанию</span><select name="defaultSchedule" aria-label="Тип запуска по умолчанию" aria-describedby="default-schedule-description" bind:value={defaultSchedule} onchange={touched} disabled={busy || loading || !settings}><option value="auto">Автопилот</option><option value="manual">Вручную</option><option value="interval">По расписанию</option></select><small id="default-schedule-description">Выбирается в поле «Когда запускать» у новых задач. Его можно изменить в форме задачи.</small></label>
-    <label class="form-field"><span>Работник по умолчанию</span><select name="defaultWorkerId" aria-label="Работник по умолчанию" aria-describedby="default-worker-description" bind:value={defaultWorker} onchange={touched} disabled={busy || loading || !settings}><option value="">Не выбирать</option>{#each workerOptions(defaultWorker) as worker (worker.id)}<option value={worker.id}>{worker.name} · {providerName(worker.provider)}{worker.archived ? ' · в архиве' : ''}</option>{/each}</select><small id="default-worker-description">{defaultWorkerHint(defaultWorker)}</small></label>
+    <label class="form-field"><span>{t('Рабочая папка по умолчанию')}</span><div class="input-with-icon"><Icon name="folder" size={16} /><input name="defaultCwd" aria-label={t('Рабочая папка по умолчанию')} aria-describedby="default-cwd-description" bind:value oninput={touched} maxlength="4096" placeholder="/workspace/projects/my-project" required disabled={busy || loading || !settings} spellcheck="false" autocapitalize="off" /></div><small id="default-cwd-description">{t('Абсолютный путь к папке на компьютере, где запущен brigd. Подставляется при создании задачи; его можно изменить в форме.')}</small></label>
+    <label class="form-field"><span>{t('Тип запуска по умолчанию')}</span><select name="defaultSchedule" aria-label={t('Тип запуска по умолчанию')} aria-describedby="default-schedule-description" bind:value={defaultSchedule} onchange={touched} disabled={busy || loading || !settings}><option value="auto">{t('Автопилот')}</option><option value="manual">{t('Вручную')}</option><option value="interval">{t('По расписанию')}</option></select><small id="default-schedule-description">{t('Выбирается в поле «Когда запускать» у новых задач. Его можно изменить в форме задачи.')}</small></label>
+    <label class="form-field"><span>{t('Работник по умолчанию')}</span><select name="defaultWorkerId" aria-label={t('Работник по умолчанию')} aria-describedby="default-worker-description" bind:value={defaultWorker} onchange={touched} disabled={busy || loading || !settings}><option value="">{t('Не выбирать')}</option>{#each workerOptions(defaultWorker) as worker (worker.id)}<option value={worker.id}>{worker.name} · {providerName(worker.provider)}{worker.archived ? ` · ${t('в архиве')}` : ''}</option>{/each}</select><small id="default-worker-description">{defaultWorkerHint(defaultWorker)}</small></label>
     <fieldset class="fallback-settings" aria-describedby="fallback-description">
-      <legend>Замена при исчерпании лимитов</legend>
-      <p id="fallback-description" class="fallback-help">Когда CLI сообщает, что лимиты использования закончились, новую сессию с тем же заданием начинает выбранный работник, обычно другого провайдера: например, Codex Sol 6.1 ↔ Claude Code Opus 5.5. Продолжения сохранённых сессий не передаются. В профиле работника можно задать свою замену вместо этой.</p>
+      <legend>{t('Замена при исчерпании лимитов')}</legend>
+      <p id="fallback-description" class="fallback-help">{t('Когда CLI сообщает, что лимиты использования закончились, новую сессию с тем же заданием начинает выбранный работник, обычно другого провайдера: например, Codex Sol 6.1 ↔ Claude Code Opus 5.5. Продолжения сохранённых сессий не передаются. В профиле работника можно задать свою замену вместо этой.')}</p>
       {#each fallbackProviders as item (item.provider)}
-        <label class="form-field"><span>{item.label}</span>
-          <select name="fallback-{item.provider}" aria-label={item.label} aria-describedby="fallback-{item.provider}-hint" bind:value={fallback[item.provider]} onchange={touched} disabled={busy || loading || !settings}><option value="">Не заменять</option>{#each workerOptions(fallback[item.provider]) as worker (worker.id)}<option value={worker.id}>{worker.name} · {providerName(worker.provider)}{worker.archived ? ' · в архиве' : ''}</option>{/each}</select>
+        <label class="form-field"><span>{t(item.label)}</span>
+          <select name="fallback-{item.provider}" aria-label={t(item.label)} aria-describedby="fallback-{item.provider}-hint" bind:value={fallback[item.provider]} onchange={touched} disabled={busy || loading || !settings}><option value="">{t('Не заменять')}</option>{#each workerOptions(fallback[item.provider]) as worker (worker.id)}<option value={worker.id}>{worker.name} · {providerName(worker.provider)}{worker.archived ? ` · ${t('в архиве')}` : ''}</option>{/each}</select>
           <small id="fallback-{item.provider}-hint">{fallbackHint(item.provider, fallback[item.provider])}</small>
         </label>
       {/each}
-      {#if !workers.some(worker => !worker.archived)}<p class="fallback-help">Сначала создайте работников в разделе «Работники»: замена выбирается из их профилей.</p>{/if}
+      {#if !workers.some(worker => !worker.archived)}<p class="fallback-help">{t('Сначала создайте работников в разделе «Работники»: замена выбирается из их профилей.')}</p>{/if}
     </fieldset>
-    <div class="model-catalog-actions"><button type="submit" class="button primary" disabled={busy || loading || !settings}><Icon name={busy ? 'refresh' : 'check'} class={busy ? 'spin' : ''} size={16} />{busy ? 'Сохраняем…' : 'Сохранить настройки'}</button></div>
+    <div class="model-catalog-actions"><button type="submit" class="button primary" disabled={busy || loading || !settings}><Icon name={busy ? 'refresh' : 'check'} class={busy ? 'spin' : ''} size={16} />{busy ? t('Сохраняем…') : t('Сохранить настройки')}</button></div>
   </form>
 </section>
 

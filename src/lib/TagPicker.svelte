@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
   import { tagColorStyle } from './tags';
+  import { t } from './i18n';
   import type { Tag } from './types';
 
   let { tags, selected = $bindable([]), disabled = false, loading = false, error = '', onreload }:
@@ -25,27 +26,27 @@
   }
 </script>
 
-<fieldset class="tag-picker" {disabled} aria-label="Теги задачи">
-  <legend>Теги задачи</legend>
-  {#if loading}<p role="status"><Icon name="refresh" size={14} class="spin" />Загружаем теги…</p>{/if}
-  {#if error}<div class="tag-picker-error" role="alert"><span>{error}</span><button type="button" onclick={() => { void onreload(); }}>Повторить загрузку тегов</button></div>{/if}
+<fieldset class="tag-picker" {disabled} aria-label={t('Теги задачи')}>
+  <legend>{t('Теги задачи')}</legend>
+  {#if loading}<p role="status"><Icon name="refresh" size={14} class="spin" />{t('Загружаем теги…')}</p>{/if}
+  {#if error}<div class="tag-picker-error" role="alert"><span>{error}</span><button type="button" onclick={() => { void onreload(); }}>{t('Повторить загрузку тегов')}</button></div>{/if}
   {#if tags.length || missing.length || search}
     <div class="tag-picker-toolbar">
-      <div class="tag-search"><Icon name="search" size={15} /><input type="search" bind:this={searchInput} bind:value={search} aria-label="Поиск тегов" placeholder="Найти тег…" onkeydown={(event) => { if (event.key === 'Enter') event.preventDefault(); }} />{#if search}<button type="button" aria-label="Очистить поиск тегов" onclick={clearSearch}><Icon name="close" size={14} /></button>{/if}</div>
-      <small class="tag-selection-count" aria-live="polite">Выбрано: {selected.length}</small>
+      <div class="tag-search"><Icon name="search" size={15} /><input type="search" bind:this={searchInput} bind:value={search} aria-label={t('Поиск тегов')} placeholder={t('Найти тег…')} onkeydown={(event) => { if (event.key === 'Enter') event.preventDefault(); }} />{#if search}<button type="button" aria-label={t('Очистить поиск тегов')} onclick={clearSearch}><Icon name="close" size={14} /></button>{/if}</div>
+      <small class="tag-selection-count" aria-live="polite">{t('Выбрано: {count}', { count: selected.length })}</small>
     </div>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (Scrollable regions need keyboard focus for native scrolling.) -->
-    <div class="tag-options" role="region" aria-label="Список тегов" tabindex="0">
+    <div class="tag-options" role="region" aria-label={t('Список тегов')} tabindex="0">
       {#each visibleTags as tag (tag.id)}
         <label class="tag-option" class:selected={selected.includes(tag.id)} style={tagColorStyle(tag.color)}><input type="checkbox" checked={selected.includes(tag.id)} value={tag.id} onchange={(event) => toggleTag(tag.id, event.currentTarget.checked)} /><span>{tag.name}</span></label>
       {/each}
       {#if !loading && !query}
-        {#each missing as id (id)}<label class="missing"><input type="checkbox" checked={selected.includes(id)} value={id} onchange={(event) => toggleTag(id, event.currentTarget.checked)} /><span>Недоступный тег</span></label>{/each}
+        {#each missing as id (id)}<label class="missing"><input type="checkbox" checked={selected.includes(id)} value={id} onchange={(event) => toggleTag(id, event.currentTarget.checked)} /><span>{t('Недоступный тег')}</span></label>{/each}
       {/if}
-      {#if query && !visibleTags.length}<p class="tag-search-empty" role="status">Теги не найдены. Попробуйте другое название.</p>{/if}
+      {#if query && !visibleTags.length}<p class="tag-search-empty" role="status">{t('Теги не найдены. Попробуйте другое название.')}</p>{/if}
     </div>
   {/if}
-  {#if !loading && !error && tags.length === 0 && missing.length === 0}<p>Создайте теги во вкладке «Теги», чтобы назначать их задачам.</p>{/if}
+  {#if !loading && !error && tags.length === 0 && missing.length === 0}<p>{t('Создайте теги во вкладке «Теги», чтобы назначать их задачам.')}</p>{/if}
 </fieldset>
 
 <style>

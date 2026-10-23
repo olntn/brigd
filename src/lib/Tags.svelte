@@ -2,6 +2,7 @@
   import { onDestroy, tick } from 'svelte';
   import Icon from './Icon.svelte';
   import { DEFAULT_TAG_COLOR, TAG_COLORS, TAG_COUNT_LIMIT, TAG_NAME_LIMIT, tagColorStyle } from './tags';
+  import { serverText, t, tc } from './i18n';
   import type { Tag, TagInput } from './types';
 
   let { tags, loading, error, onreload, onchanged, ondeleted, onmutation, notify }: {
@@ -35,8 +36,8 @@
   let saving = $derived(pending === 'save');
   let removing = $derived(pending === 'delete');
   const message = (failure: unknown) => failure instanceof TypeError
-    ? 'Нет связи с сервером. Проверьте подключение и повторите попытку.'
-    : failure instanceof Error ? failure.message : 'Не удалось сохранить изменения. Попробуйте ещё раз.';
+    ? t('Нет связи с сервером. Проверьте подключение и повторите попытку.')
+    : failure instanceof Error ? failure.message : t('Не удалось сохранить изменения. Попробуйте ещё раз.');
 
   onDestroy(() => {
     alive = false;
@@ -46,8 +47,8 @@
   async function request<T>(path: string, options: RequestInit): Promise<T> {
     const response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json' } });
     let result;
-    try { result = await response.json(); } catch { throw new Error('Сервер вернул неожиданный ответ. Попробуйте ещё раз.'); }
-    if (!response.ok) throw new Error(result.error || `Ошибка запроса (${response.status})`);
+    try { result = await response.json(); } catch { throw new Error(t('Сервер вернул неожиданный ответ. Попробуйте ещё раз.')); }
+    if (!response.ok) throw new Error(serverText(result.error ?? '') || t('Ошибка запроса ({status})', { status: response.status }));
     return result as T;
   }
 
@@ -102,8 +103,8 @@
     if (pending) return;
     formError = '';
     const trimmedName = name.trim();
-    if (!trimmedName) { formError = 'Введите название тега.'; return; }
-    if (trimmedName.length > TAG_NAME_LIMIT) { formError = `Название должно быть не длиннее ${TAG_NAME_LIMIT} символов.`; return; }
+    if (!trimmedName) { formError = t('Введите название тега.'); return; }
+    if (trimmedName.length > TAG_NAME_LIMIT) { formError = t('Название должно быть не длиннее {limit} символов.', { limit: TAG_NAME_LIMIT }); return; }
     const payload: TagInput = { name: trimmedName, color };
     beginMutation('save');
     try {
@@ -113,7 +114,7 @@
       if (!alive) return;
       onchanged(saved);
       editorReturnId = saved.id;
-      notify(editingId ? 'Тег сохранён' : 'Тег создан');
+      notify(editingId ? t('Тег сохранён') : t('Тег создан'));
       finishMutation();
       void closeEditor();
     } catch (failure) {
@@ -154,7 +155,7 @@
       await request<{ ok: true }>(`/api/tags/${encodeURIComponent(id)}`, { method: 'DELETE' });
       if (!alive) return;
       ondeleted(id);
-      notify('Тег удалён и снят со всех задач');
+      notify(t('Тег удалён и снят со всех задач'));
       finishMutation();
       confirmation.close();
       deleting = null;
@@ -176,60 +177,60 @@
 
 <section class="page-heading">
   <div>
-    <h1 bind:this={heading} tabindex="-1">Теги</h1>
-    <p>Объединяйте задачи по проектам, темам и приоритетам.</p>
+    <h1 bind:this={heading} tabindex="-1">{t('Теги')}</h1>
+    <p>{t('Объединяйте задачи по проектам, темам и приоритетам.')}</p>
   </div>
-  <button bind:this={createButton} type="button" class="button primary create-button" disabled={!!pending || loading || tags.length >= TAG_COUNT_LIMIT} onclick={() => openEditor()}><Icon name="plus" size={17} />Новый тег</button>
+  <button bind:this={createButton} type="button" class="button primary create-button" disabled={!!pending || loading || tags.length >= TAG_COUNT_LIMIT} onclick={() => openEditor()}><Icon name="plus" size={17} />{t('Новый тег')}</button>
 </section>
 
-<div class="workers-note tags-note"><Icon name="tag" size={18} /><p>Создайте теги и назначайте их задачам при создании или в карточке задачи. На доске можно отфильтровать задачи по нужному тегу.</p></div>
+<div class="workers-note tags-note"><Icon name="tag" size={18} /><p>{t('Создайте теги и назначайте их задачам при создании или в карточке задачи. На доске можно отфильтровать задачи по нужному тегу.')}</p></div>
 
 {#if error}
-  <div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{error}</span><button type="button" disabled={!!pending || loading} onclick={() => { void onreload(); }}>Повторить</button></div>
+  <div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{error}</span><button type="button" disabled={!!pending || loading} onclick={() => { void onreload(); }}>{t('Повторить')}</button></div>
 {/if}
 {#if tags.length >= TAG_COUNT_LIMIT}
-  <p class="field-warning tags-limit" role="status">Достигнут лимит: {TAG_COUNT_LIMIT} тегов. Удалите ненужный, чтобы создать новый.</p>
+  <p class="field-warning tags-limit" role="status">{t('Достигнут лимит: {limit} тегов. Удалите ненужный, чтобы создать новый.', { limit: TAG_COUNT_LIMIT })}</p>
 {/if}
 
 {#if loading}
-  <div class="detail-loading" role="status"><Icon name="refresh" class="spin" />Загружаем теги…</div>
+  <div class="detail-loading" role="status"><Icon name="refresh" class="spin" />{t('Загружаем теги…')}</div>
 {:else if tags.length}
   <div class="tags-list">
     {#each orderedTags as item (item.id)}
-      <article class="tag-card" aria-label={'Тег: ' + item.name}>
+      <article class="tag-card" aria-label={t('Тег: {name}', { name: item.name })}>
         <div class="tag-card-name"><h2 class="tag-name-badge" style={tagColorStyle(item.color)}>{item.name}</h2></div>
         <div class="tag-card-actions">
-          <button type="button" class="button secondary" data-edit-tag={item.id} disabled={!!pending} onclick={() => openEditor(item)} aria-label={'Изменить тег: ' + item.name}><Icon name="edit" size={14} />Изменить</button>
-          <button type="button" class="button text-button danger-hover" disabled={!!pending} onclick={() => askDelete(item)} aria-label={'Удалить тег: ' + item.name}><Icon name="close" size={14} />Удалить</button>
+          <button type="button" class="button secondary" data-edit-tag={item.id} disabled={!!pending} onclick={() => openEditor(item)} aria-label={t('Изменить тег: {name}', { name: item.name })}><Icon name="edit" size={14} />{t('Изменить')}</button>
+          <button type="button" class="button text-button danger-hover" disabled={!!pending} onclick={() => askDelete(item)} aria-label={t('Удалить тег: {name}', { name: item.name })}><Icon name="close" size={14} />{t('Удалить')}</button>
         </div>
       </article>
     {/each}
   </div>
-  <p class="tags-capacity">Создано {tags.length} из {TAG_COUNT_LIMIT} тегов.</p>
+  <p class="tags-capacity">{t('Создано {count} из {limit} тегов.', { count: tags.length, limit: TAG_COUNT_LIMIT })}</p>
 {:else if !error}
-  <div class="no-results tags-empty"><span class="empty-icon"><Icon name="tag" size={27} /></span><h2>Свои теги для ваших задач</h2><p>Например: «Сайт», «Исследование» или «Срочно».<br />Одной задаче можно назначить несколько тегов.</p><button type="button" class="button primary" disabled={!!pending} onclick={() => openEditor()}><Icon name="plus" size={16} />Создать первый тег</button></div>
+  <div class="no-results tags-empty"><span class="empty-icon"><Icon name="tag" size={27} /></span><h2>{t('Свои теги для ваших задач')}</h2><p>{t('Например: «Сайт», «Исследование» или «Срочно».')}<br />{t('Одной задаче можно назначить несколько тегов.')}</p><button type="button" class="button primary" disabled={!!pending} onclick={() => openEditor()}><Icon name="plus" size={16} />{t('Создать первый тег')}</button></div>
 {/if}
 
 <dialog bind:this={editor} class="editor-dialog tag-editor" aria-labelledby="tag-editor-title" oncancel={(event) => { event.preventDefault(); void closeEditor(); }} onclick={(event) => backdropClick(event, editor, closeEditor)}>
   {#if editing}
     <form class="editor-form" onsubmit={save} aria-busy={saving}>
-      <header class="editor-header"><div><h2 id="tag-editor-title">{editingId ? 'Редактировать тег' : 'Новый тег'}</h2></div><button type="button" class="icon-button" aria-label="Закрыть редактор тега" disabled={saving} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
+      <header class="editor-header"><div><h2 id="tag-editor-title">{editingId ? t('Редактировать тег') : t('Новый тег')}</h2></div><button type="button" class="icon-button" aria-label={t('Закрыть редактор тега')} disabled={saving} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
       <div class="editor-fields">
         {#if formError}<div class="form-error" role="alert"><Icon name="alert" size={17} /><span>{formError}</span></div>{/if}
-        <label class="form-field"><span>Название <span class="required">*</span></span><input name="tagName" aria-label="Название тега" aria-describedby="tag-name-count" bind:value={name} maxlength={TAG_NAME_LIMIT} placeholder="Например, Сайт" required disabled={saving} /><small id="tag-name-count">{name.length} / {TAG_NAME_LIMIT} символов</small></label>
+        <label class="form-field"><span>{tc('tag', 'Название')} <span class="required">*</span></span><input name="tagName" aria-label={t('Название тега')} aria-describedby="tag-name-count" bind:value={name} maxlength={TAG_NAME_LIMIT} placeholder={t('Например, Сайт')} required disabled={saving} /><small id="tag-name-count">{t('{count} / {limit} символов', { count: name.length, limit: TAG_NAME_LIMIT })}</small></label>
         <fieldset class="tag-colors" disabled={saving}>
-          <legend>Цвет тега</legend>
+          <legend>{t('Цвет тега')}</legend>
           <div class="tag-color-options">
             {#each TAG_COLORS as preset (preset.value)}
-              <button type="button" class="tag-color-option" class:selected={color.toLowerCase() === preset.value.toLowerCase()} style={tagColorStyle(preset.value)} aria-label={'Цвет: ' + preset.name} aria-pressed={color.toLowerCase() === preset.value.toLowerCase()} title={preset.name} onclick={() => { color = preset.value; }}>{#if color.toLowerCase() === preset.value.toLowerCase()}<Icon name="check" size={18} />{/if}</button>
+              <button type="button" class="tag-color-option" class:selected={color.toLowerCase() === preset.value.toLowerCase()} style={tagColorStyle(preset.value)} aria-label={t('Цвет: {name}', { name: t(preset.name) })} aria-pressed={color.toLowerCase() === preset.value.toLowerCase()} title={t(preset.name)} onclick={() => { color = preset.value; }}>{#if color.toLowerCase() === preset.value.toLowerCase()}<Icon name="check" size={18} />{/if}</button>
             {/each}
           </div>
-          <label class="tag-custom-color"><input type="color" name="tagColor" aria-label="Свой цвет" bind:value={color} /><span>Свой цвет</span><small>{color.toUpperCase()}</small></label>
+          <label class="tag-custom-color"><input type="color" name="tagColor" aria-label={t('Свой цвет')} bind:value={color} /><span>{t('Свой цвет')}</span><small>{color.toUpperCase()}</small></label>
         </fieldset>
-        <div class="tag-preview-section"><span>Предпросмотр</span><span class="tag-preview" style={tagColorStyle(color)}><span>{name.trim() || 'Название тега'}</span></span></div>
-        <p class="form-note">{editingId ? 'Название и цвет обновятся во всех задачах с этим тегом.' : 'После создания тег можно назначить любой задаче.'}</p>
+        <div class="tag-preview-section"><span>{t('Предпросмотр')}</span><span class="tag-preview" style={tagColorStyle(color)}><span>{name.trim() || t('Название тега')}</span></span></div>
+        <p class="form-note">{editingId ? t('Название и цвет обновятся во всех задачах с этим тегом.') : t('После создания тег можно назначить любой задаче.')}</p>
       </div>
-      <footer class="editor-footer"><button type="button" class="button secondary" disabled={saving} onclick={closeEditor}>Отмена</button><button type="submit" class="button primary" disabled={saving}>{#if saving}<Icon name="refresh" class="spin" size={16} />{:else}<Icon name={editingId ? 'check' : 'plus'} size={16} />{/if}{saving ? 'Сохраняем…' : editingId ? 'Сохранить тег' : 'Создать тег'}</button></footer>
+      <footer class="editor-footer"><button type="button" class="button secondary" disabled={saving} onclick={closeEditor}>{t('Отмена')}</button><button type="submit" class="button primary" disabled={saving}>{#if saving}<Icon name="refresh" class="spin" size={16} />{:else}<Icon name={editingId ? 'check' : 'plus'} size={16} />{/if}{saving ? t('Сохраняем…') : editingId ? t('Сохранить тег') : t('Создать тег')}</button></footer>
     </form>
   {/if}
 </dialog>
@@ -237,9 +238,9 @@
 <dialog bind:this={confirmation} class="editor-dialog tag-delete-dialog" aria-labelledby="tag-delete-title" aria-describedby="tag-delete-description" oncancel={(event) => { event.preventDefault(); void closeDelete(); }} onclick={(event) => backdropClick(event, confirmation, closeDelete)}>
   {#if deleting}
     <form class="editor-form" onsubmit={remove} aria-busy={removing}>
-      <header class="editor-header"><h2 id="tag-delete-title">Удалить тег?</h2><button type="button" class="icon-button" aria-label="Закрыть удаление тега" disabled={removing} onclick={closeDelete}><Icon name="close" size={21} /></button></header>
-      <div class="editor-fields">{#if deleteError}<div class="form-error" role="alert"><Icon name="alert" size={17} /><span>{deleteError}</span></div>{/if}<p id="tag-delete-description">Тег «{deleting.name}» будет удалён из списка и снят со всех задач. Сами задачи сохранятся. Отменить удаление нельзя.</p></div>
-      <footer class="editor-footer"><button type="button" data-cancel-delete class="button secondary" disabled={removing} onclick={closeDelete}>Отмена</button><button type="submit" class="button danger" disabled={removing}>{#if removing}<Icon name="refresh" class="spin" size={16} />{/if}{removing ? 'Удаляем…' : 'Удалить тег'}</button></footer>
+      <header class="editor-header"><h2 id="tag-delete-title">{t('Удалить тег?')}</h2><button type="button" class="icon-button" aria-label={t('Закрыть удаление тега')} disabled={removing} onclick={closeDelete}><Icon name="close" size={21} /></button></header>
+      <div class="editor-fields">{#if deleteError}<div class="form-error" role="alert"><Icon name="alert" size={17} /><span>{deleteError}</span></div>{/if}<p id="tag-delete-description">{t('Тег «{name}» будет удалён из списка и снят со всех задач. Сами задачи сохранятся. Отменить удаление нельзя.', { name: deleting.name })}</p></div>
+      <footer class="editor-footer"><button type="button" data-cancel-delete class="button secondary" disabled={removing} onclick={closeDelete}>{t('Отмена')}</button><button type="submit" class="button danger" disabled={removing}>{#if removing}<Icon name="refresh" class="spin" size={16} />{/if}{removing ? t('Удаляем…') : t('Удалить тег')}</button></footer>
     </form>
   {/if}
 </dialog>

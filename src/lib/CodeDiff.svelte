@@ -3,6 +3,7 @@
   import Icon from './Icon.svelte';
   import { diffLines } from './diff-lines';
   import { TASK_STATUS_LABELS } from './status';
+  import { formatDate, serverText, t, tc, tk } from './i18n';
   import type { Run } from './types';
   import type { CodeDiffFile, RunCodeDiff } from './code-diff';
 
@@ -28,11 +29,12 @@
   const revision = $derived(selectedRun ? `${selectedRun.updatedAt}:${selectedRun.status}:${selectedRun.turn}:${selectedRun.integration?.updatedAt ?? ''}` : '');
   const live = $derived(!!selectedRun && ['preparing', 'running', 'cancelling', 'waiting_input', 'interrupted'].includes(selectedRun.status));
   const statusLabels: Record<CodeDiffFile['status'], string> = {
-    added: 'Добавлен', modified: 'Изменён', deleted: 'Удалён', renamed: 'Переименован', typechanged: 'Изменён тип',
+    added: tk('Добавлен'), modified: tk('Изменён'), deleted: tk('Удалён'), renamed: tk('Переименован'), typechanged: tk('Изменён тип'),
   };
-  const dateTime = (time: number) => new Intl.DateTimeFormat('ru-RU', {
+  const dateTime = (time: number) => formatDate(time, {
     day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit',
-  }).format(time);
+  });
+  const runLabel = (run: Run) => { const id = run.id.slice(0, 6); return run.followup ? t('Дополнительный запрос {id}', { id }) : run.reconcile ? t('Разрешение конфликта {id}', { id }) : t('Запуск {id}', { id }); };
   const content = (value: RunCodeDiff) => JSON.stringify([value.state, value.reason, value.truncated, value.filesOmitted, value.live, value.files]);
 
   function show(next: RunCodeDiff, key = content(next)) {
@@ -64,16 +66,16 @@
       try {
         const response = await fetch(`/api/runs/${encodeURIComponent(id)}/diff`, { signal: controller.signal });
         const result = await response.json();
-        if (!response.ok) throw new Error(result.error || `Ошибка загрузки (${response.status})`);
+        if (!response.ok) throw new Error(result.error ? serverText(result.error) : tc('diff', 'Ошибка загрузки ({status})', { status: response.status }));
         if (controller.signal.aborted) return;
         const next = result as RunCodeDiff, key = content(next);
         // A momentary Git failure while the agent works must not replace code the reader is viewing.
-        if (diff?.state === 'available' && next.state === 'unavailable' && live) refreshError = next.reason || 'Не удалось получить изменения этого запуска.';
+        if (diff?.state === 'available' && next.state === 'unavailable' && live) refreshError = next.reason ? serverText(next.reason) : t('Не удалось получить изменения этого запуска.');
         else if (paused && !apply && diff) { refreshError = ''; pending = key === shown ? null : next; }
         else { refreshError = ''; show(next, key); }
       } catch (cause) {
         if (controller.signal.aborted) return;
-        const message = cause instanceof Error ? cause.message : 'Не удалось загрузить изменения.';
+        const message = cause instanceof Error ? cause.message : t('Не удалось загрузить изменения.');
         if (diff) refreshError = message; else error = message;
       } finally {
         if (!controller.signal.aborted) loading = false;
@@ -92,61 +94,61 @@
 
 {#if runs.length}
   <div class="diff-toolbar">
-    <label class="diff-run-picker"><span>Запуск для просмотра изменений</span>
-      <select aria-label="Запуск для просмотра изменений" value={runId} onchange={(event) => selectedId = event.currentTarget.value}>
+    <label class="diff-run-picker"><span>{t('Запуск для просмотра изменений')}</span>
+      <select aria-label={t('Запуск для просмотра изменений')} value={runId} onchange={(event) => selectedId = event.currentTarget.value}>
         {#each runs as run (run.id)}
-          <option value={run.id}>{run.followup ? 'Дополнительный запрос' : run.reconcile ? 'Разрешение конфликта' : 'Запуск'} {run.id.slice(0, 6)} · {dateTime(run.startedAt)} · {TASK_STATUS_LABELS[run.status]}</option>
+          <option value={run.id}>{runLabel(run)} · {dateTime(run.startedAt)} · {t(TASK_STATUS_LABELS[run.status])}</option>
         {/each}
       </select>
     </label>
     {#if diff?.state === 'available' && (live || paused)}
-      <button class="button secondary" onclick={togglePause} aria-label={paused ? 'Возобновить автообновление' : 'Приостановить автообновление'} title={paused ? 'Возобновить автообновление' : 'Приостановить автообновление'}><Icon name={paused ? 'play' : 'pause'} size={15} /></button>
+      <button class="button secondary" onclick={togglePause} aria-label={paused ? t('Возобновить автообновление') : t('Приостановить автообновление')} title={paused ? t('Возобновить автообновление') : t('Приостановить автообновление')}><Icon name={paused ? 'play' : 'pause'} size={15} /></button>
     {/if}
-    <button class="button secondary" disabled={loading} onclick={reload} aria-label="Обновить diff" title="Обновить diff"><Icon name="refresh" size={15} class={loading ? 'spin' : ''} /></button>
+    <button class="button secondary" disabled={loading} onclick={reload} aria-label={t('Обновить diff')} title={t('Обновить diff')}><Icon name="refresh" size={15} class={loading ? 'spin' : ''} /></button>
   </div>
 {/if}
 
 {#if !runs.length}
-  <div class="conversation-empty"><Icon name="code" size={25} /><strong>Запусков пока нет</strong><p>Изменения кода появятся здесь после работы агента.</p></div>
+  <div class="conversation-empty"><Icon name="code" size={25} /><strong>{t('Запусков пока нет')}</strong><p>{t('Изменения кода появятся здесь после работы агента.')}</p></div>
 {:else if loading && !diff}
-  <p class="diff-message" role="status"><Icon name="refresh" size={17} class="spin" />Загружаем изменения…</p>
+  <p class="diff-message" role="status"><Icon name="refresh" size={17} class="spin" />{t('Загружаем изменения…')}</p>
 {:else if error && !diff}
-  <div class="diff-error" role="alert"><p>{error}</p><button class="button secondary" onclick={reload}>Повторить загрузку</button></div>
+  <div class="diff-error" role="alert"><p>{error}</p><button class="button secondary" onclick={reload}>{t('Повторить загрузку')}</button></div>
 {:else if diff?.state === 'unavailable'}
-  <div class="conversation-empty"><Icon name="code" size={25} /><strong>Diff недоступен</strong><p>{diff.reason || 'Не удалось получить изменения этого запуска.'}</p></div>
+  <div class="conversation-empty"><Icon name="code" size={25} /><strong>{t('Diff недоступен')}</strong><p>{diff.reason ? serverText(diff.reason) : t('Не удалось получить изменения этого запуска.')}</p></div>
 {:else if diff}
   {#if paused}
-    <p class="diff-note" role="status">Автообновление на паузе: открытый код не изменится, пока вы его читаете.{#if pending} Агент внёс новые изменения. <button class="diff-link" onclick={() => pending && show(pending)}>Показать</button>{/if}</p>
-  {:else if diff.live}<p class="diff-note">Текущие изменения запуска. Обновляются во время работы агента.</p>{/if}
-  {#if refreshError}<p class="diff-warning" role="status">Не удалось обновить изменения: {refreshError} Показан последний полученный снимок.</p>{/if}
-  {#if diff.filesOmitted ?? (diff.truncated && !diff.files.some(file => file.truncated))}<p class="diff-warning" role="status">Показаны не все изменённые файлы: их слишком много для просмотра.</p>{/if}
+    <p class="diff-note" role="status">{t('Автообновление на паузе: открытый код не изменится, пока вы его читаете.')}{#if pending} {t('Агент внёс новые изменения.')} <button class="diff-link" onclick={() => pending && show(pending)}>{t('Показать')}</button>{/if}</p>
+  {:else if diff.live}<p class="diff-note">{t('Текущие изменения запуска. Обновляются во время работы агента.')}</p>{/if}
+  {#if refreshError}<p class="diff-warning" role="status">{t('Не удалось обновить изменения: {error} Показан последний полученный снимок.', { error: refreshError })}</p>{/if}
+  {#if diff.filesOmitted ?? (diff.truncated && !diff.files.some(file => file.truncated))}<p class="diff-warning" role="status">{t('Показаны не все изменённые файлы: их слишком много для просмотра.')}</p>{/if}
   {#if diff.files.length}
-    <div class="diff-overview"><strong>Файлов: {diff.files.length}</strong><span class="diff-added" aria-label={`Добавлено строк: ${diff.additions}`}>+{diff.additions}</span><span class="diff-deleted" aria-label={`Удалено строк: ${diff.deletions}`}>−{diff.deletions}</span></div>
+    <div class="diff-overview"><strong>{t('Файлов: {count}', { count: diff.files.length })}</strong><span class="diff-added" aria-label={t('Добавлено строк: {count}', { count: diff.additions })}>+{diff.additions}</span><span class="diff-deleted" aria-label={t('Удалено строк: {count}', { count: diff.deletions })}>−{diff.deletions}</span></div>
     <div class="diff-files">
       {#each diff.files as file (file.path)}
         <details class="diff-file" open={expanded.get(file.path)} ontoggle={(event) => expanded.set(file.path, event.currentTarget.open)}>
-          <summary><Icon name="chevron" size={14} class="diff-chevron" /><span class="diff-file-name"><code>{file.path}</code>{#if file.oldPath && file.oldPath !== file.path}<small>Ранее: {file.oldPath}</small>{/if}</span><span class="diff-file-status">{statusLabels[file.status]}</span><span class="diff-added">+{file.additions}</span><span class="diff-deleted">−{file.deletions}</span></summary>
-          {#if file.binary}<p class="diff-file-note">Двоичный файл изменён. Текстовый diff недоступен.</p>
-          {:else if !file.patch && file.truncated}<p class="diff-file-note">Изменения этого файла слишком велики для просмотра.</p>
+          <summary><Icon name="chevron" size={14} class="diff-chevron" /><span class="diff-file-name"><code>{file.path}</code>{#if file.oldPath && file.oldPath !== file.path}<small>{t('Ранее: {path}', { path: file.oldPath })}</small>{/if}</span><span class="diff-file-status">{t(statusLabels[file.status])}</span><span class="diff-added">+{file.additions}</span><span class="diff-deleted">−{file.deletions}</span></summary>
+          {#if file.binary}<p class="diff-file-note">{t('Двоичный файл изменён. Текстовый diff недоступен.')}</p>
+          {:else if !file.patch && file.truncated}<p class="diff-file-note">{t('Изменения этого файла слишком велики для просмотра.')}</p>
           {:else if expanded.get(file.path)}
             {@const lines = diffLines(file.patch)}
             {#if lines.length}
               <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users need to scroll long code lines.) -->
-              <div class="diff-scroll" role="region" aria-label={`Diff файла ${file.path}`} tabindex="0">
+              <div class="diff-scroll" role="region" aria-label={t('Diff файла {path}', { path: file.path })} tabindex="0">
                 <div class="diff-lines">
                   {#each lines as line}
-                    <div class="diff-line {line.kind}"><span class="diff-line-number" aria-hidden="true">{line.oldLine ?? ''}</span><span class="diff-line-number" aria-hidden="true">{line.newLine ?? ''}</span><span class="diff-marker" aria-hidden="true">{line.kind === 'addition' ? '+' : line.kind === 'deletion' ? '−' : ' '}</span><code class="diff-code">{line.text || ' '}</code></div>
+                    <div class="diff-line {line.kind}"><span class="diff-line-number" aria-hidden="true">{line.oldLine ?? ''}</span><span class="diff-line-number" aria-hidden="true">{line.newLine ?? ''}</span><span class="diff-marker" aria-hidden="true">{line.kind === 'addition' ? '+' : line.kind === 'deletion' ? '−' : ' '}</span><code class="diff-code">{(line.kind === 'meta' ? t(line.text) : line.text) || ' '}</code></div>
                   {/each}
                 </div>
               </div>
-            {:else}<p class="diff-file-note">Содержимое файла не изменилось; обновлены его имя или свойства.</p>{/if}
-            {#if file.truncated}<p class="diff-file-note">Diff этого файла показан не полностью.</p>{/if}
+            {:else}<p class="diff-file-note">{t('Содержимое файла не изменилось; обновлены его имя или свойства.')}</p>{/if}
+            {#if file.truncated}<p class="diff-file-note">{t('Diff этого файла показан не полностью.')}</p>{/if}
           {/if}
         </details>
       {/each}
     </div>
   {:else if !diff.truncated}
-    <div class="conversation-empty"><Icon name="code" size={25} /><strong>Изменений кода нет</strong><p>В этом запуске файлы проекта не менялись.</p></div>
+    <div class="conversation-empty"><Icon name="code" size={25} /><strong>{t('Изменений кода нет')}</strong><p>{t('В этом запуске файлы проекта не менялись.')}</p></div>
   {/if}
 {/if}
 

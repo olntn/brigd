@@ -1,8 +1,9 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import Icon from './Icon.svelte';
+  import { formatSize, t, tk } from './i18n';
   import type { Attachment } from './types';
-  let { attachments = [], taskId, label = 'Вложения', author }: { attachments?: Attachment[]; taskId: string; label?: string; author?: (attachment: Attachment) => string } = $props();
+  let { attachments = [], taskId, label = tk('Вложения'), author }: { attachments?: Attachment[]; taskId: string; label?: string; author?: (attachment: Attachment) => string } = $props();
   let preview = $state<Attachment | null>(null);
   let failed = $state<string[]>([]);
   let previewFailed = $state(false);
@@ -18,8 +19,7 @@
   const pointers = new Map<number, { x: number; y: number }>();
   let gesture: { scale: number; distance: number; scrollLeft: number; scrollTop: number; x: number; y: number; moved: boolean; image: boolean } | null = null;
   function url(file: Attachment, variant: 'preview' | 'view' | 'download' = 'preview') { return `/api/tasks/${encodeURIComponent(file.taskId ?? taskId)}/attachments/${encodeURIComponent(file.id)}?${variant}=1`; }
-  function sizeLabel(size: number) { return size < 1024 ? `${size} Б` : size < 1024 * 1024 ? `${(size / 1024).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} КБ` : `${(size / (1024 * 1024)).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} МБ`; }
-  function provenance(file: Attachment) { return [author?.(file) ?? (file.source === 'agent' ? 'Агент' : 'Вы'), file.runId ? `запуск ${file.runId.slice(0, 6)}` : '', file.stepIndex != null ? `этап ${file.stepIndex + 1}` : ''].filter(Boolean).join(' · '); }
+  function provenance(file: Attachment) { return [author?.(file) ?? (file.source === 'agent' ? t('Агент') : t('Вы')), file.runId ? t('запуск {id}', { id: file.runId.slice(0, 6) }) : '', file.stepIndex != null ? t('этап {number}', { number: file.stepIndex + 1 }) : ''].filter(Boolean).join(' · '); }
   async function open(file: Attachment) {
     preview = file; previewFailed = false; source = 'view'; natural = null; scale = 1; fitted = true; dragging = false; gesture = null; pointers.clear();
     await tick();
@@ -113,35 +113,35 @@
 </script>
 
 {#if attachments.length}
-  <ul class="attachment-list" aria-label={label}>{#each attachments as file (file.id)}
+  <ul class="attachment-list" aria-label={t(label)}>{#each attachments as file (file.id)}
     <li class="attachment-item">
-      {#if file.previewable}<button class="attachment-thumbnail" type="button" onclick={() => open(file)} aria-label={`Открыть изображение: ${file.name}`}>{#if !failed.includes(file.id)}<img src={url(file)} alt="" loading="lazy" onerror={() => failed = [...failed, file.id]} />{:else}<Icon name="folder" size={22} />{/if}</button>{:else}<span class="attachment-file-icon"><Icon name="folder" size={22} /></span>{/if}
-      <div class="attachment-info"><span class="attachment-name">{file.name}</span><span class="attachment-meta">{sizeLabel(file.size)} · {provenance(file)}</span>{#if failed.includes(file.id)}<span class="attachment-error">Предпросмотр недоступен. Файл можно скачать.</span>{/if}</div>
-      <a class="attachment-download" href={url(file, 'download')} download={file.name} aria-label={`Скачать: ${file.name}`}><Icon name="down" size={16} /><span>Скачать</span></a>
+      {#if file.previewable}<button class="attachment-thumbnail" type="button" onclick={() => open(file)} aria-label={t('Открыть изображение: {name}', { name: file.name })}>{#if !failed.includes(file.id)}<img src={url(file)} alt="" loading="lazy" onerror={() => failed = [...failed, file.id]} />{:else}<Icon name="folder" size={22} />{/if}</button>{:else}<span class="attachment-file-icon"><Icon name="folder" size={22} /></span>{/if}
+      <div class="attachment-info"><span class="attachment-name">{file.name}</span><span class="attachment-meta">{formatSize(file.size)} · {provenance(file)}</span>{#if failed.includes(file.id)}<span class="attachment-error">{t('Предпросмотр недоступен. Файл можно скачать.')}</span>{/if}</div>
+      <a class="attachment-download" href={url(file, 'download')} download={file.name} aria-label={t('Скачать: {name}', { name: file.name })}><Icon name="down" size={16} /><span>{t('Скачать')}</span></a>
     </li>
   {/each}</ul>
 {/if}
 
-<dialog class="attachment-preview-dialog" bind:this={dialog} aria-label={preview?.name ?? 'Просмотр изображения'} oncancel={(event) => { event.preventDefault(); close(); }} onkeydown={key} onclick={(event) => { if (event.target === dialog) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) close(); } }}>
+<dialog class="attachment-preview-dialog" bind:this={dialog} aria-label={preview?.name ?? t('Просмотр изображения')} oncancel={(event) => { event.preventDefault(); close(); }} onkeydown={key} onclick={(event) => { if (event.target === dialog) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) close(); } }}>
   {#if preview}
     <header class="attachment-preview-header">
-      <div class="attachment-preview-title"><strong>{preview.name}</strong><span>{sizeLabel(preview.size)} · {provenance(preview)}{#if !natural && !previewFailed} · Загрузка…{:else if source === 'preview' && natural} · уменьшенная копия{/if}</span></div>
-      <div class="attachment-zoom" role="group" aria-label="Масштаб">
-        <button class="icon-button" type="button" aria-label="Уменьшить" disabled={!natural || scale <= MIN_SCALE} onclick={() => zoomTo(scale / STEP)}><Icon name="minus" size={18} /></button>
-        <button class="attachment-zoom-level" type="button" aria-label="Исходный размер" title="Показать в масштабе 100%" disabled={!natural} onclick={() => zoomTo(1)}>{natural ? `${Math.round(scale * 100)}%` : '…'}</button>
-        <button class="icon-button" type="button" aria-label="Увеличить" disabled={!natural || scale >= MAX_SCALE} onclick={() => zoomTo(scale * STEP)}><Icon name="plus" size={18} /></button>
-        <button class="icon-button" type="button" aria-label="Вписать в окно" aria-pressed={fitted} disabled={!natural} onclick={fit}><Icon name="fit" size={18} /></button>
+      <div class="attachment-preview-title"><strong>{preview.name}</strong><span>{formatSize(preview.size)} · {provenance(preview)}{#if !natural && !previewFailed} · {t('Загрузка…')}{:else if source === 'preview' && natural} · {t('уменьшенная копия')}{/if}</span></div>
+      <div class="attachment-zoom" role="group" aria-label={t('Масштаб')}>
+        <button class="icon-button" type="button" aria-label={t('Уменьшить')} disabled={!natural || scale <= MIN_SCALE} onclick={() => zoomTo(scale / STEP)}><Icon name="minus" size={18} /></button>
+        <button class="attachment-zoom-level" type="button" aria-label={t('Исходный размер')} title={t('Показать в масштабе 100%')} disabled={!natural} onclick={() => zoomTo(1)}>{natural ? `${Math.round(scale * 100)}%` : '…'}</button>
+        <button class="icon-button" type="button" aria-label={t('Увеличить')} disabled={!natural || scale >= MAX_SCALE} onclick={() => zoomTo(scale * STEP)}><Icon name="plus" size={18} /></button>
+        <button class="icon-button" type="button" aria-label={t('Вписать в окно')} aria-pressed={fitted} disabled={!natural} onclick={fit}><Icon name="fit" size={18} /></button>
       </div>
-      <button class="icon-button attachment-preview-close" type="button" aria-label="Закрыть просмотр" onclick={close}><Icon name="close" size={21} /></button>
+      <button class="icon-button attachment-preview-close" type="button" aria-label={t('Закрыть просмотр')} onclick={close}><Icon name="close" size={21} /></button>
     </header>
     <!-- svelte-ignore a11y_no_static_element_interactions (Pointer and wheel gestures only supplement the zoom buttons and dialog keys.) -->
     <div class="attachment-preview-body" class:zoomed={natural && !fitted} class:dragging bind:this={viewport} onwheel={wheel} onpointerdown={pointerDown} onpointermove={pointerMove} onpointerup={pointerUp} onpointercancel={pointerUp}>
-      {#if previewFailed}<p role="alert">Не удалось показать изображение. Скачайте файл, чтобы открыть его на компьютере.</p>
+      {#if previewFailed}<p role="alert">{t('Не удалось показать изображение. Скачайте файл, чтобы открыть его на компьютере.')}</p>
       {:else}<img src={url(preview, source)} alt={preview.name} draggable="false" class:pending={!natural} style:width={natural ? `${natural.width * scale}px` : undefined} style:height={natural ? `${natural.height * scale}px` : undefined} onload={loaded} onerror={failedToLoad} />{/if}
     </div>
     <footer>
-      <a class="button secondary" href={url(preview, source)} target="_blank" rel="noopener"><Icon name="external" size={16} />Открыть в новом окне</a>
-      <a class="button secondary" href={url(preview, 'download')} download={preview.name}><Icon name="down" size={16} />Скачать оригинал</a>
+      <a class="button secondary" href={url(preview, source)} target="_blank" rel="noopener"><Icon name="external" size={16} />{t('Открыть в новом окне')}</a>
+      <a class="button secondary" href={url(preview, 'download')} download={preview.name}><Icon name="down" size={16} />{t('Скачать оригинал')}</a>
     </footer>
   {/if}
 </dialog>

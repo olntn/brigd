@@ -1,4 +1,6 @@
-const invalidCommands = 'BRIGD_INTEGRATION_CHECKS: укажите 1–10 непустых команд массивами аргументов';
+import { tk } from './i18n/key';
+
+const invalidCommands = tk('BRIGD_INTEGRATION_CHECKS: укажите 1–10 непустых команд массивами аргументов');
 
 /** Validate argv arrays without shell parsing, with the same limits for UI and environment settings. */
 export function validateIntegrationChecks(value: unknown): string[][] {
@@ -16,6 +18,6 @@ export function validateIntegrationChecks(value: unknown): string[][] {
 export function parseIntegrationChecks(text: string): string[][] {
   let value: unknown;
   try { value = JSON.parse(text); }
-  catch { throw new Error('BRIGD_INTEGRATION_CHECKS должен быть JSON-массивом массивов аргументов'); }
+  catch { throw new Error(tk('BRIGD_INTEGRATION_CHECKS должен быть JSON-массивом массивов аргументов')); }
   return validateIntegrationChecks(value);
 }
