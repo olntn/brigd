@@ -256,7 +256,50 @@ export interface RunProgress {
   text: string;
   updatedAt: number;
 }
+/**
+ * What one CLI turn reported about its consumption. null means the CLI did not say: Codex reports no cost,
+ * older CLIs report nothing. inputTokens counts every input token including those read from the prompt cache;
+ * cachedTokens is the cached part of it.
+ */
+export interface TokenUsage {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedTokens: number | null;
+  costUsd: number | null;
+}
+/** One recorded agent turn: its reported usage and the time brigd measured from the CLI start to its end. */
+export interface TurnUsage extends TokenUsage {
+  runId: string;
+  turn: number;
+  /** The workflow step and its attempt; null for a run without steps. */
+  stepIndex: number | null;
+  attemptId: string | null;
+  provider: Provider;
+  workerId: string | null;
+  trigger: Run['trigger'];
+  durationMs: number;
+  startedAt: number;
+  finishedAt: number;
+}
+/** Sums over recorded turns. A token or cost sum is null when no turn reported it. */
+export interface UsageTotals extends TokenUsage {
+  turns: number;
+  /** Turns whose CLI reported a cost; fewer than `turns` means the cost covers only part of the work. */
+  pricedTurns: number;
+  durationMs: number;
+}
+/** A worker's recorded turns, including those of deleted tasks. */
+export interface WorkerUsage { workerId: string; recent: UsageTotals | null; total: UsageTotals; }
+export interface WorkerUsageOverview {
+  /** Start of the recent window: 30 days before the response. */
+  recentSince: number;
+  workers: WorkerUsage[];
+}
 export interface Run {
+  /** Sums over the run's recorded turns; absent until a turn has ended. */
+  usage?: UsageTotals;
+  /** Every recorded turn, oldest first; only in task details and the run reading tool. */
+  turnUsage?: TurnUsage[];
   /** A failed turn stopped by its saved deadline; its native session may be continued manually. */
   timeLimitExceeded?: boolean;
   /** Effective limit frozen for this turn, including continuations; null means unlimited. */
@@ -548,6 +591,8 @@ export interface AutopilotOverview extends AutopilotState {
   attempts: Run[];
   /** Failed-check triage of the session's tasks, over every run of those tasks since the session started. */
   triage: CheckTriageCounts;
+  /** Turns of the session's tasks that started during the session; null before the first one ends. */
+  usage: UsageTotals | null;
 }
 
 export type DocBlockType = 'paragraph' | 'heading1' | 'heading2' | 'heading3' | 'bulleted' | 'numbered' | 'todo' | 'quote' | 'code' | 'divider'

@@ -1,4 +1,4 @@
-import type { CliAccessMode, Envelope, Provider, TaskLogInput } from '../src/lib/types';
+import type { CliAccessMode, Envelope, Provider, TaskLogInput, TokenUsage } from '../src/lib/types';
 import { claudeToolLog, codexActionLog } from './worker-logs';
 import { sanitizeLogError } from './log-errors';
 
@@ -99,10 +99,43 @@ function isNativeApprovalRequired(text: string): boolean {
   return /permission for this tool use was denied|requires? (?:user |human )?approval|no approval surface|(?:approval|permission) (?:was |is )?(?:required|rejected)|cannot request (?:user )?approval/i.test(text);
 }
 
+/** A token count the CLI reported, or null for a missing or malformed field. */
+function tokenCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER ? Math.round(value) : null;
+}
+const addCounts = (...values: (number | null)[]): number | null =>
+  values.some(value => value !== null) ? values.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null;
+
+/**
+ * Claude Code's final `result` event sums the whole invocation. Its input_tokens leave out the cache,
+ * so cache writes and reads are added back: inputTokens means every input token for both providers.
+ */
+export function claudeUsage(event: Record<string, unknown>): TokenUsage | null {
+  const usage = record(event.usage) ? event.usage : {};
+  const cached = tokenCount(usage.cache_read_input_tokens);
+  const result: TokenUsage = {
+    inputTokens: addCounts(tokenCount(usage.input_tokens), tokenCount(usage.cache_creation_input_tokens), cached),
+    outputTokens: tokenCount(usage.output_tokens),
+    cachedTokens: cached,
+    costUsd: typeof event.total_cost_usd === 'number' && Number.isFinite(event.total_cost_usd) && event.total_cost_usd >= 0 ? event.total_cost_usd : null,
+  };
+  return Object.values(result).some(value => value !== null) ? result : null;
+}
+
+/** Codex `turn.completed` usage: input_tokens already include cached_input_tokens. Codex reports no cost. */
+export function codexUsage(event: Record<string, unknown>): TokenUsage | null {
+  if (!record(event.usage)) return null;
+  const result: TokenUsage = { inputTokens: tokenCount(event.usage.input_tokens), outputTokens: tokenCount(event.usage.output_tokens),
+    cachedTokens: tokenCount(event.usage.cached_input_tokens), costUsd: null };
+  return Object.values(result).some(value => value !== null) ? result : null;
+}
+
 export interface ProtocolCallbacks {
   onSession: (id: string) => void;
   onComment: (body: string) => void;
   onLog?: (entry: TaskLogInput) => void;
+  /** The turn's usage so far, each time an event reports it; a failed or cancelled turn keeps what was reported. */
+  onUsage?: (usage: TokenUsage) => void;
 }
 
 /** The same parser is used by live subprocesses and recorded-event tests. */
@@ -115,6 +148,8 @@ export class AgentProtocol {
   private nativePermissionRequest = false;
   /** The first exhausted-limit message, already redacted and bounded; null until one is seen. */
   private usageLimit: string | null = null;
+  /** Tokens and cost the CLI reported for this turn; null while it has reported none. */
+  private tokenUsage: TokenUsage | null = null;
   private stderrTail = '';
   private blockedTools = new Set<string>();
   private seenLogs = new Set<string>();
@@ -141,6 +176,18 @@ export class AgentProtocol {
   private get cliName(): string { return this.provider === 'claude' ? 'Claude Code' : 'Codex'; }
   /** The exhausted-limit message seen so far, if any. */
   get usageLimitDetail(): string | null { return this.usageLimit; }
+  /** Tokens and cost reported so far, if any. Missing usage never fails a turn. */
+  get usage(): TokenUsage | null { return this.tokenUsage && { ...this.tokenUsage }; }
+
+  private noteUsage(usage: TokenUsage | null, add: boolean): void {
+    if (!usage) return;
+    const prior = add ? this.tokenUsage : null;
+    this.tokenUsage = prior ? {
+      inputTokens: addCounts(prior.inputTokens, usage.inputTokens), outputTokens: addCounts(prior.outputTokens, usage.outputTokens),
+      cachedTokens: addCounts(prior.cachedTokens, usage.cachedTokens), costUsd: prior.costUsd === null && usage.costUsd === null ? null : (prior.costUsd ?? 0) + (usage.costUsd ?? 0),
+    } : usage;
+    this.callbacks.onUsage?.({ ...this.tokenUsage });
+  }
   /** Bytes of oversized lines dropped unread so far, including the one still streaming in; the bounded runner leaves them out of its output limit. */
   get discardedBytes(): number { return this.discarded + this.skipping; }
 
@@ -313,7 +360,11 @@ export class AgentProtocol {
     }
 
     if (this.provider === 'codex') {
-      if (event.type === 'turn.completed') this.terminal = true;
+      if (event.type === 'turn.completed') {
+        this.terminal = true;
+        // Each completed turn reports its own usage; one exec normally has one turn.
+        this.noteUsage(codexUsage(event), true);
+      }
       if ((event.type === 'item.started' || event.type === 'item.completed') && record(event.item)) {
         const item = event.item;
         const log = codexActionLog(item, event.type === 'item.completed');
@@ -370,6 +421,8 @@ export class AgentProtocol {
       }
       if (event.type === 'result') {
         this.terminal = true;
+        // The result already sums the whole invocation, including a failed one.
+        this.noteUsage(claudeUsage(event), false);
         if (event.subtype !== 'success' || event.is_error === true) {
           const details = [errorText(event.result), ...(Array.isArray(event.errors) ? event.errors.map(errorText) : [])].filter(Boolean).join('\n');
           const subtype = typeof event.subtype === 'string' && event.subtype ? event.subtype.slice(0, 100) : 'unknown';
@@ -386,19 +439,21 @@ export class AgentProtocol {
     }
   }
 
-  finish(exitCode: number): { envelope: Envelope; sessionId: string } {
+  finish(exitCode: number): { envelope: Envelope; sessionId: string; usage?: TokenUsage } {
     // A native prompt is intentionally terminated mid-stream; its unfinished tail is not a result.
     if (!this.nativeBlock) this.end();
     // An exhausted limit may stop the CLI before any session exists; a replacement account can still take the work.
     if (this.usageLimit !== null && !this.nativeBlock && (this.failure || exitCode !== 0 || !this.terminal)) throw new UsageLimitError(this.provider, this.usageLimit);
     if (!this.sessionId) throw this.protocolError('The CLI did not return a durable session ID.');
     if (this.failure) throw this.protocolError('The CLI reported a failed turn. No successful result was accepted.');
+    const usage = this.usage;
     if (this.nativeBlock) return {
       sessionId: this.sessionId,
       envelope: { status: 'blocked', summary: this.blockedSummary(), questions: [] },
+      ...(usage ? { usage } : {}),
     };
     if (exitCode !== 0) throw this.protocolError(`The CLI exited with code ${exitCode}. No successful result was accepted.`);
     if (!this.terminal) throw this.protocolError('The CLI exited without a completed turn event.');
-    return { sessionId: this.sessionId, envelope: validateEnvelope(this.finalResponse) };
+    return { sessionId: this.sessionId, envelope: validateEnvelope(this.finalResponse), ...(usage ? { usage } : {}) };
   }
 }

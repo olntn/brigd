@@ -6,7 +6,9 @@
   import { defaultAvatarCrop, exportAvatar, type AvatarCrop } from './avatar';
   import { effortOptions, effortLabel, modelLabel, normalizeModel, INTEGRATOR_WORKER, MODEL_ID_LIMIT } from './workers';
   import { serverText, t } from './i18n';
-  import type { Effort, IntegratorMode, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, Provider, Worker, WorkerInput } from './types';
+  import { subscribe } from './events';
+  import { usageDetails, usageLine } from './usage';
+  import type { Effort, IntegratorMode, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, Provider, Worker, WorkerInput, WorkerUsage, WorkerUsageOverview } from './types';
 
   let { workers, loading, error, retry, onchange, ondelete, notify, models, modelsLoading, modelsError, retryModels }: {
     workers: Worker[]; loading: boolean; error: string; retry: () => void;
@@ -115,6 +117,18 @@
     finally { integratorLoading = false; }
   }
   onMount(() => { void loadIntegrator(); });
+
+  // Totals change when a turn ends; the server reports that as a workers change.
+  let usage = $state<Map<string, WorkerUsage>>(new Map());
+  let usageSequence = 0;
+  async function loadUsage() {
+    const sequence = ++usageSequence;
+    try {
+      const result = await request<WorkerUsageOverview>('/api/usage/workers', {});
+      if (sequence === usageSequence) usage = new Map(result.workers.map(entry => [entry.workerId, entry]));
+    } catch { /* The cards stay usable without totals; the next change or the fallback reload tries again. */ }
+  }
+  onMount(() => { void loadUsage(); return subscribe(['workers'], loadUsage); });
 
   function resetEditorMedia() {
     imageSequence++;
@@ -349,9 +363,21 @@
   }
 </script>
 
+{#snippet usageSummary(id: string)}
+  {@const entry = usage.get(id)}
+  <div class="worker-usage" aria-label={t('Расход работника')}>
+    {#if entry}
+      <p title={entry.recent ? usageDetails(entry.recent) : undefined}><span>{t('За 30 дней')}:</span> {entry.recent ? usageLine(entry.recent) : t('ходов не было')}</p>
+      <p title={usageDetails(entry.total)}><span>{t('За всё время')}:</span> {usageLine(entry.total)}</p>
+    {:else}
+      <p>{t('Расход появится после первого хода.')}</p>
+    {/if}
+  </div>
+{/snippet}
 {#snippet workerCard(worker: Worker)}
   <article class="worker-card" class:archived-worker={worker.archived} aria-label={t('Работник: {name}', { name: worker.name })}>
     <div class="worker-card-heading"><WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={64} /><div><h2>{worker.name}</h2><p class="worker-description" class:empty-description={!worker.description?.trim()}>{worker.description?.trim() || t('Описание не задано')}</p><p>{providerName(worker.provider)} <span>·</span> <span class="worker-model-label" title={worker.model ?? undefined}>{t(modelLabel(worker.model, models, worker.provider))}</span></p><p>{t('Усилия: {effort}', { effort: t(effortLabel(worker.effort)) })}</p>{#if worker.fallbackWorkerId}<p class="worker-fallback-label">{t('Замена при лимитах: {name}', { name: fallbackLabel(worker) })}</p>{/if}</div>{#if worker.archived}<span class="worker-archived-label">{t('В архиве')}</span>{/if}</div>
+    {@render usageSummary(worker.id)}
     <div class="worker-card-actions"><button class="button secondary" disabled={pending.includes(worker.id)} onclick={() => openEditor(worker)} aria-label={t('Изменить работника: {name}', { name: worker.name })}><Icon name="edit" size={14} />{t('Изменить')}</button><button class="button text-button" disabled={pending.includes(worker.id)} onclick={() => setArchived(worker)} aria-label={worker.archived ? t('Восстановить работника: {name}', { name: worker.name }) : t('В архив: {name}', { name: worker.name })}><Icon name={pending.includes(worker.id) ? 'refresh' : worker.archived ? 'refresh' : 'inbox'} size={14} class={pending.includes(worker.id) ? 'spin' : ''} />{worker.archived ? t('Восстановить') : t('В архив')}</button><button class="button text-button danger-hover" disabled={pending.includes(worker.id)} onclick={() => askDelete(worker)} aria-label={t('Удалить работника: {name}', { name: worker.name })}><Icon name="trash" size={14} />{t('Удалить')}</button></div>
   </article>
 {/snippet}
@@ -366,6 +392,7 @@
   <h2 class="builtin-heading">{t('Встроенный работник')}</h2>
   <article class="worker-card builtin-worker" aria-label={t('Встроенный работник: {name}', { name: t(INTEGRATOR_WORKER.name) })}>
     <div class="worker-card-heading"><WorkerAvatar name={t(INTEGRATOR_WORKER.name)} avatarUrl={integrator?.avatarUrl ?? null} size={64} /><div><h2>{t(INTEGRATOR_WORKER.name)}</h2><p class="worker-description">{t(INTEGRATOR_WORKER.description)}</p><p class="integrator-settings">{integratorSettings}</p></div><span class="worker-archived-label">{t('Встроенный')}</span></div>
+    {@render usageSummary(INTEGRATOR_WORKER.id)}
     <p class="builtin-worker-note">{t('Запускается сам при конфликте слияния (или кнопкой «Поручить интегратору» в карточке задачи), разрешает конфликты в worktree задачи, после чего brigd заново проверяет и переносит результат. Коммиты объединения подписаны его именем. Его нельзя назначить задаче или архивировать; настройки запуска, указания и аватар меняются здесь.')}</p>
     {#if integratorError}<div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{integratorError}</span><button onclick={() => { void loadIntegrator(); }}>{t('Повторить')}</button></div>{/if}
     <div class="worker-card-actions"><button class="button secondary" disabled={!integrator || integratorLoading} onclick={() => { void openIntegratorEditor(); }} aria-label={t('Изменить работника: {name}', { name: t(INTEGRATOR_WORKER.name) })}><Icon name="edit" size={14} />{t('Изменить')}</button></div>

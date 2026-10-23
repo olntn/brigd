@@ -7,6 +7,8 @@ export const TABLE_SCOPES: Readonly<Record<string, readonly ChangeScope[]>> = {
   tasks: ['tasks'], task_tags: ['tasks'], runs: ['tasks'], comments: ['tasks'], task_logs: ['tasks'],
   attachments: ['tasks'], task_attachment_links: ['tasks'], comment_attachment_links: ['tasks'], run_attachment_inputs: ['tasks'],
   followup_requests: ['tasks'], execution_requests: ['tasks'], integrations: ['tasks'], workspaces: ['tasks'],
+  // A turn's usage shows in its run, the autopilot report (which follows tasks) and the worker totals.
+  run_usage: ['tasks', 'workers'],
   autopilot: ['autopilot'],
   instructions: ['instructions'],
   doc_pages: ['docs'], doc_images: ['docs'], doc_search: ['docs'],

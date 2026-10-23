@@ -1,4 +1,4 @@
-import type { AutopilotInput, AutopilotOverview, AutopilotSettings, CheckTriageSettings, CliAccessMode, CliAccessSettings, ConcurrencyLimits, ConcurrencySettings, FollowupInput, Integration, Run, StorageCleanupResult, StorageOverview } from '../src/lib/types';
+import type { AutopilotInput, AutopilotOverview, AutopilotSettings, CheckTriageSettings, CliAccessMode, CliAccessSettings, ConcurrencyLimits, ConcurrencySettings, FollowupInput, Integration, Run, StorageCleanupResult, StorageOverview, TokenUsage } from '../src/lib/types';
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
 import { DEFAULT_CONCURRENCY, isConcurrencyLimit } from '../src/lib/concurrency';
 import { CHECK_HANDBACK_LIMIT, CHECK_TRIAGE_TIME_LIMIT_MS, DEFAULT_CHECK_TRIAGE } from '../src/lib/check-triage';
@@ -452,6 +452,20 @@ export class Engine {
     const fresh = !run.sessionId;
     let handle: AgentHandle;
     let commentCursor: number;
+    // Usage the CLI reported so far; the turn's duration runs on the monotonic clock from the CLI start.
+    let reported: TokenUsage | null = null;
+    let startedAt = 0, started = 0, recorded = false;
+    /** Once per turn, before its outcome is stored, whether it completed, failed or was cancelled. Never fails the turn. */
+    const recordUsage = (usage?: TokenUsage) => {
+      if (recorded) return;
+      recorded = true;
+      try {
+        this.store.recordRunUsage({ runId: run.id, turn: run.turn, stepIndex: run.currentStepIndex, attemptId: fence.attemptId, provider: run.provider,
+          workerId: run.worker?.id ?? run.workerId, trigger: run.trigger, usage: usage ?? reported, durationMs: performance.now() - started, startedAt, finishedAt: clock() });
+      } catch (error) {
+        console.error('[brigd] Не удалось сохранить расход хода:', error instanceof Error ? error.message : error);
+      }
+    };
     try {
       commentCursor = this.store.commentCursor(run.taskId);
       const workflow = workflowContext(run.followup?.workflow ?? run);
@@ -477,7 +491,10 @@ export class Engine {
         release();
         return;
       }
+      startedAt = clock();
+      started = performance.now();
       handle = this.factory(input, {
+        onUsage: usage => { reported = usage; },
         onSession: id => {
           if (!isCurrent()) return;
           try { this.store.setSession(run.id, id, fence); }
@@ -512,7 +529,8 @@ export class Engine {
       release();
       return;
     }
-    return handle.result.then(({ envelope: rawEnvelope, sessionId: rawSessionId }) => {
+    return handle.result.then(({ envelope: rawEnvelope, sessionId: rawSessionId, usage }) => {
+      recordUsage(usage);
       launch.bridge?.close();
       if (!isCurrent()) return;
       const envelope = validateEnvelope(rawEnvelope);
@@ -538,7 +556,8 @@ export class Engine {
       // The old process has settled. Its later finally must never remove or
       // complete cancellation of a newer step/attempt occupying this same run.
       release();
-    }).catch(error => this.fail(run, fence, error, fresh)).finally(() => {
+    }).catch(error => { recordUsage(); this.fail(run, fence, error, fresh); }).finally(() => {
+      recordUsage();
       this.store.completeCancellation(run.id, clock(), fence);
       release();
     });

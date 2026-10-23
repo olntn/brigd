@@ -595,7 +595,8 @@ describe('change events', () => {
       calls[0]!.callbacks.onProgress?.('Чтение кода');
       expect((await events.next())?.data.scopes).toEqual(['tasks']);
       calls[0]!.resolve({ envelope: { status: 'completed', summary: 'Готово', questions: [] }, sessionId: '0199a213-81c0-7800-8aa1-bbab2a035a53' });
-      expect((await events.next())?.data.scopes).toEqual(['tasks']);
+      // The ended turn's usage also changes the worker totals.
+      expect((await events.next())?.data.scopes).toEqual(['tasks', 'workers']);
       expect((await detail(task.id)).task.status).toBe('completed');
     } finally { await events.cancel(); }
   });
@@ -674,4 +675,24 @@ describe('change events', () => {
       } finally { await stream.cancel(); }
     } finally { events.closeAll(); server.stop(true); }
   }, 15_000);
+});
+
+describe('turn usage API', () => {
+  test('task details list each turn, the board carries only the latest run\'s sum, and workers get their totals', async () => {
+    const worker = store.createWorker({ name: 'Reviewer', provider: 'claude', avatarUrl: null, effort: 'default', communicationStyle: '' });
+    const task = await createTask({ provider: 'claude', workerId: worker.id });
+    const run = (await (await request(`/api/tasks/${task.id}/run`, 'POST')).json()) as Run;
+    const usage = { inputTokens: 12_000, outputTokens: 300, cachedTokens: 9_000, costUsd: 0.42 };
+    calls[0]!.resolve({ sessionId: 'session-usage', envelope: { status: 'completed', summary: 'Done', questions: [] }, usage });
+    await flush();
+    const runDetail = (await detail(task.id)).runs[0]!;
+    expect(runDetail.usage).toMatchObject({ turns: 1, ...usage });
+    expect(runDetail.turnUsage).toEqual([expect.objectContaining({ runId: run.id, workerId: worker.id, provider: 'claude', trigger: 'manual', ...usage })]);
+    const board = (await (await request('/api/tasks')).json()) as Task[];
+    expect(board[0]!.latestRun).toMatchObject({ usage: { turns: 1, costUsd: 0.42 } });
+    expect(board[0]!.latestRun!.turnUsage).toBeUndefined();
+    const workers = await (await request('/api/usage/workers')).json();
+    expect(workers.workers).toEqual([{ workerId: worker.id, recent: expect.objectContaining({ turns: 1, ...usage }), total: expect.objectContaining({ turns: 1, ...usage }) }]);
+    expect(workers.recentSince).toBeLessThan(Date.now());
+  });
 });

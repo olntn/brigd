@@ -822,3 +822,92 @@ test('a timed-out workflow stage resumes its saved session with a fresh deadline
   expect(resumed.steps[0]).toMatchObject({ status: 'running', sessionId: 'timeout-stage-session' });
   expect(store.finish(run.id, 'completed', 'Done', null)).toMatchObject({ currentStepIndex: 1 });
 });
+
+describe('turn usage', () => {
+  const DAY = 24 * 60 * MINUTE;
+  const turn = (runId: string, patch: Partial<Parameters<Store['recordRunUsage']>[0]> = {}) => store.recordRunUsage({
+    runId, turn: 1, stepIndex: null, attemptId: null, provider: 'claude', workerId: null, trigger: 'manual',
+    usage: { inputTokens: 1_000, outputTokens: 200, cachedTokens: 600, costUsd: 0.1 }, durationMs: 60_000, startedAt: BASE, finishedAt: BASE + MINUTE, ...patch,
+  });
+
+  test('a run sums its turns; a token or cost sum stays null until some turn reports it', () => {
+    const task = store.createTask(input(), BASE);
+    const run = store.startManual(task.id, true, BASE);
+    expect(store.getRun(run.id).usage).toBeUndefined();
+    expect(turn(run.id, { usage: null, durationMs: 5_000 })).toBe(true);
+    expect(store.getRun(run.id).usage).toEqual({ turns: 1, pricedTurns: 0, inputTokens: null, outputTokens: null, cachedTokens: null, costUsd: null, durationMs: 5_000 });
+    turn(run.id, { turn: 2, provider: 'codex', usage: { inputTokens: 3_000, outputTokens: 50, cachedTokens: null, costUsd: null }, durationMs: 10_000 });
+    turn(run.id, { turn: 3, usage: { inputTokens: 1_000, outputTokens: 200, cachedTokens: 600, costUsd: 0.1 } });
+    turn(run.id, { turn: 4, usage: { inputTokens: 10, outputTokens: 20, cachedTokens: 0, costUsd: 0.2 } });
+    expect(store.getRun(run.id).usage).toEqual({ turns: 4, pricedTurns: 2, inputTokens: 4_010, outputTokens: 270, cachedTokens: 600, costUsd: 0.3, durationMs: 135_000 });
+    expect(store.turnUsage(run.id).map(entry => [entry.turn, entry.provider, entry.costUsd])).toEqual([[1, 'claude', null], [2, 'codex', null], [3, 'claude', 0.1], [4, 'claude', 0.2]]);
+    // The board's list carries the sum only; the details also list every turn.
+    expect(store.listTasks()[0]!.latestRun).toMatchObject({ usage: { turns: 4 } });
+    expect(store.listTasks()[0]!.latestRun!.turnUsage).toBeUndefined();
+    expect(store.detail(task.id).runs[0]!.turnUsage).toEqual(store.turnUsage(run.id));
+  });
+
+  test('implausible values are dropped, a missing run records nothing, and an invalid entry throws', () => {
+    const task = store.createTask(input(), BASE);
+    const run = store.startManual(task.id, true, BASE);
+    turn(run.id, { usage: { inputTokens: -1, outputTokens: 1.5, cachedTokens: Number.NaN, costUsd: Number.POSITIVE_INFINITY }, durationMs: -20 });
+    expect(store.turnUsage(run.id)[0]).toMatchObject({ inputTokens: null, outputTokens: null, cachedTokens: null, costUsd: null, durationMs: 0 });
+    expect(turn('missing-run')).toBe(false);
+    expect(() => turn(run.id, { turn: 0 })).toThrow('Invalid turn usage record');
+    expect(() => turn(run.id, { trigger: 'other' as never })).toThrow('Invalid turn usage record');
+  });
+
+  test('worker totals cover the last 30 days and all time, and survive deleting the task', () => {
+    const task = store.createTask(input(), BASE);
+    const run = store.startManual(task.id, true, BASE);
+    store.finish(run.id, 'completed', 'Done', null, BASE + 1);
+    const now = BASE + 40 * DAY;
+    turn(run.id, { workerId: 'worker-a', startedAt: BASE, finishedAt: BASE + MINUTE });
+    turn(run.id, { turn: 2, workerId: 'worker-a', startedAt: now - DAY, finishedAt: now - DAY + MINUTE, usage: { inputTokens: 5, outputTokens: 5, cachedTokens: 0, costUsd: 0.05 } });
+    turn(run.id, { turn: 3, workerId: 'worker-b', startedAt: BASE, finishedAt: BASE + MINUTE });
+    turn(run.id, { turn: 4, workerId: null });
+    const before = store.workerUsage(now);
+    expect(before.recentSince).toBe(now - 30 * DAY);
+    expect(before.workers.find(entry => entry.workerId === 'worker-a')).toMatchObject({ recent: { turns: 1, inputTokens: 5, costUsd: 0.05 }, total: { turns: 2, inputTokens: 1_005, costUsd: 0.15 } });
+    expect(before.workers.find(entry => entry.workerId === 'worker-b')).toMatchObject({ recent: null, total: { turns: 1 } });
+    expect(before.workers).toHaveLength(2);
+    store.deleteTask(task.id);
+    expect(store.workerUsage(now)).toEqual(before);
+    expect(store.db.query('SELECT count(*) AS n FROM run_usage WHERE run_id IS NULL').get()).toEqual({ n: 4 });
+  });
+
+  test('an autopilot session sums the turns of its tasks that started before it stopped', () => {
+    const auto = (title: string) => store.createTask(input({ title, schedule: 'auto' }), BASE);
+    const first = auto('first'), second = auto('second'), other = store.createTask(input({ title: 'manual' }), BASE);
+    expect(store.autopilotOverview().usage).toBeNull();
+    const earlier = store.startManual(first.id, true, BASE - 10 * MINUTE);
+    turn(earlier.id, { startedAt: BASE - 10 * MINUTE });
+    store.finish(earlier.id, 'failed', null, 'Broken', BASE - 9 * MINUTE);
+    store.setAutopilot({ enabled: true, until: null }, BASE);
+    const runA = store.startAutopilot(first.id, true, BASE + 1)!;
+    turn(runA.id, { trigger: 'autopilot', startedAt: BASE + 1, durationMs: 1_000 });
+    store.finish(runA.id, 'completed', 'Done', null, BASE + 2);
+    const runB = store.startAutopilot(second.id, true, BASE + 3)!;
+    turn(runB.id, { trigger: 'autopilot', provider: 'codex', startedAt: BASE + 3, durationMs: 2_000, usage: { inputTokens: 50, outputTokens: 5, cachedTokens: 10, costUsd: null } });
+    // A hand-back of a session task counts; unrelated work and earlier runs do not.
+    store.setSession(runB.id, 'session-b');
+    store.finish(runB.id, 'completed', 'Done', null, BASE + 4);
+    const followup = store.startFollowup(second.id, { sourceRunId: runB.id, sourceStepIndex: null, body: 'One more check', attachmentIds: [], requestId: 'request-1' }).run;
+    turn(followup.id, { trigger: 'followup', startedAt: BASE + 5 * MINUTE, durationMs: 4_000 });
+    const manual = store.startManual(other.id, true, BASE + 5);
+    turn(manual.id, { startedAt: BASE + 6, durationMs: 8_000 });
+    expect(store.autopilotOverview().usage).toEqual({ turns: 3, pricedTurns: 2, inputTokens: 2_050, outputTokens: 405, cachedTokens: 1_210, costUsd: 0.2, durationMs: 7_000 });
+    store.setAutopilot({ enabled: false, until: null }, BASE + 2 * MINUTE);
+    expect(store.autopilotOverview().usage).toMatchObject({ turns: 2, durationMs: 3_000 });
+  });
+
+  test('the table comes from a recorded migration and is added to an older database on open', () => {
+    expect(store.db.query("SELECT name FROM app_migrations WHERE name='run_usage_v1'").get()).toEqual({ name: 'run_usage_v1' });
+    store.db.exec("DROP TABLE run_usage; DELETE FROM app_migrations WHERE name='run_usage_v1'");
+    store.close();
+    store = new Store(join(folder, 'trackt.sqlite'));
+    const task = store.createTask(input(), BASE);
+    expect(turn(store.startManual(task.id, true, BASE).id)).toBe(true);
+    expect(store.db.query("SELECT name FROM app_migrations WHERE name='run_usage_v1'").get()).toEqual({ name: 'run_usage_v1' });
+  });
+});

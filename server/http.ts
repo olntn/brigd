@@ -233,6 +233,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
       }
       if (path === '/api/workers' && method === 'GET') return json(engine.store.listWorkers());
       if (path === '/api/workers' && method === 'POST') return json(engine.store.createWorker(validateWorker(await body(req))), 201);
+      if (path === '/api/usage/workers' && method === 'GET') return json(engine.store.workerUsage());
       const workerMatch = path.match(/^\/api\/workers\/([a-zA-Z0-9-]+)$/);
       if (workerMatch) {
         const id = workerMatch[1]!;

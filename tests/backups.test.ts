@@ -543,3 +543,17 @@ test('malformed auto-update values in the manifest fail closed', () => {
   writeFileSync(statePath, JSON.stringify({ ...manifest, selectedId: null, autoUpdate: true }));
   status(() => backups.getAutoUpdate(), 500);
 });
+
+test('turn usage travels with snapshots, and its rows detached from a deleted task still pass the reference check', () => {
+  const saved = task('With usage');
+  const run = store.startManual(saved.id, true);
+  store.recordRunUsage({ runId: run.id, turn: 1, stepIndex: null, attemptId: null, provider: 'claude', workerId: 'worker-1', trigger: 'manual',
+    usage: { inputTokens: 10, outputTokens: 2, cachedTokens: 4, costUsd: 0.01 }, durationMs: 1_500, startedAt: 1, finishedAt: 2 });
+  const backup = backups.create();
+  expect(snapshotRows(backup.id, 'SELECT run_id, input_tokens, cost_usd, duration_ms FROM run_usage')).toEqual([{ run_id: run.id, input_tokens: 10, cost_usd: 0.01, duration_ms: 1_500 }]);
+  store.finish(run.id, 'completed', 'Done', null);
+  store.deleteTask(saved.id);
+  const detached = backups.create();
+  validateBackup(backups.download(detached.id).path);
+  expect(snapshotRows(detached.id, 'SELECT run_id, worker_id FROM run_usage')).toEqual([{ run_id: null, worker_id: 'worker-1' }]);
+});

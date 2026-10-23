@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentProtocol, ProtocolError, UsageLimitError, isUsageLimit, validateEnvelope } from '../server/protocol';
-import { AgentRunError, buildArgv, buildPrompt, capabilitiesFromHelp, runBoundedProcess, startAgent, type AgentInput } from '../server/adapter';
+import { AgentRunError, buildArgv, buildPrompt, capabilitiesFromHelp, mockUsage, runBoundedProcess, startAgent, type AgentInput } from '../server/adapter';
 import type { Envelope, Provider, TaskLogInput } from '../src/lib/types';
 import { effortOptions, modelLabel, modelPresets, normalizeModel } from '../src/lib/workers';
 import { TASK_MCP_TOOLS } from '../server/task-mcp-protocol';
@@ -1226,5 +1226,108 @@ describe('agent turn time limits', () => {
       const pid = Number(readFileSync(marker, 'utf8'));
       expect(() => process.kill(pid, 0)).toThrow();
     } finally { timer.mockRestore(); process.env.PATH = oldPath; rmSync(folder, { recursive: true, force: true }); }
+  });
+});
+
+describe('turn usage', () => {
+  // Shapes recorded from Claude Code `-p --output-format stream-json --verbose` and Codex `exec --json`.
+  const claudeResult = (patch: Record<string, unknown> = {}) => ({
+    type: 'result', subtype: 'success', is_error: false, duration_ms: 412_345, duration_api_ms: 398_120, num_turns: 17, session_id: sid,
+    total_cost_usd: 0.4213, usage: { input_tokens: 42, cache_creation_input_tokens: 10_234, cache_read_input_tokens: 184_220, output_tokens: 5_321,
+      server_tool_use: { web_search_requests: 0 }, service_tier: 'standard' },
+    structured_output: completed, ...patch,
+  });
+  const codexEvents = (usage: unknown) => [...codex().slice(0, 3), { type: 'turn.completed', usage }];
+  const usageOf = (provider: Provider, events: unknown[]) => {
+    const reported: unknown[] = [];
+    const parser = new AgentProtocol(provider, { ...capture(), onUsage: usage => { reported.push(usage); } });
+    for (const event of events) parser.accept(event);
+    return { parser, reported };
+  };
+
+  test('Claude Code: cost and tokens from the final result, with cache writes and reads counted as input', () => {
+    const { parser, reported } = usageOf('claude', [claude()[0], claudeResult()]);
+    const usage = { inputTokens: 42 + 10_234 + 184_220, outputTokens: 5_321, cachedTokens: 184_220, costUsd: 0.4213 };
+    expect(parser.finish(0)).toEqual({ sessionId: sid, envelope: completed, usage });
+    expect(reported).toEqual([usage]);
+  });
+
+  test('Codex: tokens from turn.completed, where cached input is part of the input, and never a cost', () => {
+    const { parser, reported } = usageOf('codex', codexEvents({ input_tokens: 24_763, cached_input_tokens: 24_448, output_tokens: 122 }));
+    const usage = { inputTokens: 24_763, outputTokens: 122, cachedTokens: 24_448, costUsd: null };
+    expect(parser.finish(0)).toEqual({ sessionId: sid, envelope: completed, usage });
+    expect(reported).toEqual([usage]);
+  });
+
+  test('an older CLI without usage fields still completes, and its outcome has no usage', () => {
+    const claudeOld = usageOf('claude', claude());
+    expect(claudeOld.parser.finish(0)).toEqual({ sessionId: sid, envelope: completed });
+    expect(claudeOld.reported).toEqual([]);
+    for (const usage of [undefined, {}, null, 'n/a']) {
+      const codexOld = usageOf('codex', codexEvents(usage));
+      expect(codexOld.parser.finish(0)).toEqual({ sessionId: sid, envelope: completed });
+      expect(codexOld.parser.usage).toBeNull();
+    }
+  });
+
+  test('partial or malformed fields are dropped one by one and never fail the turn', () => {
+    const { parser } = usageOf('claude', [claude()[0], claudeResult({ total_cost_usd: '0.42', usage: { input_tokens: 100, cache_read_input_tokens: -5, output_tokens: Number.NaN } })]);
+    expect(parser.finish(0).usage).toEqual({ inputTokens: 100, outputTokens: null, cachedTokens: null, costUsd: null });
+    const costOnly = usageOf('claude', [claude()[0], claudeResult({ usage: undefined })]);
+    expect(costOnly.parser.finish(0).usage).toEqual({ inputTokens: null, outputTokens: null, cachedTokens: null, costUsd: 0.4213 });
+    const codexPartial = usageOf('codex', codexEvents({ input_tokens: 900, output_tokens: 'many' }));
+    expect(codexPartial.parser.finish(0).usage).toEqual({ inputTokens: 900, outputTokens: null, cachedTokens: null, costUsd: null });
+  });
+
+  test('a failed turn keeps the usage it reported, and nested agents do not replace the parent result', () => {
+    const failed = usageOf('claude', [claude()[0], claudeResult({ subtype: 'error_max_turns', is_error: true })]);
+    expect(() => failed.parser.finish(1)).toThrow('failed turn');
+    expect(failed.parser.usage).toMatchObject({ costUsd: 0.4213, outputTokens: 5_321 });
+    expect(failed.reported).toHaveLength(1);
+    const nested = usageOf('claude', [claude()[0], claudeResult({ parent_tool_use_id: 'toolu_1', total_cost_usd: 9, usage: { output_tokens: 1 } }), claudeResult()]);
+    expect(nested.parser.finish(0).usage?.costUsd).toBe(0.4213);
+  });
+
+  test('several Codex turns in one process add up', () => {
+    const { parser, reported } = usageOf('codex', [...codexEvents({ input_tokens: 1_000, cached_input_tokens: 600, output_tokens: 50 }),
+      { type: 'turn.completed', usage: { input_tokens: 2_000, output_tokens: 70 } }]);
+    expect(parser.finish(0).usage).toEqual({ inputTokens: 3_000, outputTokens: 120, cachedTokens: 600, costUsd: null });
+    expect(reported).toHaveLength(2);
+  });
+
+  test.each(['codex', 'claude'] as const)('%s usage reaches the outcome from a synthetic CLI process', async provider => {
+    const folder = mkdtempSync(join(tmpdir(), 'brigd-usage-cli-')), previousPath = process.env.PATH;
+    const help = provider === 'codex' ? '--json --sandbox --config SESSION_ID' : '--print --output-format stream-json --verbose --resume --permission-mode';
+    const events = provider === 'codex' ? codexEvents({ input_tokens: 24_763, cached_input_tokens: 24_448, output_tokens: 122 }) : [claude()[0], claudeResult()];
+    writeFileSync(join(folder, provider), `#!${process.execPath}\nif (process.argv.includes('--help')) console.log(${JSON.stringify(help)});\nelse for (const event of ${JSON.stringify(events)}) console.log(JSON.stringify(event));`, { mode: 0o700 });
+    try {
+      process.env.PATH = folder + ':' + previousPath;
+      const reported: unknown[] = [];
+      const result = await startAgent({ provider, cwd: folder, instruction: 'Synthetic usage check.' }, { ...capture(), onUsage: usage => { reported.push(usage); } }).result;
+      expect(result.usage).toEqual(provider === 'codex' ? { inputTokens: 24_763, outputTokens: 122, cachedTokens: 24_448, costUsd: null }
+        : { inputTokens: 194_496, outputTokens: 5_321, cachedTokens: 184_220, costUsd: 0.4213 });
+      expect(reported).toEqual([result.usage]);
+    } finally { process.env.PATH = previousPath; rmSync(folder, { recursive: true, force: true }); }
+  });
+
+  test('mock mode reports plausible usage: tokens for both providers, a cost only for Claude Code, nothing with [nousage]', async () => {
+    for (const provider of ['claude', 'codex'] as const) {
+      const reported: unknown[] = [];
+      const result = await startAgent({ provider, cwd: process.cwd(), instruction: 'Demo task [delay:1]', mock: true }, { ...capture(), onUsage: usage => { reported.push(usage); } }).result;
+      const usage = result.usage!;
+      expect(reported).toEqual([usage]);
+      expect(usage.inputTokens).toBeGreaterThanOrEqual(8_000);
+      expect(usage.cachedTokens).toBeLessThan(usage.inputTokens!);
+      expect(usage.outputTokens).toBeGreaterThanOrEqual(400);
+      if (provider === 'claude') expect(usage.costUsd).toBeGreaterThan(0);
+      else expect(usage.costUsd).toBeNull();
+    }
+    expect(mockUsage('claude', 'same seed')).toEqual(mockUsage('claude', 'same seed'));
+    const silent = await startAgent({ provider: 'claude', cwd: process.cwd(), instruction: 'Old CLI [nousage] [delay:1]', mock: true }, capture()).result;
+    expect(silent.usage).toBeUndefined();
+    expect(silent.envelope.status).toBe('completed');
+    const reported: unknown[] = [];
+    await expect(startAgent({ provider: 'claude', cwd: process.cwd(), instruction: '[fail] [delay:1]', mock: true }, { ...capture(), onUsage: usage => { reported.push(usage); } }).result).rejects.toMatchObject({ code: 'MOCK_FAILURE' });
+    expect(reported).toHaveLength(1);
   });
 });

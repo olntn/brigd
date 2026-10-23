@@ -357,6 +357,28 @@ const dictionary: Dictionary = {
   'Автоматически': 'Automatically',
   'Разбор упавших проверок за сессию': 'Failed check triage in this session',
   'Разбор упавших проверок: прошли со второй попытки — {flaky} · целевая ветка не проходит — {targetFailed} · возвращено работникам — {returned} · исчерпан лимит возвратов — {exhausted} · без возврата — {notReturned} · остановлено — {stopped}.': 'Failed check triage: passed on the second attempt — {flaky} · target branch fails — {targetFailed} · handed back to workers — {returned} · hand-back limit reached — {exhausted} · not handed back — {notReturned} · stopped — {stopped}.',
+  // Turn usage (usage.ts, RunUsage, autopilot summary, worker cards).
+  '{hours} ч {minutes} мин': '{hours} h {minutes} min',
+  '{hours} ч': '{hours} h',
+  '{minutes} мин': '{minutes} min',
+  'токен': 'token',
+  'токена': 'tokens',
+  'токенов': 'tokens',
+  'Входных токенов: {input}, из них из кэша: {cached}': 'Input tokens: {input}, of them from cache: {cached}',
+  'Входных токенов: {input}': 'Input tokens: {input}',
+  'Выходных токенов: {output}': 'Output tokens: {output}',
+  'CLI не сообщил токены.': 'The CLI did not report tokens.',
+  'Стоимость неизвестна: CLI её не сообщил. Codex стоимость не передаёт.': 'Cost unknown: the CLI did not report it. Codex never reports cost.',
+  'Стоимость сообщили не все ходы: {priced} из {turns}.': 'Not every turn reported its cost: {priced} of {turns}.',
+  'Длительность измеряет brigd: от запуска CLI до конца хода.': 'brigd measures the duration from the CLI start to the end of the turn.',
+  'Расход запуска': 'Run usage',
+  'Всего за запуск': 'Run total',
+  'Расход за сессию: {usage}': 'Session usage: {usage}',
+  'Расход работника': 'Worker usage',
+  'За 30 дней': 'Last 30 days',
+  'ходов не было': 'no turns',
+  'За всё время': 'All time',
+  'Расход появится после первого хода.': 'Usage appears after the first turn.',
 };
 
 export default dictionary;
