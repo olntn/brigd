@@ -214,6 +214,8 @@ const dictionary: Dictionary = {
   'Конфликтующие файлы:': 'Conflicting files:',
   'Проверка {number}: пройдена': 'Check {number}: passed',
   'Проверка {number}: код {code}': 'Check {number}: exit code {code}',
+  'Вывод проверки': 'Check output',
+  'Вывод проверки: последние {size}': 'Check output: last {size}',
   'Коммит результата:': 'Result commit:',
   'Рабочая папка объединённого кода': 'Working folder of the merged code',
   'Папка остаётся до следующей попытки или очистки хранилища.': 'The folder stays until the next attempt or a storage cleanup.',

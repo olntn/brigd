@@ -5,6 +5,7 @@ import { Readable } from 'node:stream';
 import type { AppInfo, GeneralSettings } from '../src/lib/types';
 import { Engine } from './engine';
 import { AppError } from './store';
+import { clock } from './clock';
 import { MAX_AVATAR_BYTES, validateAvatar } from './avatars';
 import { textField, validateAutopilot, validateAutopilotMove, validateIntegratorProfile, validateTask, validateWorker } from './validation';
 import { TASK_JSON_LIMIT } from './workflows';
@@ -368,7 +369,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
           const value = await body(req);
           const ids = attachmentIds(value.attachmentIds);
           const text = (value.body === undefined || value.body === '') && ids.length ? '' : textField(value.body, 'Комментарий', 8_000);
-          return json(engine.store.comment(id, null, 'user', text, Date.now(), undefined, ids), 201);
+          return json(engine.store.comment(id, null, 'user', text, clock(), undefined, ids), 201);
         }
       }
       const diffMatch = path.match(/^\/api\/runs\/([a-zA-Z0-9-]+)\/diff$/);

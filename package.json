@@ -16,7 +16,7 @@
     "brigd": "bun scripts/brigd.ts",
     "demo": "BRIGD_MODE=mock BRIGD_DB=data/demo.sqlite bun server/index.ts",
     "check": "svelte-check --tsconfig ./tsconfig.json && tsc --noEmit -p tsconfig.server.json",
-    "test": "bun test ./tests",
+    "test": "bun test ./tests --parallel=8",
     "verify": "bun run check && bun run test && bun run build",
     "doctor": "bun scripts/doctor.ts",
     "test:e2e": "playwright test",

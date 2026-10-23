@@ -1,7 +1,8 @@
 <script lang="ts">
   import type { Integration, IntegrationStatus } from './types';
   import Icon from './Icon.svelte';
-  import { serverText, t, tk } from './i18n';
+  import { formatSize, serverText, t, tk } from './i18n';
+  import { CHECK_OUTPUT_LIMIT } from './integration-checks';
   let { integration, busy = false, launchBlocked = false, historical = false, onaction }: {
     integration: Integration;
     busy?: boolean;
@@ -30,7 +31,7 @@
   <h3><Icon name={integration.status === 'merged' ? 'circlecheck' : active ? 'refresh' : 'alert'} size={17} />{t(labels[integration.status])}</h3>
   {#if integration.error}<p class="integration-error">{serverText(integration.error)}</p>{/if}
   {#if integration.conflicts?.length}<p>{t('Конфликтующие файлы:')}</p><ul class="integration-conflicts">{#each integration.conflicts as path}<li><code>{path}</code></li>{/each}</ul>{/if}
-  {#if integration.checks.length}<ul class="integration-checks">{#each integration.checks as check, index}<li>{check.exitCode === 0 ? t('Проверка {number}: пройдена', { number: index + 1 }) : t('Проверка {number}: код {code}', { number: index + 1, code: String(check.exitCode) })}<code>{check.argv.join(' ')}</code></li>{/each}</ul>{/if}
+  {#if integration.checks.length}<ul class="integration-checks">{#each integration.checks as check, index}<li>{check.exitCode === 0 ? t('Проверка {number}: пройдена', { number: index + 1 }) : t('Проверка {number}: код {code}', { number: index + 1, code: String(check.exitCode) })}<code>{check.argv.join(' ')}</code>{#if check.output}<details class="integration-output"><summary>{check.outputTruncated ? t('Вывод проверки: последние {size}', { size: formatSize(CHECK_OUTPUT_LIMIT) }) : t('Вывод проверки')}</summary><pre>{check.output}</pre></details>{/if}</li>{/each}</ul>{/if}
   {#if integration.resultCommit}<p>{t('Коммит результата:')} <code>{integration.resultCommit.slice(0, 12)}</code></p>{/if}
   {#if integration.candidatePath && candidateKept}<details><summary>{t('Рабочая папка объединённого кода')}</summary><code class="integration-path">{integration.candidatePath}</code><p class="integration-note">{t('Папка остаётся до следующей попытки или очистки хранилища.')}</p></details>
   {:else if integration.status === 'merged'}<p class="integration-note">{t('После переноса brigd очищает ненужные рабочие папки и ветку запуска. Папки с подмодулями, используемые worktree и ветки с новыми коммитами сохраняются. История задачи остаётся.')}</p>

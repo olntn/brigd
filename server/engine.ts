@@ -13,6 +13,7 @@ import { DirectWorkspaces, GitWorkspaces, WorkspaceError, type RepositoryLocatio
 import { GitIntegrator, type Integrator } from './integration';
 import { RunCodeDiffs } from './code-diff';
 import { UNAVAILABLE_STORAGE, WorkspaceStorage, type CleanupOptions } from './workspace-storage';
+import { clock } from './clock';
 
 export type AgentFactory = (input: AgentInput, callbacks: AgentCallbacks) => AgentHandle;
 export type TaskBridgeFactory = (store: Store, run: Run, fence: RunFence, appAccess?: TaskAppAccess) => ReturnType<typeof createTaskBridge>;
@@ -106,7 +107,7 @@ export class Engine {
     return this.getAutopilotSettings();
   }
   storageOverview(): Promise<StorageOverview> {
-    return this.storage ? this.storage.overview() : Promise.resolve({ ...UNAVAILABLE_STORAGE, scannedAt: Date.now() });
+    return this.storage ? this.storage.overview() : Promise.resolve({ ...UNAVAILABLE_STORAGE, scannedAt: clock() });
   }
   /** Reclaims merged, cancelled, superseded and unknown folders; one cleanup at a time, with the scheduler paused meanwhile. */
   cleanupStorage(options: CleanupOptions = {}): Promise<StorageCleanupResult> {
@@ -128,7 +129,7 @@ export class Engine {
     this.tick();
     this.timer = setInterval(() => this.tick(), 1_000);
   }
-  tick(now = Date.now()) {
+  tick(now = clock()) {
     if (this.closing) return;
     // Missing checks must not consume scheduled occurrences or create failed attempts.
     if (this.requiresIntegrationChecks && !this.integrationChecks()?.length) return;
@@ -172,7 +173,7 @@ export class Engine {
     this.locations.set(cwd, { location, at: now });
     return location;
   }
-  setAutopilot(input: AutopilotInput, now = Date.now()): AutopilotOverview {
+  setAutopilot(input: AutopilotInput, now = clock()): AutopilotOverview {
     if (input.enabled) this.assertIntegrationChecks();
     const state = this.store.setAutopilot(input, now);
     // Claim right away instead of waiting for the next second's tick.
@@ -224,7 +225,7 @@ export class Engine {
     if (this.closing) throw new AppError('Сервис останавливается', 503);
     this.assertIntegrationChecks(this.store.getRun(runId));
     if (this.handles.has(runId)) throw new AppError('Предыдущий CLI-процесс ещё завершается', 409);
-    const run = this.store.db.transaction(() => this.enqueue(this.store.resume(runId, answer, acknowledgement, Date.now(), attachmentIds), answer)).immediate();
+    const run = this.store.db.transaction(() => this.enqueue(this.store.resume(runId, answer, acknowledgement, clock(), attachmentIds), answer)).immediate();
     this.drain();
     return this.store.getRun(run.id);
   }
@@ -248,7 +249,7 @@ export class Engine {
   }
   cancel(runId: string, acknowledgement = false): Run {
     const launch = this.handles.get(runId);
-    const result = this.store.cancel(runId, Date.now(), !!launch, acknowledgement);
+    const result = this.store.cancel(runId, clock(), !!launch, acknowledgement);
     if (launch) {
       launch.cancelRequested = true;
       launch.bridge?.close();
@@ -263,7 +264,7 @@ export class Engine {
       return this.store.enqueueExecution(run, location, answer);
     } catch (error) {
       if (!(error instanceof WorkspaceError)) throw error;
-      return this.store.finish(run.id, 'blocked', null, error.message, Date.now(), runFence(run));
+      return this.store.finish(run.id, 'blocked', null, error.message, clock(), runFence(run));
     }
   }
   private drain() {
@@ -336,9 +337,9 @@ export class Engine {
     // The target moved on since the conflict was found; the ordinary candidate check decides again.
     this.store.db.transaction(() => {
       const summary = 'Конфликтов с актуальной целевой веткой больше нет. Результат отправлен на повторную проверку без вызова агента.';
-      const result = this.store.finish(run.id, 'completed', summary, null, Date.now(), launch.fence);
-      this.store.log(run.taskId, run.id, { kind: 'lifecycle', summary: 'Интегратор не потребовался', details: [summary, `Целевой коммит: ${prepared.targetCommit}.`] }, Date.now());
-      this.store.comment(run.taskId, run.id, 'system', summary, Date.now());
+      const result = this.store.finish(run.id, 'completed', summary, null, clock(), launch.fence);
+      this.store.log(run.taskId, run.id, { kind: 'lifecycle', summary: 'Интегратор не потребовался', details: [summary, `Целевой коммит: ${prepared.targetCommit}.`] }, clock());
+      this.store.comment(run.taskId, run.id, 'system', summary, clock());
       if (result.status === 'completed') this.store.queueIntegration(result.id);
     }).immediate();
     this.release(run, launch);
@@ -387,7 +388,7 @@ export class Engine {
   }
   private release(run: Run, launch: Launch) {
     launch.bridge?.close();
-    this.store.completeCancellation(run.id, Date.now(), launch.fence);
+    this.store.completeCancellation(run.id, clock(), launch.fence);
     const current = this.store.getRun(run.id);
     this.codeDiffs.freeze(current);
     const hold = !current.mock && current.workspace?.mode === 'direct' &&
@@ -425,7 +426,7 @@ export class Engine {
           checkCommands: this.integrationChecks() ?? run.workspace?.checkCommands ?? [], resultSummary: this.store.getRun(run.reconcile.sourceRunId).summary ?? '' } } : {}) };
       buildPrompt(input); // Enforce the complete UTF-8 bound before even a custom factory.
       if (!isCurrent() || launch.cancelRequested || this.closing) {
-        this.store.completeCancellation(run.id, Date.now(), fence);
+        this.store.completeCancellation(run.id, clock(), fence);
         release();
         return;
       }
@@ -443,12 +444,12 @@ export class Engine {
         },
         onComment: body => {
           this.store.db.transaction(() => {
-            if (isCurrent()) this.store.comment(run.taskId, run.id, 'agent', body.slice(0, 16_000), Date.now(), run.currentStepIndex);
+            if (isCurrent()) this.store.comment(run.taskId, run.id, 'agent', body.slice(0, 16_000), clock(), run.currentStepIndex);
           }).immediate();
         },
         onLog: entry => {
           this.store.db.transaction(() => {
-            if (isCurrent()) this.store.log(run.taskId, run.id, entry, Date.now(), run.currentStepIndex);
+            if (isCurrent()) this.store.log(run.taskId, run.id, entry, clock(), run.currentStepIndex);
           }).immediate();
         },
         onProgress: status => {
@@ -460,7 +461,7 @@ export class Engine {
       if (launch.cancelRequested || this.closing || !isCurrent()) handle.cancel();
     } catch (error) {
       this.fail(run, fence, error, fresh);
-      this.store.completeCancellation(run.id, Date.now(), fence);
+      this.store.completeCancellation(run.id, clock(), fence);
       release();
       return;
     }
@@ -473,7 +474,7 @@ export class Engine {
         if (!isCurrent()) return;
         this.store.setSession(run.id, sessionId, fence);
         const status = envelope.status === 'needs_input' ? 'waiting_input' : envelope.status;
-        const result = this.store.finish(run.id, status, envelope.summary, status === 'blocked' ? envelope.summary : null, Date.now(), fence);
+        const result = this.store.finish(run.id, status, envelope.summary, status === 'blocked' ? envelope.summary : null, clock(), fence);
         this.store.log(run.taskId, run.id, { kind: 'lifecycle',
           summary: status === 'completed' ? 'Работник завершил выполнение' : status === 'waiting_input' ? 'Работник ожидает ответа пользователя' : 'Выполнение заблокировано',
           details: [`Статус: ${status}.`, `Ход сессии: ${run.turn}.`,
@@ -481,9 +482,9 @@ export class Engine {
             ...(envelope.questions.length ? [`Вопросов пользователю: ${envelope.questions.length}.`] : []),
             result.status === 'running' ? 'Результат сохранён. Начинается следующий этап.' : 'Ответ работника сохранён в комментариях.'],
           ...(status === 'blocked' ? { error: envelope.summary } : {}),
-        }, Date.now(), run.currentStepIndex);
-        this.store.recordAgentSummary(run.taskId, run.id, status === 'completed' ? 'result' : 'agent', envelope.summary, commentCursor, Date.now(), run.currentStepIndex);
-        for (const question of envelope.questions) this.store.comment(run.taskId, run.id, 'question', question, Date.now(), run.currentStepIndex);
+        }, clock(), run.currentStepIndex);
+        this.store.recordAgentSummary(run.taskId, run.id, status === 'completed' ? 'result' : 'agent', envelope.summary, commentCursor, clock(), run.currentStepIndex);
+        for (const question of envelope.questions) this.store.comment(run.taskId, run.id, 'question', question, clock(), run.currentStepIndex);
         if (result.status === 'running' && result.turn !== run.turn) this.enqueue(result);
         else if (result.status === 'completed') this.store.queueIntegration(result.id);
       }).immediate();
@@ -491,7 +492,7 @@ export class Engine {
       // complete cancellation of a newer step/attempt occupying this same run.
       release();
     }).catch(error => this.fail(run, fence, error, fresh)).finally(() => {
-      this.store.completeCancellation(run.id, Date.now(), fence);
+      this.store.completeCancellation(run.id, clock(), fence);
       release();
     });
   }
@@ -507,7 +508,7 @@ export class Engine {
     if (this.closing) return explain('Сервис останавливается; замена не запущена.');
     const { worker, reason } = this.store.fallbackWorkerFor(run);
     if (!worker) return explain(reason);
-    const now = Date.now();
+    const now = clock();
     const queued = this.store.db.transaction(() => {
       const updated = this.store.substituteWorker(run.id, fence, worker, limit, now);
       if (!updated) return null;
@@ -531,13 +532,13 @@ export class Engine {
     }
     this.store.db.transaction(() => {
       if (!this.store.isCurrent(run.id, fence)) return;
-      this.store.finish(run.id, 'failed', null, message.slice(0, 16_000), Date.now(), fence);
+      this.store.finish(run.id, 'failed', null, message.slice(0, 16_000), clock(), fence);
       // The CLI diagnostic (stderr tail, offending output) stays in the log's error block; the comment carries only the message.
       const diagnostic = error instanceof ProtocolError ? error.diagnostic : undefined;
       this.store.log(run.taskId, run.id, { kind: 'lifecycle', summary: 'Ошибка запуска работника',
         details: [diagnostic ? 'Ниже — текст ошибки и диагностика CLI: последние строки stderr или фрагмент его вывода.' : 'Дополнительной диагностики от CLI нет.'],
-        error: diagnostic ? `${message}\n\n${diagnostic}` : message }, Date.now(), run.currentStepIndex);
-      this.store.comment(run.taskId, run.id, 'system', message.slice(0, 16_000), Date.now(), run.currentStepIndex);
+        error: diagnostic ? `${message}\n\n${diagnostic}` : message }, clock(), run.currentStepIndex);
+      this.store.comment(run.taskId, run.id, 'system', message.slice(0, 16_000), clock(), run.currentStepIndex);
     }).immediate();
   }
   async shutdown() {

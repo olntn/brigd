@@ -298,6 +298,7 @@ Codex: `exec --json`, `thread.started` сохраняет `thread_id`, прод�
 bun run dev          # Vite: http://127.0.0.1:5173, API: PORT (по умолчанию 4310)
 bun run dev:demo     # то же, без настоящих CLI
 bun run verify      # typecheck + Bun tests + production build
+bun run test        # только Bun tests: файлы идут в 8 параллельных процессах (--parallel=8)
 bun run test:smoke  # HTTP, реальные процессы сервиса, restart/SIGKILL; только mock
 bunx playwright install chromium
 bun run test:e2e    # production browser tests, только mock

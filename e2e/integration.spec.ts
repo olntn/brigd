@@ -4,10 +4,10 @@ import type { AppInfo, Integration, IntegrationStatus, Run, Task, TaskDetail, Ta
 const now = Date.UTC(2026, 9, 11);
 const states: Record<IntegrationStatus, TaskStatus> = { queued: 'awaiting_merge', checking: 'integrating', merging: 'integrating', cancelling: 'integrating',
   merged: 'completed', conflict: 'merge_conflict', failed: 'merge_failed', blocked: 'merge_blocked', interrupted: 'merge_interrupted', cancelled: 'merge_blocked' };
-async function fixture(page: Page, status: IntegrationStatus) {
+async function fixture(page: Page, status: IntegrationStatus, checks?: Integration['checks']) {
   const integration: Integration = { id: 'integration-fixture', runId: 'run-fixture', repositoryId: '/project/.git', status, attempt: 1,
     sourceCommit: 'a'.repeat(40), targetCommit: 'b'.repeat(40), resultCommit: status === 'merged' ? 'c'.repeat(40) : null,
-    candidatePath: '/data/workspaces/project/integration-fixture-1', checks: [{ argv: ['bun', 'test'], exitCode: status === 'failed' ? 1 : 0 }],
+    candidatePath: '/data/workspaces/project/integration-fixture-1', checks: checks ?? [{ argv: ['bun', 'test'], exitCode: status === 'failed' ? 1 : 0 }],
     error: status === 'failed' ? 'Проверка завершилась с кодом 1. Целевая ветка сохранена.' : status === 'conflict' ? 'Обнаружен конфликт слияния с веткой main: src/value.txt.' : null,
     ...(status === 'conflict' ? { conflicts: ['src/value.txt', 'README.md'] } : {}), updatedAt: now };
   const run: Run = { id: integration.runId, taskId: 'task-fixture', workerId: null, worker: null, steps: [], currentStepIndex: null, instructions: [],
@@ -55,6 +55,22 @@ test('a failed check shows details and retries through the integration queue', a
   await expect(panel).toContainText('Проверка 1: код 1'); await expect(panel).toContainText('Целевая ветка сохранена.');
   await panel.getByRole('button', { name: 'Повторить проверку и слияние', exact: true }).click();
   await expect.poll(() => actions).toEqual([{ path: '/api/runs/run-fixture/integrate', body: { acknowledgeInterruption: false } }]);
+});
+
+test('a check keeps the end of its output in a collapsed monospaced block that wraps on a narrow screen', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const output = `tests/value.test.ts:\n(fail) value is kept [3.00ms]\n${'x'.repeat(300)}\n 1 fail\n`;
+  const { dialog } = await fixture(page, 'failed', [{ argv: ['bun', 'install'], exitCode: 0 }, { argv: ['bun', 'run', 'verify'], exitCode: 1, output, outputTruncated: true }]);
+  const panel = dialog.getByRole('region', { name: 'Слияние результата', exact: true });
+  // A record saved before output was kept, like the first check here, shows no block.
+  await expect(panel.locator('.integration-output')).toHaveCount(1);
+  const summary = panel.getByText('Вывод проверки: последние 16 КБ', { exact: true });
+  const text = panel.locator('.integration-output pre');
+  await expect(summary).toBeVisible(); await expect(text).toBeHidden();
+  await summary.click();
+  await expect(text).toBeVisible(); expect(await text.textContent()).toBe(output);
+  expect(await text.evaluate(node => getComputedStyle(node).fontFamily)).toContain('monospace');
+  expect(await dialog.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
 });
 
 test('a conflict lists the files and offers the built-in integrator beside a manual retry', async ({ page }) => {
