@@ -646,7 +646,7 @@ dialog::backdrop { background: var(--overlay); }
 .settings-dialog { width: 64rem; height: min(48rem, calc(100dvh - 24px)); container-type: inline-size; }
 .settings-frame { display: flex; flex-direction: column; height: 100%; min-width: 0; }
 .settings-header { flex-shrink: 0; }
-.settings-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 13rem minmax(0, 1fr); }
+.settings-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 14rem minmax(0, 1fr); }
 .settings-nav { display: flex; flex-direction: column; gap: 5px; min-width: 0; padding: 18px 14px; background: var(--sidebar); border-right: 1px solid var(--line); overflow-y: auto; }
 .settings-nav button { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; font-size: .92rem; line-height: 1.5; padding: 10px 12px; border-left: 3px solid transparent; border-radius: 0; color: var(--secondary); font-weight: 500; }
 .settings-nav button > span { min-width: 0; overflow-wrap: anywhere; }
@@ -707,7 +707,7 @@ dialog::backdrop { background: var(--overlay); }
 .model-delete-confirm .button.danger:hover:not(:disabled) { border-color: var(--error); }
 .model-catalog-empty { margin: 0; padding: 14px; border: 1px dashed var(--line); border-radius: var(--radius-md); background: var(--subtle); }
 .model-catalog-limit { font-size: .77rem; margin-top: 18px; }
-.general-settings-form, .autopilot-settings-form { display: grid; gap: 16px; min-width: 0; margin-top: 20px; }
+.general-settings-form, .autopilot-settings-form, .concurrency-settings-form { display: grid; gap: 16px; min-width: 0; margin-top: 20px; }
 .autopilot-settings-form textarea { font-family: var(--font-mono); font-size: .85rem; }
 .autopilot-settings-form .model-catalog-note { margin: 0; }
 .backup-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 20px; min-width: 0; }

@@ -95,6 +95,20 @@ export interface AutopilotSettings {
   source: 'settings' | 'environment' | null;
 }
 
+export interface ConcurrencyLimits {
+  /** Agent processes and merge checks running at once across all repositories. */
+  maxParallel: number;
+  /** Agents working at once in one repository, each in its own worktree. */
+  maxPerRepository: number;
+}
+/** Effective limits: a saved value wins over the service's start-up value. */
+export interface ConcurrencySettings extends ConcurrencyLimits {
+  /** Values saved in the app; null follows `defaults`. */
+  saved: { maxParallel: number | null; maxPerRepository: number | null };
+  /** BRIGD_MAX_PARALLEL / BRIGD_MAX_PER_REPOSITORY of the running service, or the built-in 4 and 1. */
+  defaults: ConcurrencyLimits;
+}
+
 export interface InstructionInput {
   title: string;
   body: string;

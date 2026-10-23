@@ -66,7 +66,7 @@ async function openStorage(page: Page) {
   const dialog = page.getByRole('dialog', { name: 'Настройки', exact: true });
   await expect(dialog).toBeVisible();
   const tabs = dialog.getByRole('tablist', { name: 'Разделы настроек', exact: true });
-  await expect(tabs.getByRole('tab')).toHaveText(['Общие', 'Внешний вид', 'Модели', 'Разрешения', 'Автопилот', 'Хранилище', 'Бэкапы']);
+  await expect(tabs.getByRole('tab')).toHaveText(['Общие', 'Внешний вид', 'Модели', 'Разрешения', 'Автопилот', 'Параллельность', 'Хранилище', 'Бэкапы']);
   await tabs.getByRole('tab', { name: 'Хранилище', exact: true }).click();
   const panel = dialog.getByRole('tabpanel', { name: 'Хранилище', exact: true });
   await expect(panel.getByRole('heading', { name: 'Хранилище', exact: true })).toBeVisible();

@@ -1,5 +1,6 @@
-import type { AutopilotInput, AutopilotOverview, AutopilotSettings, CliAccessMode, CliAccessSettings, FollowupInput, Integration, Run, StorageCleanupResult, StorageOverview } from '../src/lib/types';
+import type { AutopilotInput, AutopilotOverview, AutopilotSettings, CliAccessMode, CliAccessSettings, ConcurrencyLimits, ConcurrencySettings, FollowupInput, Integration, Run, StorageCleanupResult, StorageOverview } from '../src/lib/types';
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
+import { DEFAULT_CONCURRENCY, isConcurrencyLimit } from '../src/lib/concurrency';
 import { startAgent, buildPrompt, type AgentHandle, type AgentInput, type AgentCallbacks } from './adapter';
 import { AppError, INTEGRATION_RECHECK_LIMIT, Store, runFence, type RunFence } from './store';
 import { ProtocolError, UsageLimitError, validateEnvelope, validateSessionId } from './protocol';
@@ -15,7 +16,9 @@ import { UNAVAILABLE_STORAGE, WorkspaceStorage, type CleanupOptions } from './wo
 
 export type AgentFactory = (input: AgentInput, callbacks: AgentCallbacks) => AgentHandle;
 export type TaskBridgeFactory = (store: Store, run: Run, fence: RunFence, appAccess?: TaskAppAccess) => ReturnType<typeof createTaskBridge>;
-export interface EngineOptions { workspaces?: WorkspaceProvider; maxParallel?: number; maxPerRepository?: number; integrator?: Integrator; integrationChecks?: string[][]; cliAccess?: CliAccessMode;
+export interface EngineOptions { workspaces?: WorkspaceProvider; integrator?: Integrator; integrationChecks?: string[][]; cliAccess?: CliAccessMode;
+  /** Start-up limits (BRIGD_MAX_PARALLEL / BRIGD_MAX_PER_REPOSITORY); values saved in the settings win. */
+  maxParallel?: number; maxPerRepository?: number;
   /** Hand every merge conflict to the built-in integrator without waiting for a click. */
   autoReconcile?: boolean; }
 interface Launch { taskId: string; handle: AgentHandle | null; fence: RunFence; cancelRequested: boolean; bridge?: ReturnType<typeof createTaskBridge>; settled?: Promise<void>; }
@@ -31,8 +34,7 @@ export class Engine {
   private suspendedDrains = 0;
   private cleaning: Promise<StorageCleanupResult> | null = null;
   private readonly workspaces: WorkspaceProvider;
-  private readonly maxParallel: number;
-  private readonly maxPerRepository: number;
+  private readonly defaultLimits: ConcurrencyLimits;
   private readonly integrator: Integrator;
   private readonly autoReconcile: boolean;
   private readonly environmentChecks?: string[][];
@@ -49,12 +51,26 @@ export class Engine {
     this.workspaces = options.workspaces ?? (mock || factory !== startAgent ? new DirectWorkspaces() : new GitWorkspaces(join(dirname(resolve(store.db.filename)), 'workspaces'), () => this.integrationChecks()));
     this.requiresIntegrationChecks = !mock && this.workspaces instanceof GitWorkspaces;
     this.storage = this.workspaces instanceof GitWorkspaces ? new WorkspaceStorage(this.workspaces.root, store) : null;
-    this.maxParallel = options.maxParallel ?? 4;
-    this.maxPerRepository = options.maxPerRepository ?? 1;
+    this.defaultLimits = { maxParallel: options.maxParallel ?? DEFAULT_CONCURRENCY.maxParallel, maxPerRepository: options.maxPerRepository ?? DEFAULT_CONCURRENCY.maxPerRepository };
     this.integrator = options.integrator ?? new GitIntegrator(() => this.integrationChecks());
     this.autoReconcile = options.autoReconcile ?? true;
-    if (!Number.isInteger(this.maxParallel) || this.maxParallel < 1 || this.maxParallel > 32) throw new Error('Лимит процессов должен быть 1–32');
-    if (!Number.isInteger(this.maxPerRepository) || this.maxPerRepository < 1 || this.maxPerRepository > 32) throw new Error('Лимит агентов на репозиторий должен быть 1–32');
+    if (!isConcurrencyLimit(this.defaultLimits.maxParallel)) throw new Error('Лимит процессов должен быть 1–32');
+    if (!isConcurrencyLimit(this.defaultLimits.maxPerRepository)) throw new Error('Лимит агентов на репозиторий должен быть 1–32');
+  }
+  /** Read on every claim, so a saved change applies to the next start without a restart; running work is never stopped by it. */
+  private limits(): ConcurrencyLimits {
+    const saved = this.store.getConcurrencyLimits();
+    return { maxParallel: saved.maxParallel ?? this.defaultLimits.maxParallel, maxPerRepository: saved.maxPerRepository ?? this.defaultLimits.maxPerRepository };
+  }
+  getConcurrencySettings(): ConcurrencySettings {
+    return { ...this.limits(), saved: this.store.getConcurrencyLimits(), defaults: { ...this.defaultLimits } };
+  }
+  setConcurrencySettings(input: Record<string, unknown>): ConcurrencySettings {
+    if (this.closing) throw new AppError('Сервис останавливается', 503);
+    this.store.setConcurrencyLimits(input);
+    // A raised limit starts waiting work right away; the autopilot claims on its next tick.
+    this.drain();
+    return this.getConcurrencySettings();
   }
   private integrationChecks(): string[][] | undefined {
     return this.store.getIntegrationChecks() ?? this.environmentChecks;
@@ -128,7 +144,8 @@ export class Engine {
     const state = this.store.getAutopilot();
     if (!state.enabled) return;
     if (state.until !== null && now >= state.until) { this.store.stopAutopilot('until', now); return; }
-    let capacity = this.store.autopilotCapacity(this.maxParallel);
+    const { maxParallel, maxPerRepository } = this.limits();
+    let capacity = this.store.autopilotCapacity(maxParallel);
     for (const task of this.store.autopilotCandidates(state.startedAt)) {
       if (capacity < 1) return;
       if (settling.includes(task.id)) continue;
@@ -145,7 +162,7 @@ export class Engine {
         }).immediate();
         continue;
       }
-      if (this.store.claimAutopilot(task.id, location, this.mock, this.maxParallel, this.maxPerRepository, now)) capacity--;
+      if (this.store.claimAutopilot(task.id, location, this.mock, maxParallel, maxPerRepository, now)) capacity--;
     }
   }
   private locate(cwd: string, now: number): RepositoryLocation {
@@ -239,9 +256,10 @@ export class Engine {
     if (this.requiresIntegrationChecks && !this.integrationChecks()?.length) return;
     this.draining = true;
     try {
-      for (const job of this.store.claimIntegrations(this.maxParallel)) this.integrateJob(job);
+      const { maxParallel, maxPerRepository } = this.limits();
+      for (const job of this.store.claimIntegrations(maxParallel)) this.integrateJob(job);
       for (const request of this.store.pendingExecutions()) {
-        const run = this.store.claimExecution(request, this.maxParallel, this.maxPerRepository);
+        const run = this.store.claimExecution(request, maxParallel, maxPerRepository);
         if (!run) continue;
         const launch: Launch = { taskId: run.taskId, handle: null, fence: runFence(run), cancelRequested: false };
         this.handles.set(run.id, launch);
