@@ -27,6 +27,111 @@ beforeEach(() => {
 });
 afterEach(() => { store.close(); rmSync(folder, { recursive: true, force: true }); });
 
+describe('task dependencies', () => {
+  test('validates references and rejects direct and transitive cycles atomically', () => {
+    const a = store.createTask(input({ title: 'A' }), BASE);
+    const b = store.createTask(input({ title: 'B', dependsOnTaskIds: [a.id] }), BASE);
+    const c = store.createTask(input({ title: 'C', dependsOnTaskIds: [b.id] }), BASE);
+    expect(() => store.updateTask(a.id, { ...a, dependsOnTaskIds: [b.id] })).toThrow('цикл');
+    expect(() => store.updateTask(a.id, { ...a, dependsOnTaskIds: [c.id] })).toThrow('цикл');
+    expect(() => store.updateTask(a.id, { ...a, dependsOnTaskIds: [a.id] })).toThrow('самой себя');
+    expect(() => store.createTask(input({ dependsOnTaskIds: ['missing'] }))).toThrow('не найдена');
+    expect(() => store.createTask(input({ dependsOnTaskIds: [a.id, a.id] }))).toThrow('10 уникальных');
+    const ids = Array.from({ length: 11 }, () => store.createTask(input()).id);
+    expect(() => store.createTask(input({ dependsOnTaskIds: ids }))).toThrow('10 уникальных');
+    expect(store.createTask(input({ dependsOnTaskIds: ids.slice(0, 10) })).dependsOnTaskIds).toEqual(ids.slice(0, 10));
+    expect(store.getTask(a.id).dependsOnTaskIds).toEqual([]);
+    expect(store.getTask(b.id).dependsOnTaskIds).toEqual([a.id]);
+    // A shared ancestor is a valid diamond, not a cycle.
+    expect(store.updateTask(c.id, { ...c, dependsOnTaskIds: [a.id, b.id] }).dependsOnTaskIds).toEqual([a.id, b.id]);
+  });
+
+  test('persists dependencies, preserves omitted updates, and clears with an empty array', () => {
+    const a = store.createTask(input({ title: 'A' }), BASE);
+    const b = store.createTask(input({ dependsOnTaskIds: [a.id] }), BASE);
+    store.updateTask(b.id, input({ title: 'Renamed' }));
+    store.close();
+    store = new Store(join(folder, 'trackt.sqlite'));
+    expect(store.getTask(b.id)).toMatchObject({ dependsOnTaskIds: [a.id], dependencies: [{ taskId: a.id, title: 'A', satisfied: false, archived: false }] });
+    expect(store.updateTask(b.id, input({ dependsOnTaskIds: [] })).dependencies).toEqual([]);
+  });
+
+  test('migrates existing tasks with empty dependencies without changing history', () => {
+    const a = store.createTask(input(), BASE);
+    const run = store.startManual(a.id, true, BASE);
+    store.finish(run.id, 'completed', 'Done', null, BASE + 1);
+    store.db.exec('ALTER TABLE tasks DROP COLUMN depends_on_task_ids');
+    store.close();
+    store = new Store(join(folder, 'trackt.sqlite'));
+    expect(store.getTask(a.id)).toMatchObject({ dependsOnTaskIds: [], dependencies: [], latestRun: { id: run.id, status: 'completed' } });
+  });
+
+  test('uses the latest result including follow-ups and archived successes', () => {
+    const a = store.createTask(input({ title: 'A' }), BASE);
+    const b = store.createTask(input({ dependsOnTaskIds: [a.id] }), BASE);
+    const ready = () => store.getTask(b.id).dependencies[0]!.satisfied;
+    expect(ready()).toBe(false);
+    const first = store.startManual(a.id, true, BASE);
+    store.setSession(first.id, 'saved');
+    store.finish(first.id, 'completed', 'Done', null, BASE + 1);
+    expect(ready()).toBe(true);
+    store.archiveTask(a.id, BASE + 2);
+    expect(store.getTask(b.id).dependencies[0]).toMatchObject({ satisfied: true, archived: true });
+    store.restoreTask(a.id, BASE + 3);
+    const followup = store.startFollowup(a.id, { sourceRunId: first.id, sourceStepIndex: null, body: 'More work', attachmentIds: [], requestId: crypto.randomUUID() }, BASE + 4).run;
+    expect(ready()).toBe(false);
+    store.finish(followup.id, 'failed', null, 'Failure', BASE + 5);
+    expect(ready()).toBe(false);
+    store.archiveTask(a.id, BASE + 6);
+    expect(store.getTask(b.id).dependencies[0]).toMatchObject({ satisfied: false, archived: true });
+  });
+
+  test('scheduled tasks wait without attempts and coalesce elapsed intervals after success', () => {
+    const a = store.createTask(input(), BASE);
+    const b = store.createTask(input({ schedule: 'interval', intervalMinutes: 1, dependsOnTaskIds: [a.id] }), BASE);
+    const independent = store.createTask(input({ schedule: 'interval', intervalMinutes: 1 }), BASE);
+    expect(store.claimDue(true, BASE).map(run => run.taskId)).toEqual([independent.id]);
+    expect(store.getTask(b.id)).toMatchObject({ nextRunAt: BASE, status: 'ready', runCount: 0 });
+    const failed = store.startManual(a.id, true, BASE);
+    store.finish(failed.id, 'failed', null, 'Failure', BASE + 1);
+    expect(store.claimDue(true, BASE + MINUTE).map(run => run.taskId)).not.toContain(b.id);
+    const success = store.startManual(a.id, true, BASE + MINUTE);
+    store.finish(success.id, 'completed', 'Done', null, BASE + MINUTE + 1);
+    expect(store.claimDue(true, BASE + 4 * MINUTE)).toEqual(expect.arrayContaining([expect.objectContaining({ taskId: b.id, scheduledFor: BASE + 4 * MINUTE })]));
+    expect(store.detail(b.id).runs).toHaveLength(1);
+    expect(store.getTask(b.id).nextRunAt).toBe(BASE + 5 * MINUTE);
+  });
+
+  test('autopilot claims recheck prerequisites while keeping waiting cards visible and manually runnable', () => {
+    const a = store.createTask(input({ title: 'A' }), BASE);
+    const b = store.createTask(input({ schedule: 'auto', dependsOnTaskIds: [a.id] }), BASE);
+    store.setAutopilot({ enabled: true, until: null }, BASE);
+    expect(store.startAutopilot(b.id, true, BASE)).toBeNull();
+    expect(store.autopilotOverview().pool.find(task => task.id === b.id)?.dependencies).toEqual([{ taskId: a.id, title: 'A', satisfied: false, archived: false }]);
+    expect(store.startManual(b.id, true, BASE).trigger).toBe('manual');
+  });
+
+  test('a new prerequisite turn holds an already queued automatic request without reserving other chains', () => {
+    const a = store.createTask(input(), BASE);
+    const first = store.startManual(a.id, true, BASE);
+    store.setSession(first.id, 'saved');
+    store.finish(first.id, 'completed', 'Done', null, BASE + 1);
+    const b = store.createTask(input({ schedule: 'auto', dependsOnTaskIds: [a.id] }), BASE + 2);
+    const independent = store.createTask(input({ schedule: 'auto' }), BASE + 2);
+    const location = { repositoryId: '/tmp/project', repositoryRoot: '/tmp/project', projectCwd: '/tmp' };
+    store.setAutopilot({ enabled: true, until: null }, BASE + 3);
+    expect(store.claimAutopilot(b.id, location, true, 1, 1, BASE + 4)?.status).toBe('queued');
+    const request = store.pendingExecutions()[0]!;
+    const followup = store.startFollowup(a.id, { sourceRunId: first.id, sourceStepIndex: null, body: 'More work', attachmentIds: [], requestId: crypto.randomUUID() }, BASE + 5).run;
+    expect(store.claimExecution(request, 1)).toBeNull();
+    expect(store.pendingExecutions()).toEqual([]);
+    expect(store.autopilotCapacity(1)).toBe(1);
+    expect(store.claimAutopilot(independent.id, location, true, 1, 1, BASE + 6)?.taskId).toBe(independent.id);
+    store.finish(followup.id, 'completed', 'Done again', null, BASE + 7);
+    expect(store.pendingExecutions().map(item => item.runId)).toContain(request.runId);
+  });
+});
+
 test('worker logs survive reopening in insertion order and cannot refer to another task run', () => {
   const task = store.createTask(input(), BASE);
   const run = store.startManual(task.id, true, BASE);
@@ -672,7 +777,7 @@ describe('autopilot', () => {
     expect(store.autopilotPool(BASE + 2).map(task => task.title)).toEqual(['later']);
     expect(store.autopilotPool(null).map(task => task.title)).toEqual(['earlier', 'later']);
     expect(store.autopilotOverview()).toMatchObject({ enabled: true, pool: [{ id: later.id }], attempts: [{ id: run.id, trigger: 'autopilot', status: 'failed' }] });
-    expect(store.autopilotCandidates(BASE + 2)).toEqual([{ id: later.id, cwd: later.cwd }]);
+    expect(store.autopilotCandidates(BASE + 2)).toEqual([{ id: later.id, cwd: later.cwd, dependsOnTaskIds: [] }]);
   });
 
   test('the queue keeps the order tasks joined it, and a move changes the claim order without losing deferred tasks\' places', () => {

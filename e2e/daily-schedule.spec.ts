@@ -12,7 +12,7 @@ function fixtureTask(input: Partial<Task> = {}): Task {
     id: 'existing-task', title: 'Существующая задача', instruction: 'Проверь проект.', provider: 'codex',
     cwd: '/workspace/project', schedule: 'manual', priority: 'normal', intervalMinutes: null, firstRunAt: null,
     timeOfDay: null, weekdays: null, timeZone: null,
-    paused: false, tagIds: [], tags: [], steps: [], workerId: null, worker: null,
+    paused: false, dependsOnTaskIds: [], dependencies: [], tagIds: [], tags: [], steps: [], workerId: null, worker: null,
     createdAt: Date.UTC(2026, 9, 24, 9), updatedAt: Date.UTC(2026, 9, 24, 9),
     archivedAt: null, nextRunAt: null, status: 'ready', latestRun: null, runCount: 0,
     ...input,

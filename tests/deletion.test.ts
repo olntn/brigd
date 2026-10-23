@@ -36,6 +36,29 @@ beforeEach(() => {
 });
 afterEach(() => { store.close(); rmSync(folder, { recursive: true, force: true }); });
 
+test('purge removes only the deleted prerequisite from active and archived dependent cards', () => {
+  const a = store.createTask(input({ title: 'A' }), BASE);
+  const other = store.createTask(input({ title: 'Other prerequisite' }), BASE);
+  const b = store.createTask(input({ dependsOnTaskIds: [a.id, other.id] }), BASE);
+  const archived = store.createTask(input({ dependsOnTaskIds: [a.id] }), BASE);
+  store.archiveTask(archived.id, BASE + 1);
+  store.archiveTask(a.id, BASE + 1);
+  store.deleteTask(a.id);
+  expect(store.getTask(b.id)).toMatchObject({ dependsOnTaskIds: [other.id], dependencies: [{ taskId: other.id }] });
+  expect(store.getTask(archived.id)).toMatchObject({ dependsOnTaskIds: [], dependencies: [] });
+  expect(() => store.updateTask(b.id, input({ title: 'B still editable' }))).not.toThrow();
+});
+
+test('bulk purge removes prerequisites without removing surviving dependents', () => {
+  const a = store.createTask(input(), BASE);
+  const b = store.createTask(input({ schedule: 'auto', dependsOnTaskIds: [a.id] }), BASE);
+  store.archiveTask(a.id, BASE + 1);
+  expect(store.deleteArchivedTasks(BASE + 2)).toMatchObject({ deleted: 1 });
+  expect(store.getTask(b.id).dependencies).toEqual([]);
+  store.setAutopilot({ enabled: true, until: null }, BASE + 3);
+  expect(store.startAutopilot(b.id, true, BASE + 4)?.taskId).toBe(b.id);
+});
+
 /** A finished card with every kind of history: run, session, follow-up, comments, logs, files, tags and a worktree record. */
 async function populated(title: string) {
   const tag = store.createTag({ name: `${title} tag` }, BASE);

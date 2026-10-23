@@ -86,6 +86,27 @@ const createCard = (broker: TaskBroker, title: string, key: string = crypto.rand
   mutate(broker, 'create_task', { data: { title, instruction: 'Complete this card.', ...data } }, key);
 
 describe('MCP app management through the shared HTTP controller', () => {
+  test('creates and edits dependencies through MCP and rejects cycles and invalid arrays', async () => {
+    const { broker } = setup();
+    const a = await createCard(broker, 'Prerequisite A');
+    const b = await createCard(broker, 'Dependent B', crypto.randomUUID(), { dependsOnTaskIds: [a.id] });
+    expect(store.getTask(b.id).dependsOnTaskIds).toEqual([a.id]);
+    const reading = parse(await call(broker, 'get_task', { task_id: b.id }));
+    expect(reading.task).toMatchObject({ dependsOnTaskIds: [a.id], dependencies: [{ taskId: a.id, satisfied: false }] });
+    const cyclic = await call(broker, 'update_task', { task_id: a.id, data: { dependsOnTaskIds: [b.id] }, idempotency_key: 'dependency-cycle' });
+    expect(cyclic.isError).toBe(true);
+    expect(JSON.stringify(cyclic)).toContain('цикл');
+    for (const [index, ids] of [[a.id, a.id], ['missing-task'], null, Array.from({ length: 11 }, (_, i) => `task-${i}`)].entries()) {
+      expect((await call(broker, 'update_task', { task_id: b.id, data: { dependsOnTaskIds: ids }, idempotency_key: `bad-deps-${index}` })).isError).toBe(true);
+    }
+    await mutate(broker, 'update_task', { task_id: b.id, data: { title: 'B renamed' } });
+    expect(store.getTask(b.id).dependsOnTaskIds).toEqual([a.id]);
+    await mutate(broker, 'update_task', { task_id: b.id, data: { dependsOnTaskIds: [] } });
+    expect(store.getTask(b.id).dependencies).toEqual([]);
+    await mutate(broker, 'update_task', { task_id: a.id, data: { dependsOnTaskIds: [b.id] } });
+    expect(store.getTask(a.id).dependsOnTaskIds).toEqual([b.id]);
+  });
+
   test('creates, discovers, edits, archives, and restores cards with bounded filtered lists', async () => {
     const { broker } = setup();
     const cards = [];

@@ -18,7 +18,7 @@ const run: Run = {
   summary, error: null, turn: 1, mock: false,
 };
 const task: Task = {
-  tagIds: [], tags: [],
+  dependsOnTaskIds: [], dependencies: [], tagIds: [], tags: [],
   steps: [], id: taskId, workerId: null, worker: null, title: `Адаптивная-${'Задача'.repeat(18)}`, instruction, provider: 'codex',
   cwd: `/workspace/${'длинный-путь-'.repeat(35)}`, schedule: 'manual', priority: 'normal', intervalMinutes: null,
   firstRunAt: null, paused: false, createdAt: timestamp, updatedAt: timestamp,

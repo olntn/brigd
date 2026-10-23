@@ -1373,3 +1373,11 @@ button.autopilot-task:hover strong { color: var(--accent-text); }
 .check-triage-steps { margin: 14px 0 0; padding-left: 20px; display: grid; gap: 6px; font-size: .85rem; line-height: 1.7; color: var(--secondary); overflow-wrap: anywhere; }
 .check-triage-settings .model-catalog-actions { margin-top: 14px; }
 .check-triage-settings > .form-error { margin-top: 14px; }
+
+/* Explicit prerequisites stay visible while their automatic starts wait. */
+.dependency-note { margin: 8px 16px; color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+.dependency-note a { color: var(--focus); text-decoration: underline; }
+.dependency-note small { display: block; margin-top: 4px; }
+.task-card.dependency-problem, .task-row.dependency-problem { border-color: var(--warning-line); }
+.dependency-problem { color: var(--warning); }
+.autopilot-row.dependency-problem { background: var(--warning-bg); }

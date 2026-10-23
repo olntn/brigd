@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHmac } from 'node:crypto';
@@ -552,6 +552,38 @@ describe('scheduler and restart safety', () => {
 });
 
 describe('autopilot', () => {
+  test('mock dependency chain skips a waiting head and starts it only after prerequisite success', async () => {
+    const a = store.createTask(input(folder, { title: 'A', schedule: 'auto' }));
+    const b = store.createTask(input(folder, { title: 'B', schedule: 'auto', priority: 'critical', dependsOnTaskIds: [a.id] }));
+    const otherFolder = join(folder, 'independent'); mkdirSync(otherFolder);
+    const independent = store.createTask(input(otherFolder, { schedule: 'auto' }));
+    engine.setAutopilot({ enabled: true, until: null });
+    expect(store.detail(a.id).runs).toHaveLength(1);
+    expect(store.detail(independent.id).runs).toHaveLength(1);
+    expect(store.detail(b.id).runs).toEqual([]);
+    expect(store.autopilotOverview().pool.find(task => task.id === b.id)?.dependencies[0]).toMatchObject({ title: 'A', satisfied: false });
+    agent.calls.find(call => call.input.cwd === folder)!.resolve(outcome());
+    await flush();
+    engine.tick();
+    await flush();
+    expect(store.detail(b.id).runs[0]).toMatchObject({ trigger: 'autopilot', status: 'running' });
+    expect(store.getTask(b.id).dependencies[0]!.satisfied).toBe(true);
+  });
+
+  test('mock failed prerequisite leaves a dependent in the queue without attempts or extra failures', async () => {
+    const a = store.createTask(input(folder, { title: 'A', schedule: 'auto' }));
+    const b = store.createTask(input(folder, { title: 'B', schedule: 'auto', dependsOnTaskIds: [a.id] }));
+    engine.setAutopilot({ enabled: true, until: null });
+    agent.calls[0]!.reject(new Error('Prerequisite failed'));
+    await flush();
+    engine.tick(); engine.tick();
+    expect(store.detail(b.id).runs).toEqual([]);
+    expect(store.getTask(b.id).status).toBe('ready');
+    expect(store.autopilotOverview()).toMatchObject({ enabled: true, failures: 1, pool: [{ id: b.id, dependencies: [{ taskId: a.id, title: 'A', satisfied: false }] }] });
+    store.archiveTask(a.id);
+    expect(store.getTask(b.id).dependencies[0]).toMatchObject({ archived: true, satisfied: false });
+  });
+
   test('webhook reports the settled empty queue and an automatic stop once each', async () => {
     const events: { event: string }[] = [];
     const receiver = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {

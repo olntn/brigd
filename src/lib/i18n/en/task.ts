@@ -1,6 +1,17 @@
 import type { Dictionary } from './types';
 
 const dictionary: Dictionary = {
+  "После задач…": "After tasks\u2026",
+  "Поиск задач по названию": "Search tasks by title",
+  "Найти задачу…": "Find a task\u2026",
+  "До 10 зависимостей. Автоматический запуск ждёт успешного результата и слияния.": "Up to 10 dependencies. Automatic starts wait for successful results and merges.",
+  "Ждёт:": "Waiting for:",
+  "Зависимость в архиве без успешного результата. Восстановите её или уберите зависимость.": "The dependency is archived without a successful result. Restore it or remove the dependency.",
+  "Ручной запуск разрешён и может начаться до выполнения зависимостей.": "Manual starts are allowed and may begin before dependencies are satisfied.",
+  "Ручной запуск начнётся без ожидания зависимостей.": "A manual start will proceed without waiting for dependencies.",
+  "ждёт задачу {title}": "waiting for task {title}",
+  "Ждут зависимости: {count}.": "Waiting for dependencies: {count}.",
+
   'Превышен лимит времени хода': 'Agent turn time limit exceeded',
   'Лимит времени, мин': 'Time limit, min',
   'Пусто — общая настройка. Лимит фиксируется отдельно для каждого нового хода агента.': 'Leave empty to use the general setting. The limit is frozen separately for each new agent turn.',

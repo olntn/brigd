@@ -24,7 +24,7 @@ function detailFixture(workflow: boolean): TaskDetail {
     updatedAt: timestamp + 1000, finishedAt: timestamp + 1000, summary: 'Результат готов.', error: null, turn: 1, mock: true,
   };
   const task: Task = {
-    tagIds: [], tags: [],
+    dependsOnTaskIds: [], dependencies: [], tagIds: [], tags: [],
     id, title: workflow ? 'Проверка аватаров этапов' : 'Проверка читаемых аватаров', instruction: run.instruction,
     workerId: workflow ? null : worker.id, worker: workflow ? null : worker, steps: steps.map(({ workerId, title, instruction }) => ({ workerId, title, instruction })),
     provider: worker.provider, cwd: run.cwd, schedule: 'manual', priority: 'normal', intervalMinutes: null, firstRunAt: null, paused: false,
