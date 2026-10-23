@@ -409,11 +409,10 @@ input[type='checkbox'], input[type='radio'] { flex-shrink: 0; }
 .main-nav button > span, .archive-button > span, .settings-button span { min-width: 0; overflow-wrap: anywhere; }
 .main-nav button:hover, .archive-button:hover, .settings-button:hover, .agent-nav button:hover { background: var(--soft); }
 .main-nav button.active, .archive-button.active { color: var(--accent-text); background: var(--selected); border-left-color: var(--accent); }
-.autopilot-nav-label { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: 3px 8px; }
-.autopilot-nav-status { display: inline-flex; align-items: center; gap: 5px; padding: 1px 5px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--subtle); color: var(--secondary); font-size: .69rem; line-height: 1.5; white-space: nowrap; }
-.autopilot-nav-dot { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: currentColor; }
-.autopilot-nav-status.is-enabled { color: var(--success); background: var(--success-bg); border-color: var(--success-line); }
-.autopilot-nav-status.is-unknown { color: var(--warning); background: var(--warning-bg); border-color: var(--warning-line); }
+.autopilot-nav-label { display: flex; flex: 1; align-items: center; gap: 8px; }
+.autopilot-nav-status { width: 8px; height: 8px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
+.autopilot-nav-status.is-enabled { background: var(--success); box-shadow: 0 0 6px color-mix(in srgb, var(--success) 65%, transparent); }
+.autopilot-nav-status.is-unknown { background: var(--warning); }
 .agents-label { margin-top: 30px; }
 .agents-label span { font-size: .69rem; border: 1px solid var(--line); border-radius: var(--radius-sm); min-width: 16px; text-align: center; padding: 1px 3px; }
 .agent-nav button { display: flex; align-items: center; gap: 10px; text-align: left; padding: 10px 12px; border-radius: var(--radius-md); border: 1px solid transparent; width: 100%; }
