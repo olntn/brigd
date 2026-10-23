@@ -492,6 +492,7 @@ input[type='checkbox'], input[type='radio'] { flex-shrink: 0; }
 .column-heading h2 { font-size: .85rem; font-weight: 600; margin: 0; color: var(--secondary); overflow-wrap: anywhere; }
 .column-icon { display: flex; color: var(--muted); }.column-running .column-icon { color: var(--accent-text); }.column-waiting_input .column-icon { color: var(--warning); }.column-completed .column-icon { color: var(--success); }
 .add-column { margin-left: auto; }
+.column-count { font-size: .69rem; font-weight: 600; line-height: 1; min-width: 20px; padding: 4px 6px; border-radius: 999px; background: var(--soft); color: var(--secondary); text-align: center; font-variant-numeric: tabular-nums; }
 .icon-button { display: inline-grid; place-items: center; padding: 6px; border-radius: var(--radius-sm); color: var(--muted); min-width: 30px; min-height: 30px; flex-shrink: 0; }
 .icon-button:hover:not(:disabled) { background: var(--soft); color: var(--accent-text); }
 .column-cards { display: grid; gap: 12px; align-content: start; }
