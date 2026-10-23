@@ -7,7 +7,7 @@ export const TASK_MCP_ENV = ['BRIGD_TASK_SOCKET', 'BRIGD_TASK_CAPABILITY'] as co
 export const MAX_TASK_REQUEST_BYTES = 256 * 1024;
 export const MAX_TASK_RESULT_BYTES = 384 * 1024;
 // Keep room for provider framing, duplicate tool events, reasoning, and final envelopes
-// within the independent 1 MiB/event and 8 MiB/CLI limits.
+// within the independent 1 MiB/event (larger events are dropped unread) and 8 MiB/CLI limits.
 export const MAX_TASK_RESULT_TOTAL_BYTES = 1536 * 1024;
 export const MAX_TASK_TOOL_CALLS = 256;
 export const MAX_TASK_IMAGE_BYTES = 256 * 1024;

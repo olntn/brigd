@@ -345,6 +345,8 @@ interface ProcessOptions {
   signal: AbortSignal;
   timeoutMs?: number;
   maxOutputBytes?: number;
+  /** Bytes the consumer has already discarded unread (oversized protocol lines); they do not count toward maxOutputBytes. */
+  discardedBytes?: () => number;
   onStdout: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
 }
@@ -402,10 +404,11 @@ export async function runBoundedProcess(argv: string[], options: ProcessOptions)
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > (options.maxOutputBytes ?? MAX_OUTPUT_BYTES)) {
+      onChunk?.(decoder.decode(value, { stream: true }));
+      // Checked after delivery so a chunk the consumer dropped unread never trips the limit.
+      if (total - (options.discardedBytes?.() ?? 0) > (options.maxOutputBytes ?? MAX_OUTPUT_BYTES)) {
         throw new AgentRunError('OUTPUT_LIMIT', 'The CLI exceeded the bounded output limit. The run did not complete.');
       }
-      onChunk?.(decoder.decode(value, { stream: true }));
     }
     const tail = decoder.decode();
     if (tail) onChunk?.(tail);
@@ -517,6 +520,8 @@ export function startAgent(input: AgentInput, callbacks: AgentCallbacks): AgentH
     try {
       const exitCode = await runBoundedProcess(argv, {
         cwd: input.cwd, signal: abort.signal, ...(input.taskBridge ? { env: { ...process.env, ...input.taskBridge.env } } : {}),
+        // Oversized JSONL lines are dropped unread by the protocol and do not use up the bounded output.
+        discardedBytes: () => protocol.discardedBytes,
         onStdout: chunk => {
           protocol.push(chunk);
           if (protocol.permissionBlocked) throw nativeApprovalStop;

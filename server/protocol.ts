@@ -37,6 +37,7 @@ const USAGE_LIMIT_DETAIL_LENGTH = 500;
 
 const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
+const utf8Length = (text: string): number => Buffer.byteLength(text, 'utf8');
 
 export function validateSessionId(value: unknown): string {
   if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$/.test(value)) {
@@ -109,6 +110,10 @@ export class AgentProtocol {
   private seenLogs = new Set<string>();
   private pendingTools = new Map<string, TaskLogInput>();
   private pending = '';
+  /** Bytes of the oversized line being discarded unread, or 0 while a line is still being collected. */
+  private skipping = 0;
+  private discarded = 0;
+  private droppedLines = 0;
   private eventCount = 0;
   readonly maxLineBytes = MAX_JSONL_LINE_BYTES;
 
@@ -124,6 +129,8 @@ export class AgentProtocol {
   get permissionBlocked(): boolean { return this.nativeBlock; }
   /** The exhausted-limit message seen so far, if any. */
   get usageLimitDetail(): string | null { return this.usageLimit; }
+  /** Bytes of oversized lines dropped unread so far, including the one still streaming in; the bounded runner leaves them out of its output limit. */
+  get discardedBytes(): number { return this.discarded + this.skipping; }
 
   private noteLimit(text: string): void {
     if (this.usageLimit !== null || !isUsageLimit(text)) return;
@@ -139,6 +146,15 @@ export class AgentProtocol {
   }
 
   push(chunk: string): void {
+    if (this.skipping) {
+      // The rest of an oversized line is discarded as it streams in, never buffered.
+      const newline = chunk.indexOf('\n');
+      if (newline === -1) { this.skipping += utf8Length(chunk); return; }
+      const bytes = this.skipping + utf8Length(chunk.slice(0, newline));
+      this.skipping = 0;
+      this.dropLine(bytes);
+      chunk = chunk.slice(newline + 1);
+    }
     this.pending += chunk;
     let newline: number;
     while ((newline = this.pending.indexOf('\n')) !== -1) {
@@ -146,17 +162,35 @@ export class AgentProtocol {
       this.pending = this.pending.slice(newline + 1);
       this.line(line);
     }
-    if (new TextEncoder().encode(this.pending).byteLength > this.maxLineBytes) throw new ProtocolError('CLI output exceeded the line limit.');
+    const size = utf8Length(this.pending);
+    if (size > this.maxLineBytes) { this.skipping = size; this.pending = ''; }
   }
 
   end(): void {
-    if (this.pending.trim()) this.line(this.pending);
+    const bytes = this.skipping, tail = this.pending;
+    this.skipping = 0;
     this.pending = '';
+    if (bytes) this.dropLine(bytes);
+    else if (tail.trim()) this.line(tail);
+  }
+
+  /**
+   * A line over the limit is almost always one huge tool result, such as a project-wide
+   * search. Dropping it unparsed keeps memory bounded without failing the whole turn;
+   * a turn's session, result and permission events stay far below the limit.
+   */
+  private dropLine(bytes: number): void {
+    this.discarded += bytes;
+    this.log(`oversized:${++this.droppedLines}`, { kind: 'lifecycle', summary: 'Пропущено слишком длинное событие CLI', details: [
+      `Строка JSONL длиннее ${this.maxLineBytes / 1024 / 1024} МиБ не разбирается и не сохраняется: ${bytes} байт.`,
+      'Обычно это большой вывод инструмента, например поиск по всему проекту. Запуск продолжается; само событие в логах не отражено.',
+    ] });
   }
 
   private line(line: string): void {
     if (!line.trim()) return;
-    if (new TextEncoder().encode(line).byteLength > this.maxLineBytes) throw new ProtocolError('CLI output exceeded the line limit.');
+    const size = utf8Length(line);
+    if (size > this.maxLineBytes) { this.dropLine(size); return; }
     let event: unknown;
     try { event = JSON.parse(line); }
     catch { throw new ProtocolError('The CLI emitted malformed JSONL output.'); }
