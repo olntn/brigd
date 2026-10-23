@@ -9,7 +9,6 @@
   import StorageSettings from './lib/StorageSettings.svelte';
   import Instructions from './lib/Instructions.svelte';
   import Docs from './lib/Docs.svelte';
-  import DocPagePicker from './lib/DocPagePicker.svelte';
   import Autopilot from './lib/Autopilot.svelte';
   import CliSetup from './lib/CliSetup.svelte';
   import { TASK_STATUS_LABELS } from './lib/status';
@@ -29,10 +28,9 @@
   import { WORKFLOW_MIN_STEPS, WORKFLOW_MAX_STEPS, WORKFLOW_TEXT_LIMIT, WORKFLOW_BYTES_LIMIT } from './lib/workflows';
   import { effortLabel, modelLabel, runUltracode } from './lib/workers';
   import { tagColorStyle } from './lib/tags';
-  import { plural } from './lib/format';
   import { followupTargets, followupFingerprint, followupStage, runWorkflowSteps, taskHasCompletedRun, resolveFollowupTarget, followupSessionKey, type FollowupTarget } from './lib/followups';
   import { applyTheme, readTheme, saveTheme, themes, themeStorageKey, type Theme } from './lib/theme';
-  import type { AppInfo, Attachment, AutopilotSettings as AutopilotSettingsValue, Comment, DocPageSummary, FollowupInput, GeneralSettings as GeneralSettingsValue, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
+  import type { AppInfo, Attachment, AutopilotSettings as AutopilotSettingsValue, Comment, FollowupInput, GeneralSettings as GeneralSettingsValue, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
 
   type Scope = 'all' | 'scheduled' | 'autopilot' | 'attention' | 'completed';
   type View = 'board' | 'list';
@@ -125,11 +123,6 @@
   let editingId = $state<string | null>(null);
   let formTitle = $state('');
   let formTagIds = $state<string[]>([]);
-  let formDocPageIds = $state<string[]>([]);
-  let docPages = $state<DocPageSummary[]>([]);
-  let docPagesLoading = $state(false);
-  let docPagesError = $state('');
-  let docPagesSequence = 0;
   let formInstruction = $state('');
   let formProvider = $state<Provider>('codex');
   let formWorkerId = $state('');
@@ -484,7 +477,6 @@
     window.addEventListener('hashchange', onHash);
     void loadInfo();
     void refresh();
-    void loadDocPages();
     const interval = setInterval(() => {
       if (document.visibilityState === 'visible') { void refresh(); if (!info) void loadInfo(); }
     }, 2000);
@@ -494,30 +486,12 @@
   });
   $effect(() => { if (page !== 'docs' && location.hash.startsWith('#/docs')) history.replaceState(null, '', location.pathname + location.search); });
 
-  async function loadDocPages() {
-    const sequence = ++docPagesSequence;
-    docPagesLoading = true;
-    try {
-      const pages = await api<DocPageSummary[]>('/api/docs');
-      if (sequence !== docPagesSequence) return;
-      docPages = pages;
-      docPagesError = '';
-    } catch (failure) {
-      // A stale list is still useful for picking; complain only when there is nothing to show.
-      if (sequence === docPagesSequence && !docPages.length) docPagesError = failure instanceof Error ? failure.message : 'Не удалось загрузить страницы документации';
-    } finally { if (sequence === docPagesSequence) docPagesLoading = false; }
-  }
-  /** Documentation blocks and task cards link both ways: a page opens its card here, a card opens its pages there. */
+  /** Documentation blocks link to task cards: a page opens its card here. */
   async function openTaskById(id: string) {
     const known = tasks.find(task => task.id === id);
     if (known) { await openTask(known); return; }
     try { const result = await api<TaskDetail>(`/api/tasks/${encodeURIComponent(id)}`); await openTask(result.task); }
     catch (failure) { notify(failure instanceof Error ? failure.message : 'Задача недоступна', 'error'); }
-  }
-  function openDocPage(id: string) {
-    closeDrawer();
-    page = 'docs';
-    location.hash = `#/docs/${id}`;
   }
 
   function openSettings(section?: (typeof settingsSections)[number]['id']) {
@@ -594,8 +568,6 @@
     editingId = task?.id ?? null;
     formTitle = task?.title ?? '';
     formTagIds = [...(task?.tagIds ?? [])];
-    formDocPageIds = [...(task?.docPageIds ?? [])];
-    void loadDocPages();
     void loadTags();
     formInstruction = task?.instruction ?? '';
     formProvider = task?.provider ?? defaultWorker?.provider ?? 'codex';
@@ -651,7 +623,6 @@
       firstRunAt, paused: formPaused,
       ultracode: formUltracode,
       tagIds: formTagIds,
-      docPageIds: formDocPageIds,
     };
     const savedEditingId = editingId;
     const context = editorContext;
@@ -961,7 +932,6 @@
     {#each run.instructions ?? [] as instruction (instruction.id)}
       <section class="snapshot-instruction"><h4>{instruction.title}</h4><p>{instruction.body}</p></section>
     {:else}<p class="snapshot-empty">В этом запуске нет общих инструкций.</p>{/each}
-    {#if run.docs?.length}<section class="snapshot-instruction"><h4>Документация на момент запуска</h4><ul class="snapshot-doc-pages">{#each run.docs as doc (doc.id)}<li><button type="button" class="doc-page-link" onclick={() => openDocPage(doc.id)}><Icon name="file" size={13} />{doc.title.trim() || 'Без названия'}</button></li>{/each}</ul></section>{/if}
   </details>
 {/snippet}
 
@@ -1141,7 +1111,6 @@
         {:else}<p class="task-tags-empty">Теги не назначены</p>{/if}
       </section>
       <section class="instruction-section"><h3>{selectedTask.steps?.length ? 'ОБЩАЯ ЦЕЛЬ ЗАДАЧИ' : 'ЗАДАНИЕ ДЛЯ АГЕНТА'}</h3><p>{selectedTask.instruction}</p></section>
-      {#if selectedTask.docPages?.length}<section class="task-doc-pages" aria-label="Документация задачи"><details><summary><Icon name="chevron" size={15} class="task-doc-chevron" /><Icon name="book" size={14} /><span>Документация</span><span class="task-doc-count">{selectedTask.docPages.length} {plural(selectedTask.docPages.length, 'страница', 'страницы', 'страниц')}</span></summary><ul>{#each selectedTask.docPages as doc (doc.id)}<li><button type="button" class="doc-page-link" onclick={() => openDocPage(doc.id)}><Icon name="file" size={13} />{doc.title.trim() || 'Без названия'}</button></li>{/each}</ul></details></section>{/if}
       {#if selectedTask.attachments?.some(file => file.source === 'user')}<section class="task-attachments" aria-label="Файлы задачи"><h3>Файлы задачи</h3><AttachmentList attachments={selectedTask.attachments.filter(file => file.source === 'user')} taskId={selectedTask.id} author={attachmentAuthor} /></section>{/if}
       {#if detail?.attachments?.some(file => file.source === 'agent' && !file.commentId)}<section class="task-attachments" aria-label="Файлы агента"><h3>Файлы агента</h3><AttachmentList attachments={detail.attachments.filter(file => file.source === 'agent' && !file.commentId)} taskId={selectedTask.id} author={attachmentAuthor} /></section>{/if}
       {#if currentRun?.followup}
@@ -1309,7 +1278,6 @@
         {#if editingId && selectedTask && taskIsOccupied(selectedTask)}<div class="form-note">Изменения применятся к следующему запуску. Текущий запуск сохраняет план этапов, работников, настройки, инструкции и рабочую папку. Для повтора этапа используется сохранённый план.</div>{/if}
         <label class="form-field"><span>Название задачи <span class="required">*</span></span><input bind:value={formTitle} name="title" placeholder="Например, проверить новые изменения" required maxlength="140" disabled={submitting} /></label>
         <TagPicker {tags} bind:selected={formTagIds} disabled={submitting} loading={tagsLoading} error={tagsError} onreload={loadTags} />
-        <DocPagePicker pages={docPages} bind:selected={formDocPageIds} disabled={submitting} loading={docPagesLoading} error={docPagesError} onreload={loadDocPages} />
         <div class="task-type-switch" role="group" aria-label="Тип задачи"><button type="button" class:selected={!formComplex} aria-pressed={!formComplex} disabled={submitting} onclick={() => formComplex = false}>Простая задача</button><button type="button" class:selected={formComplex} aria-pressed={formComplex} disabled={submitting} onclick={() => formComplex = true}>Сложная задача</button></div>
         {#if formComplex}<p class="workflow-help">Одна общая цель, несколько работников по очереди. Порядок и задания можно изменить до запуска.</p>{/if}
         <label class="form-field"><span>{formComplex ? 'Общая цель и ограничения' : 'Что нужно сделать?'} <span class="required">*</span></span><textarea bind:value={formInstruction} name="instruction" maxlength="16000" rows="4" placeholder="Опишите результат, важные детали и ограничения. Агент получит эту инструкцию при каждом запуске." required disabled={submitting}></textarea></label>

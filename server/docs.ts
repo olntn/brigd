@@ -1,5 +1,5 @@
 import type { DocBlock, DocBlockType, DocPageContentInput, DocPageCreateInput, DocPageMarkdownInput, DocPageMoveInput } from '../src/lib/types';
-import { DOC_BLOCK_LIMIT, DOC_BLOCK_TEXT_LIMIT, DOC_CALLOUT_ICON_LIMIT, DOC_INDENT_LIMIT, DOC_LANGUAGE_LIMIT, DOC_MARKDOWN_LIMIT, DOC_PAGE_BYTES_LIMIT, DOC_PAGE_LIMIT, DOC_TABLE_CELL_LIMIT, DOC_TABLE_COLUMN_LIMIT, DOC_TABLE_ROW_LIMIT, DOC_TASK_PAGE_LIMIT, DOC_TITLE_LIMIT, isDocBlockType, isDocCalloutColor, isDocTextType } from '../src/lib/docs';
+import { DOC_BLOCK_LIMIT, DOC_BLOCK_TEXT_LIMIT, DOC_CALLOUT_ICON_LIMIT, DOC_INDENT_LIMIT, DOC_LANGUAGE_LIMIT, DOC_MARKDOWN_LIMIT, DOC_PAGE_BYTES_LIMIT, DOC_PAGE_LIMIT, DOC_TABLE_CELL_LIMIT, DOC_TABLE_COLUMN_LIMIT, DOC_TABLE_ROW_LIMIT, DOC_TITLE_LIMIT, isDocBlockType, isDocCalloutColor, isDocTextType } from '../src/lib/docs';
 import { AppError } from './errors';
 
 // JSON permits six-byte escapes for every UTF-16 code unit; the canonical page size is checked after parsing.
@@ -41,14 +41,6 @@ export function validateDocPageMarkdown(value: unknown): DocPageMarkdownInput {
   const v = object(value, ['title', 'markdown']);
   if (!('title' in v) && !('markdown' in v)) throw new AppError('Укажите title или markdown');
   return { ...(v.title !== undefined ? { title: validateDocTitle(v.title) } : {}), ...(v.markdown !== undefined ? { markdown: validateDocMarkdown(v.markdown) } : {}) };
-}
-/** Pages a task points to as reference material. */
-export function validateDocPageIds(value: unknown): string[] {
-  if (!Array.isArray(value) || value.length > DOC_TASK_PAGE_LIMIT || value.some(id => typeof id !== 'string' || !ID.test(id))) {
-    throw new AppError(`Документация: выберите не больше ${DOC_TASK_PAGE_LIMIT} страниц`);
-  }
-  if (new Set(value).size !== value.length) throw new AppError('Страницы документации не должны повторяться');
-  return value as string[];
 }
 
 function validateDocBlock(value: unknown, index: number, ids: Set<string>): DocBlock {

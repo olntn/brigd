@@ -380,7 +380,7 @@ export class Engine {
       if (!run.mock && (this.factory === startAgent || this.bridgeFactory)) {
         launch.bridge = (this.bridgeFactory ?? createTaskBridge)(this.store, { ...run, cwd: run.workspace?.cwd ?? run.cwd }, fence, this.taskAppAccess);
       }
-      const input: AgentInput = { provider: run.provider, cwd: run.workspace?.cwd ?? run.cwd, instruction: run.instruction, instructions: run.instructions, ...(run.docs?.length ? { docs: run.docs } : {}),
+      const input: AgentInput = { provider: run.provider, cwd: run.workspace?.cwd ?? run.cwd, instruction: run.instruction, instructions: run.instructions,
         ...(this.getCliAccessSettings().mode === 'full' ? { cliAccess: 'full' as const } : {}),
         ...(run.workspace?.mode === 'worktree' ? { workspace: run.workspace } : {}),
         ...(run.inputAttachments?.length ? { attachments: run.inputAttachments } : {}), ...(launch.bridge ? { taskBridge: launch.bridge.agentConfig } : {}),

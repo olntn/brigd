@@ -51,7 +51,6 @@ const taskFields: Record<string, Schema> = {
   ultracode: { ...nullable(flag), description: 'true or false forces the provider\'s ultra agent mode for the card\'s new runs (every stage of a workflow); null follows each worker profile. Creation defaults to null.' },
   tagIds: ids(100),
   attachmentIds: { ...ids(20), description: 'Previously staged upload IDs accepted by the task API.' },
-  docPageIds: { ...ids(20), description: 'Documentation pages the agent should read as reference material; every run records their ids and titles at start.' },
   steps: { type: 'array', maxItems: 20, description: 'Empty for a single-worker task, or 2–20 ordered workflow stages; at most 64000 characters in total.',
     items: object({ workerId: id, title: text(140), instruction: text(8_000) }, ['workerId', 'title', 'instruction']) },
 };

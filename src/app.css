@@ -1315,18 +1315,4 @@ button.autopilot-task:hover strong { color: var(--accent-text); }
 .docs-search-results small { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin-top: 2px; font-size: .77rem; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
 .docs-search-results mark { padding: 0 1px; border-radius: 2px; background: var(--warning-bg); color: var(--text); }
 .docs-search-empty { margin: 4px 10px; color: var(--muted); font-size: .85rem; line-height: 1.6; }
-.task-doc-pages { padding: 0 26px 22px; min-width: 0; }
-.task-doc-pages details { border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
-.task-doc-pages summary { display: flex; align-items: center; gap: 8px; padding: 11px 12px; cursor: pointer; font-size: .85rem; font-weight: 500; color: var(--secondary); line-height: 1.6; overflow-wrap: anywhere; }
-.task-doc-pages summary::-webkit-details-marker { display: none; }
-.task-doc-pages summary > svg { flex-shrink: 0; color: var(--muted); }
-.task-doc-pages summary:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; border-radius: var(--radius-sm); }
-.task-doc-chevron { transition: transform .15s; }
-.task-doc-pages details[open] > summary .task-doc-chevron { transform: rotate(90deg); }
-.task-doc-count { margin-left: auto; padding: 2px 6px; border-radius: var(--radius-sm); background: var(--soft); font-size: .69rem; font-weight: 500; color: var(--muted); white-space: nowrap; }
-.task-doc-pages ul { padding: 12px; border-top: 1px solid var(--line); }
-.task-doc-pages ul, .snapshot-doc-pages { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0; }
-.snapshot-doc-pages { padding: 0; }
-.doc-page-link { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 5px 9px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); color: var(--accent-text); font-size: .8rem; overflow-wrap: anywhere; }
-.doc-page-link:hover { background: var(--soft); border-color: var(--focus); }
-@media (max-width: 700px) { .task-doc-pages { padding-inline: 20px; } .doc-task-search, .doc-cell-input { font-size: max(16px, .9rem); } }
+@media (max-width: 700px) { .doc-task-search, .doc-cell-input { font-size: max(16px, .9rem); } }

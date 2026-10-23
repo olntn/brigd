@@ -149,8 +149,6 @@ export interface RunStep extends TaskStepInput {
 }
 export interface TaskInput {
   tagIds?: string[];
-  /** Documentation pages the agent should read as reference material. */
-  docPageIds?: string[];
   attachmentIds?: string[];
   steps?: TaskStepInput[];
   workerId?: string | null;
@@ -169,8 +167,6 @@ export interface TaskInput {
 export interface Task extends TaskInput {
   tagIds: string[];
   tags: Tag[];
-  /** Live titles of the attached pages; pages in the trash are left out. */
-  docPages?: DocReference[];
   /** Once completed, new work continues a saved session instead of rerunning. */
   hasCompletedRun?: boolean;
   attachments?: Attachment[];
@@ -222,8 +218,6 @@ export interface Run {
   steps: RunStep[];
   currentStepIndex: number | null;
   instructions: InstructionSnapshot[];
-  /** Pages attached to the task when the run started. */
-  docs?: DocReference[];
   workerId: string | null;
   worker: WorkerSnapshot | null;
   /** The task's ultracode choice frozen at start; null keeps the worker snapshot's own setting (or the CLI default without a worker). */
@@ -445,7 +439,6 @@ export interface DocSearchHit {
   snippet: string;
 }
 /** A page attached to a task; the run keeps the id and the title at start, the agent reads the live content. */
-export interface DocReference { id: string; title: string; }
 export interface DocPageSummary {
   id: string;
   parentId: string | null;
