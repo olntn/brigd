@@ -59,6 +59,26 @@ afterEach(() => {
 });
 
 describe('interface change events', () => {
+  test('notification subscribers opt into hidden-tab refreshes only while enabled', async () => {
+    let enabled = true;
+    let notificationReads = 0;
+    const ordinary = watch(['tasks']);
+    stops.push(subscribe(['tasks'], () => { notificationReads++; }, () => enabled));
+    page.visibilityState = 'hidden';
+    FakeEventSource.last.emit('change', { revision: 1, scopes: ['tasks'] });
+    await advance(RELOAD_DELAY_MS);
+    expect(notificationReads).toBe(1);
+    expect(ordinary.count).toBe(0);
+    enabled = false;
+    FakeEventSource.last.emit('change', { revision: 2, scopes: ['tasks'] });
+    await advance(RELOAD_INTERVAL_MS);
+    expect(notificationReads).toBe(1);
+    page.visibilityState = 'visible';
+    page.dispatch('visibilitychange');
+    await advance(RELOAD_DELAY_MS);
+    expect(ordinary.count).toBe(1);
+    expect(notificationReads).toBe(2);
+  });
   test('a change reloads only the matching views, once per burst and at most once per reload interval', async () => {
     const tasks = watch(['tasks', 'workers']);
     const docs = watch(['docs']);

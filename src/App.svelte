@@ -4,6 +4,9 @@
   import Workers from './lib/Workers.svelte';
   import ModelSettings from './lib/ModelSettings.svelte';
   import GeneralSettings from './lib/GeneralSettings.svelte';
+  import { BrowserNotifications, readNotificationPreferences } from './lib/browser-notifications';
+  import { autopilotQueueEmpty, autopilotStopped, taskNotifications } from './lib/notification-events';
+  import type { AutopilotOverview } from './lib/types';
   import AutopilotSettings from './lib/AutopilotSettings.svelte';
   import CheckTriageSettings from './lib/CheckTriageSettings.svelte';
   import ConcurrencySettings from './lib/ConcurrencySettings.svelte';
@@ -267,11 +270,29 @@
     notify(text, type);
   }
 
+  let browserNotifications: BrowserNotifications | null = null;
+  let notificationTasks: Task[] | null = null;
+  let notificationAutopilot: AutopilotOverview | null = null;
+  let notificationAutopilotKeys: string[] | null = null;
+  function backgroundNotifications() { const preferences = readNotificationPreferences(); return preferences.browser || preferences.sound; }
+  function observeAutopilot(result: AutopilotOverview) {
+    notificationAutopilot = result;
+    if (!notificationTasks) return;
+    const events = [autopilotStopped(result), autopilotQueueEmpty(result, notificationTasks)].filter(event => event !== null);
+    if (notificationAutopilotKeys) for (const event of events) {
+      if (!notificationAutopilotKeys.includes(event.key)) void browserNotifications?.show(event);
+    }
+    notificationAutopilotKeys = events.map(event => event.key);
+  }
+
   async function loadTasks() {
     const sequence = ++taskSequence;
     try {
       const result = await api<Task[]>('/api/tasks');
       if (sequence !== taskSequence) return;
+      if (notificationTasks) for (const event of taskNotifications(notificationTasks, result)) void browserNotifications?.show(event);
+      notificationTasks = result;
+      if (notificationAutopilot) observeAutopilot(notificationAutopilot);
       tasks = result;
       connectionError = '';
     } catch (error) {
@@ -501,8 +522,8 @@
     autopilotStatusReading = true;
     const sequence = ++autopilotStatusSequence;
     try {
-      const result = await api<AutopilotState>('/api/autopilot');
-      if (sequence === autopilotStatusSequence) autopilotStatusChanged(result.enabled);
+      const result = await api<AutopilotOverview>('/api/autopilot');
+      if (sequence === autopilotStatusSequence) { observeAutopilot(result); autopilotStatusChanged(result.enabled); }
     } catch {
       if (sequence === autopilotStatusSequence) autopilotStatusChanged(null);
     } finally { autopilotStatusReading = false; }
@@ -517,6 +538,7 @@
   }
 
   onMount(() => {
+    browserNotifications = new BrowserNotifications(id => { void openTaskById(id); });
     applyTheme(theme);
     applyLocale();
     const onThemeStorage = (event: StorageEvent) => {
@@ -539,7 +561,7 @@
     // Cards embed their worker and tags; the drawer follows the same changes as the board.
     const board = ['tasks', 'workers', 'tags'] as const;
     const unsubscribe = [
-      subscribe(board, () => { if (!info) void loadInfo(); return loadTasks(); }),
+      subscribe(board, () => { if (!info) void loadInfo(); return loadTasks(); }, backgroundNotifications),
       subscribe(board, () => selectedId ? loadDetail() : undefined),
       subscribe(['workers'], loadWorkers),
       subscribe(['tags'], loadTags),
@@ -547,9 +569,9 @@
       // An in-flight read may predate the change: wait for it, then read again.
       subscribe(['settings'], () => generalSettingsMutationPending || generalSettingsRequest ? false : loadGeneralSettings()),
       subscribe(['settings'], loadAutopilotSettings),
-      subscribe(['autopilot'], loadAutopilotStatus),
+      subscribe(['autopilot', 'tasks'], loadAutopilotStatus, backgroundNotifications),
     ];
-    return () => { for (const stop of unsubscribe) stop(); clearTimeout(toastTimer); window.removeEventListener('storage', onThemeStorage); window.removeEventListener('hashchange', onHash); };
+    return () => { browserNotifications?.dispose(); for (const stop of unsubscribe) stop(); clearTimeout(toastTimer); window.removeEventListener('storage', onThemeStorage); window.removeEventListener('hashchange', onHash); };
   });
   $effect(() => { if (page !== 'docs' && location.hash.startsWith('#/docs')) history.replaceState(null, '', location.pathname + location.search); });
 
@@ -1150,7 +1172,7 @@
       {:else if page === 'docs'}
         <Docs {notify} onopentask={(id) => { void openTaskById(id); }} />
       {:else if page === 'autopilot'}
-        <Autopilot {tasks} {notify} settings={autopilotSettings} checksRequired={info?.mode !== 'mock'} onopen={openTask} onchanged={taskChanged} onsettings={openSettings} onstatus={autopilotStatusChanged} />
+        <Autopilot {tasks} {notify} settings={autopilotSettings} checksRequired={info?.mode !== 'mock'} onopen={openTask} onchanged={taskChanged} onsettings={openSettings} onstatus={autopilotStatusChanged} onoverview={observeAutopilot} />
       {:else if page === 'tags'}
         <Tags {tags} loading={tagsLoading} error={tagsError} onreload={loadTags} onchanged={tagChanged} ondeleted={tagDeleted} onmutation={tagMutation} {notify} />
       {:else if page === 'archive'}

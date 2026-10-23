@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
+  import BrowserNotificationSettings from './BrowserNotificationSettings.svelte';
   import { serverText, t, tk } from './i18n';
   import type { FallbackWorkers, GeneralSettings, Provider, Worker } from './types';
 
@@ -16,6 +17,8 @@
   } = $props();
   let value = $state('');
   let defaultSchedule = $state<GeneralSettings['defaultSchedule']>('manual');
+  let webhookUrl = $state('');
+  let webhookSecret = $state('');
   // Empty string stands for "no default worker", as in the task form.
   let defaultWorker = $state('');
   let agentTimeLimitMinutes = $state<number | undefined>();
@@ -57,6 +60,8 @@
     if (!dirty) {
       value = settings?.defaultCwd ?? '';
       defaultSchedule = settings?.defaultSchedule ?? 'manual';
+      webhookUrl = settings?.webhookUrl ?? '';
+      webhookSecret = settings?.webhookSecret ?? '';
       agentTimeLimitMinutes = settings?.agentTimeLimitMinutes ?? undefined;
       integrationCheckTimeLimitMinutes = settings?.integrationCheckTimeLimitMinutes ?? undefined;
       defaultWorker = settings?.defaultWorkerId ?? '';
@@ -78,7 +83,7 @@
     onmutation();
     try {
       const response = await fetch('/api/settings/general', {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ defaultCwd, defaultSchedule, agentTimeLimitMinutes: agentTimeLimitMinutes ?? null, integrationCheckTimeLimitMinutes: integrationCheckTimeLimitMinutes ?? null, defaultWorkerId: defaultWorker || null, fallbackWorkers }),
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ defaultCwd, defaultSchedule, webhookUrl: webhookUrl.trim(), webhookSecret, agentTimeLimitMinutes: agentTimeLimitMinutes ?? null, integrationCheckTimeLimitMinutes: integrationCheckTimeLimitMinutes ?? null, defaultWorkerId: defaultWorker || null, fallbackWorkers }),
       });
       let body;
       try { body = await response.json(); } catch { throw new Error(t('Сервер вернул неожиданный ответ. Попробуйте ещё раз.')); }
@@ -87,6 +92,8 @@
       dirty = false;
       value = saved.defaultCwd;
       defaultSchedule = saved.defaultSchedule;
+      webhookUrl = saved.webhookUrl ?? '';
+      webhookSecret = saved.webhookSecret ?? '';
       agentTimeLimitMinutes = saved.agentTimeLimitMinutes ?? undefined;
       integrationCheckTimeLimitMinutes = saved.integrationCheckTimeLimitMinutes ?? undefined;
       defaultWorker = saved.defaultWorkerId ?? '';
@@ -124,8 +131,15 @@
       {/each}
       {#if !workers.some(worker => !worker.archived)}<p class="fallback-help">{t('Сначала создайте работников в разделе «Работники»: замена выбирается из их профилей.')}</p>{/if}
     </fieldset>
+    <fieldset class="fallback-settings webhook-settings">
+      <legend>{t('Webhook')}</legend>
+      <p class="fallback-help">{t('Сервер отправляет события на этот адрес независимо от вкладок браузера. Пустой URL отключает отправку.')}</p>
+      <label class="form-field"><span>{t('URL webhook')}</span><input name="webhookUrl" type="url" bind:value={webhookUrl} oninput={touched} maxlength="4096" placeholder="https://example.com/brigd" disabled={busy || loading || !settings} /></label>
+      <label class="form-field"><span>{t('Секрет')}</span><input name="webhookSecret" type="password" aria-label={t('Секрет')} aria-describedby="webhook-secret-description" bind:value={webhookSecret} oninput={touched} maxlength="4096" autocomplete="new-password" disabled={busy || loading || !settings} /><small id="webhook-secret-description">{t('Необязателен. Подписывает тело запроса HMAC-SHA256 в заголовке X-Brigd-Signature.')}</small></label>
+    </fieldset>
     <div class="model-catalog-actions"><button type="submit" class="button primary" disabled={busy || loading || !settings}><Icon name={busy ? 'refresh' : 'check'} class={busy ? 'spin' : ''} size={16} />{busy ? t('Сохраняем…') : t('Сохранить настройки')}</button></div>
   </form>
+  <BrowserNotificationSettings />
 </section>
 
 <style>

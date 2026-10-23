@@ -32,6 +32,8 @@ import { attachmentIds, preparedAttachmentPayload, type PreparedAttachment } fro
 import { ATTACHMENT_MAX_COUNT, ATTACHMENT_TASK_MAX_COUNT, ATTACHMENT_TASK_MAX_BYTES, ATTACHMENT_STAGING_MAX_COUNT, ATTACHMENT_STAGING_MAX_BYTES, ATTACHMENT_TOTAL_MAX_BYTES, ATTACHMENT_STAGING_TTL_MS } from '../src/lib/attachments';
 import { ChangeTrackingDatabase } from './changes';
 import type { ChangeScope } from '../src/lib/change-scopes';
+import { autopilotStopped, integrationNotification, runNotification, type NotificationEvent } from '../src/lib/notification-events';
+import { NotificationQueue, validateWebhookSecret, validateWebhookUrl, type WebhookSettings } from './notifications';
 export { AppError } from './errors';
 type Row = Record<string, any>;
 const ATTACHMENT_COLUMNS = 'a.id,a.task_id,a.comment_id,a.run_id,a.step_index,a.attempt_id,a.source,a.name,a.mime,a.size,a.sha256,a.previewable,a.created_at';
@@ -293,6 +295,8 @@ export const RECENT_USAGE_MS = 30 * 24 * 60 * 60_000;
 
 export class Store {
   readonly db: Database;
+  readonly notifications = new NotificationQueue();
+  private closed = false;
   /** Identifies this connection to `/api/events` clients: a restored or restarted database is a new instance. */
   readonly instance = randomUUID();
   private changeRevision = 0;
@@ -498,6 +502,9 @@ export class Store {
       }
       // The worker preselected in the form of a new single-worker card.
       if (!columns.includes('default_worker_id')) this.db.exec('ALTER TABLE general_settings ADD COLUMN default_worker_id TEXT REFERENCES workers(id)');
+      for (const column of ['webhook_url', 'webhook_secret']) {
+        if (!columns.includes(column)) this.db.exec(`ALTER TABLE general_settings ADD COLUMN ${column} TEXT NOT NULL DEFAULT ''`);
+      }
       this.db.exec('INSERT OR IGNORE INTO general_settings (singleton,default_cwd) VALUES (1,NULL)');
     }).immediate();
     // The explicit marker makes even an intentionally empty catalog persistent.
@@ -591,7 +598,31 @@ export class Store {
     // Every later write on this connection, from any module, advances the revision.
     db.onWrite = scopes => this.changed(...scopes);
   }
-  close() { this.db.close(); }
+  close() { this.closed = true; this.db.close(); }
+  /** Resolve after the surrounding synchronous transaction, so a rolled-back transition never sends a webhook. */
+  private deferNotification(read: () => NotificationEvent | null): void {
+    queueMicrotask(() => {
+      if (this.closed) return;
+      try {
+        const settings = this.getWebhookSettings();
+        if (!settings.webhookUrl) return;
+        const event = read();
+        if (event) this.notifications.enqueue(settings, event.payload);
+      }
+      catch { console.error('[brigd] Could not enqueue webhook notification'); }
+    });
+  }
+  notifyAutopilotQueueEmpty(event: NotificationEvent): void {
+    this.deferNotification(() => this.getAutopilot().enabled ? event : null);
+  }
+  private notifyRunTransition(run: Run): void {
+    if (!runNotification({ id: run.taskId, title: '' }, run)) return;
+    this.deferNotification(() => {
+      const current = this.getRun(run.id);
+      return current.status === run.status && current.turn === run.turn && current.updatedAt === run.updatedAt
+        ? runNotification(this.getTask(run.taskId), run) : null;
+    });
+  }
   /** Count of writes reported since this Store opened. */
   get revision(): number { return this.changeRevision; }
   /** Reports a change; also usable for data kept outside this database. */
@@ -653,6 +684,10 @@ export class Store {
     const row = this.db.query('SELECT default_worker_id FROM general_settings WHERE singleton=1').get() as { default_worker_id: string | null };
     return row.default_worker_id ?? null;
   }
+  getWebhookSettings(): WebhookSettings {
+    const row = this.db.query('SELECT webhook_url,webhook_secret FROM general_settings WHERE singleton=1').get() as Row;
+    return { webhookUrl: row.webhook_url, webhookSecret: row.webhook_secret };
+  }
   /** Saved IDs as they are; an archived or missing worker is skipped at launch time, never silently rewritten. */
   getFallbackWorkers(): FallbackWorkers {
     const row = this.db.query('SELECT fallback_codex,fallback_claude FROM general_settings WHERE singleton=1').get() as { fallback_codex: string | null; fallback_claude: string | null };
@@ -691,12 +726,14 @@ export class Store {
   }
   updateGeneralSettings(value: Record<string, unknown>): void {
     const keys = Object.keys(value);
-    if (!keys.length || keys.some(key => key !== 'defaultCwd' && key !== 'defaultSchedule' && key !== 'defaultWorkerId' && key !== 'fallbackWorkers' && key !== 'agentTimeLimitMinutes' && key !== 'integrationCheckTimeLimitMinutes')) {
-      throw new AppError('Укажите defaultCwd, defaultSchedule, defaultWorkerId, fallbackWorkers, agentTimeLimitMinutes и/или integrationCheckTimeLimitMinutes');
+    if (!keys.length || keys.some(key => !['defaultCwd', 'defaultSchedule', 'defaultWorkerId', 'fallbackWorkers', 'agentTimeLimitMinutes', 'integrationCheckTimeLimitMinutes', 'webhookUrl', 'webhookSecret'].includes(key))) {
+      throw new AppError('Укажите поддерживаемые поля общих настроек');
     }
     const cwd = Object.hasOwn(value, 'defaultCwd') ? validatedDefaultCwd(value.defaultCwd) : null;
     const schedule = Object.hasOwn(value, 'defaultSchedule') ? validatedDefaultSchedule(value.defaultSchedule) : null;
     this.db.transaction(() => {
+      if (Object.hasOwn(value, 'webhookUrl')) this.db.query('UPDATE general_settings SET webhook_url=? WHERE singleton=1').run(validateWebhookUrl(value.webhookUrl));
+      if (Object.hasOwn(value, 'webhookSecret')) this.db.query('UPDATE general_settings SET webhook_secret=? WHERE singleton=1').run(validateWebhookSecret(value.webhookSecret));
       for (const [field, column] of [['agentTimeLimitMinutes', 'agent_time_limit_minutes'], ['integrationCheckTimeLimitMinutes', 'integration_check_time_limit_minutes']] as const) {
         if (Object.hasOwn(value, field)) this.db.query(`UPDATE general_settings SET ${column}=? WHERE singleton=1`).run(validateTimeLimitMinutes(value[field]));
       }
@@ -1316,7 +1353,8 @@ export class Store {
   }
   /** The autopilot switches itself off at the stop time, after too many failures or when the service restarts. Running work is never cancelled. */
   stopAutopilot(reason: Exclude<AutopilotStopReason, 'manual'>, now = clock()): AutopilotState {
-    this.db.query('UPDATE autopilot SET enabled=0,stopped_at=?,stop_reason=?,updated_at=? WHERE singleton=1 AND enabled=1').run(now, reason, now);
+    const changed = this.db.query('UPDATE autopilot SET enabled=0,stopped_at=?,stop_reason=?,updated_at=? WHERE singleton=1 AND enabled=1').run(now, reason, now).changes;
+    if (changed) this.deferNotification(() => { const state = this.getAutopilot(); return state.stoppedAt === now && state.stopReason === reason ? autopilotStopped(state) : null; });
     return this.getAutopilot();
   }
   /** Pool tasks in claim order: the queue's head first. With a session start, tasks the autopilot already attempted in that session are left out. */
@@ -2354,7 +2392,17 @@ export class Store {
     }).immediate();
   }
   private writeIntegration(job: Integration) {
+    const previous = this.integrationForRun(job.runId);
     this.db.query('UPDATE integrations SET state=?,attempt=?,snapshot=? WHERE id=?').run(job.status, job.attempt, JSON.stringify(job), job.id);
+    if (previous?.status !== job.status) this.deferNotification(() => {
+      const current = this.integrationForRun(job.runId);
+      if (current?.status !== job.status || current.attempt !== job.attempt) return null;
+      const run = this.getRun(job.runId);
+      const task = this.getTask(run.taskId);
+      // Automatic conflict resolution and failed-check hand-backs get a chance to take over first.
+      if (task.latestRun?.id !== run.id && task.latestRun && ['queued', 'preparing', 'running'].includes(task.latestRun.status)) return null;
+      return integrationNotification(task, run, current);
+    });
   }
   /** A result the integrator has just reconciled is checked first, before another merge moves the target it was resolved against. */
   claimIntegrations(maximum: number): Integration[] {
@@ -2486,7 +2534,9 @@ export class Store {
       this.db.query(`UPDATE runs SET status=?,summary=?,error=?,updated_at=?,finished_at=? WHERE id=?`)
         .run(final, summary, error, now, status === 'waiting_input' ? null : now, id);
       if (run.trigger === 'autopilot') this.noteAutopilotOutcome(run, final, now);
-      return this.getRun(id);
+      const finished = this.getRun(id);
+      this.notifyRunTransition(finished);
+      return finished;
     }).immediate();
   }
   /** The circuit breaker: consecutive failed or blocked autopilot runs switch the autopilot off; a result or a question resets the count. */
@@ -2500,7 +2550,8 @@ export class Store {
     if (status !== 'failed' && status !== 'blocked') return;
     const failures = state.failures + 1;
     if (failures < AUTOPILOT_FAILURE_LIMIT) { this.db.query('UPDATE autopilot SET failures=?,updated_at=? WHERE singleton=1').run(failures, now); return; }
-    this.db.query("UPDATE autopilot SET enabled=0,failures=?,stopped_at=?,stop_reason='failures',updated_at=? WHERE singleton=1").run(failures, now, now);
+    this.db.query('UPDATE autopilot SET failures=? WHERE singleton=1').run(failures);
+    this.stopAutopilot('failures', now);
     this.comment(run.taskId, run.id, 'system', `Автопилот выключен: ${AUTOPILOT_FAILURE_LIMIT} запуска подряд завершились ошибкой или блокировкой. Проверьте причину и включите его снова.`, now, run.currentStepIndex);
   }
   resume(id: string, answer: string, acknowledgeInterruption = false, now = clock(), ids?: string[]): Run {
@@ -2571,7 +2622,7 @@ export class Store {
   reconcile(now = clock()): number {
     return this.db.transaction(() => {
       // Unattended work never resumes on its own: interrupted runs need a human check first.
-      this.db.query("UPDATE autopilot SET enabled=0,stopped_at=?,stop_reason='restart',updated_at=? WHERE singleton=1 AND enabled=1").run(now, now);
+      this.stopAutopilot('restart', now);
       const rows = this.db.query("SELECT * FROM runs WHERE status IN ('preparing','running','cancelling')").all() as Row[];
       this.db.query("UPDATE execution_requests SET state='interrupted' WHERE state IN ('preparing','running')").run();
       for (const row of this.db.query("SELECT snapshot FROM integrations WHERE state IN ('checking','merging','cancelling')").all() as Row[]) {
@@ -2592,6 +2643,7 @@ export class Store {
           // successors. Continuing the current session cannot resurrect them.
         }
         this.comment(run.taskId, run.id, 'system', 'Запуск прерван перезапуском сервиса. Сессия сохранена, если CLI успел вернуть её ID. Автоматического повтора не будет.', now);
+        this.notifyRunTransition(this.getRun(run.id));
       }
       return rows.length;
     }).immediate();
