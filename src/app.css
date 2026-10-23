@@ -35,6 +35,8 @@
   --radius-md: 4px;
   --font-mono: 'Consolas', 'Liberation Mono', 'DejaVu Sans Mono', monospace;
   --overlay: #141c2666;
+  /* An optional colored band across the top of the navigation. */
+  --stripe: none;
   --sidebar-width: clamp(230px, 18rem, 320px);
   --scrollbar-thumb: color-mix(in srgb, var(--muted) 45%, var(--line));
   --scrollbar-thumb-hover: var(--accent);
@@ -71,303 +73,296 @@
   --claude-bg: #3b2e29;
   --overlay: #080c12a6;
 }
-/* Each palette inherits the light or dark status colors for consistent signals. */
-:root[data-theme='ocean'] {
-  --page: #f3f8fc;
+/* Palettes are built in the spirit of ARC Raiders: each changes structure, not just hue.
+   They inherit the light or dark status colors unless their page tone needs deeper signals.
+   A `.sidebar` block recolors the app chrome; its navigation reads tokens from that scope. */
+/* spaceport: white hull, navy chrome, international orange for actions. */
+:root[data-theme='spaceport'] {
+  --page: #eef0f3;
   --surface: #fff;
-  --sidebar: #eaf2f8;
-  --subtle: #f0f6fb;
-  --soft: #e2eff9;
-  --selected: #d5e7f7;
-  --text: #20394a;
-  --secondary: #426077;
-  --muted: #526d82;
-  --line: #d4e3ee;
-  --accent: #26749d;
-  --accent-hover: #1d6085;
-  --accent-text: #23698f;
-  --focus: #397fa6;
+  --sidebar: #e4e8ee;
+  --subtle: #f4f5f8;
+  --soft: #e6eaf0;
+  --selected: #d9e1ee;
+  --text: #141d33;
+  --secondary: #35415c;
+  --muted: #56617a;
+  --line: #ccd3de;
+  --accent: #cc4a0c;
+  --accent-hover: #ad3d08;
+  --on-accent: #fff;
+  --accent-text: #1f3c73;
+  --focus: #e0560f;
+  --success: #3f6c4b;
+  --stripe: linear-gradient(90deg, #f0661f 0 34%, #f6a81c 34% 62%, #e9edf4 62% 82%, #6f8fc9 82%);
 }
-:root[data-theme='forest'] {
-  --page: #f5f9f4;
-  --surface: #fff;
-  --sidebar: #edf4ea;
-  --subtle: #f2f7ef;
-  --soft: #e6f0e1;
-  --selected: #d9e8d3;
-  --text: #2c402e;
-  --secondary: #4c6550;
-  --muted: #59715b;
-  --line: #d8e4d3;
-  --accent: #45744a;
-  --accent-hover: #355f3b;
-  --accent-text: #416c47;
-  --focus: #629066;
+:root[data-theme='spaceport'] .sidebar {
+  --surface: #1b2a4b;
+  --sidebar: #14213d;
+  --soft: #1e2d4f;
+  --selected: #283b63;
+  --text: #eef2fa;
+  --secondary: #c5cfe2;
+  --muted: #9eabc5;
+  --line: #2a3a5e;
+  --accent: #f0661f;
+  --on-accent: #14213d;
+  --accent-text: #ffb185;
+  --focus: #ff9d66;
 }
-:root[data-theme='rose'] {
-  --page: #fdf6f8;
-  --surface: #fff;
-  --sidebar: #f8edf1;
-  --subtle: #fcf1f5;
-  --soft: #f7e5ed;
-  --selected: #f0d5e1;
-  --text: #4d3540;
-  --secondary: #755565;
-  --muted: #826070;
-  --line: #eddbe4;
-  --accent: #b44f7b;
-  --accent-hover: #9e406a;
-  --accent-text: #9b3d65;
-  --focus: #c57298;
+/* poster: cream paper, black ink buttons, highlighter selection, cobalt second ink. */
+:root[data-theme='poster'] {
+  --page: #ede4d1;
+  --surface: #fbf7ee;
+  --sidebar: #e4d8bf;
+  --subtle: #f5eee0;
+  --soft: #ece2cc;
+  --selected: #f4d553;
+  --text: #1b1915;
+  --secondary: #3b362e;
+  --muted: #5e5647;
+  --line: #c4b593;
+  --accent: #1b1915;
+  --accent-hover: #3b362d;
+  --on-accent: #fbf3df;
+  --accent-text: #1c49a0;
+  --focus: #2457bd;
+  --success: #36643f;
+  --success-bg: #e8efdc;
+  --success-line: #c5d5b4;
+  --warning: #77561a;
+  --warning-bg: #f7ebcf;
+  --warning-line: #e2cd9a;
+  --error: #963f36;
+  --error-bg: #f8e6dc;
+  --error-line: #e3c3b5;
+  --stripe: linear-gradient(90deg, #c8352a 0 25%, #f0c419 25% 50%, #2f8a4c 50% 75%, #1c49a0 75%);
 }
-:root[data-theme='sand'] {
-  --page: #fbf8f1;
-  --surface: #fff;
-  --sidebar: #f5f0e5;
-  --subtle: #faf4e8;
-  --soft: #f3e9d5;
-  --selected: #eaddbd;
-  --text: #483d2d;
-  --secondary: #6e604a;
-  --muted: #75664d;
-  --line: #e7ddc7;
-  --accent: #956723;
-  --accent-hover: #7c541b;
-  --accent-text: #805923;
-  --focus: #b78b44;
+/* dam: grey concrete overgrown with moss; mid-key page with lichen highlights. */
+:root[data-theme='dam'] {
+  --page: #d6d5cd;
+  --surface: #f0efe8;
+  --sidebar: #bfcaa6;
+  --subtle: #e5e4dc;
+  --soft: #dcdfcd;
+  --selected: #dde58f;
+  --text: #1d2319;
+  --secondary: #364030;
+  --muted: #454f3e;
+  --line: #b7b6aa;
+  --accent: #4a7020;
+  --accent-hover: #3b5a17;
+  --on-accent: #fff;
+  --accent-text: #365312;
+  --focus: #47691f;
+  --success: #2f5a37;
+  --success-bg: #e3ead9;
+  --success-line: #bfcfae;
+  --warning: #694c15;
+  --warning-bg: #efe8d4;
+  --warning-line: #d6c69c;
+  --error: #8a3a32;
+  --error-bg: #f1e1dc;
+  --error-line: #d9bbb2;
+  --stripe: linear-gradient(90deg, #4a7020 0 40%, #c4c93f 40% 64%, #8d8c84 64% 84%, #a3552a 84%);
 }
-:root[data-theme='midnight'] {
-  --page: #111b2c;
-  --surface: #1b2940;
-  --sidebar: #152136;
-  --subtle: #21324c;
-  --soft: #263a58;
-  --selected: #2e486b;
-  --text: #e7effc;
-  --secondary: #b8cae5;
-  --muted: #9eb3d0;
-  --line: #334865;
-  --accent: #72a7eb;
-  --accent-hover: #91baf1;
-  --on-accent: #12253d;
-  --accent-text: #a1c7fa;
-  --focus: #a5ccff;
+/* rustbelt: dusty sand and rusted steel against a teal sky. */
+:root[data-theme='rustbelt'] {
+  --page: #e3d3b4;
+  --surface: #f8f1e3;
+  --sidebar: #d8c39d;
+  --subtle: #f1e7d3;
+  --soft: #ebdcbf;
+  --selected: #c6e0db;
+  --text: #2a2016;
+  --secondary: #4b3c2a;
+  --muted: #5b4a33;
+  --line: #cbb690;
+  --accent: #ad421a;
+  --accent-hover: #8f3412;
+  --on-accent: #fff;
+  --accent-text: #155960;
+  --focus: #17676d;
+  --success: #2f5d3a;
+  --success-bg: #e4ead3;
+  --success-line: #c2cfa6;
+  --warning: #664911;
+  --warning-bg: #f4e7c8;
+  --warning-line: #dcc58f;
+  --error: #8e2f3c;
+  --error-bg: #f6e1df;
+  --error-line: #e2bcbc;
+  --stripe: linear-gradient(90deg, #ad421a 0 30%, #d9962a 30% 55%, #e9d9b8 55% 72%, #1d7980 72%);
 }
-:root[data-theme='graphite'] {
-  --page: #1d2024;
-  --surface: #282d33;
-  --sidebar: #23272c;
-  --subtle: #2c3239;
-  --soft: #323a43;
-  --selected: #414d59;
-  --text: #edf1f5;
-  --secondary: #c2ccd6;
-  --muted: #aab6c2;
-  --line: #424b55;
-  --accent: #abbfce;
-  --accent-hover: #c0d1dc;
-  --on-accent: #202c35;
-  --accent-text: #c2d8e8;
-  --focus: #c3e2f6;
+/* bluegate: cold mountain air, frosted steel and mustard rescue gear. */
+:root[data-theme='bluegate'] {
+  --page: #e9eff2;
+  --surface: #fafcfd;
+  --sidebar: #dce6ec;
+  --subtle: #eef3f6;
+  --soft: #e1eaf0;
+  --selected: #bcd7e8;
+  --text: #16242d;
+  --secondary: #33454f;
+  --muted: #4c5e69;
+  --line: #c4d3dc;
+  --accent: #b37b00;
+  --accent-hover: #c48c00;
+  --on-accent: #141106;
+  --accent-text: #24526c;
+  --focus: #2c6688;
+  --success: #3e6a4a;
+  --error: #9a4b44;
+  --stripe: linear-gradient(90deg, #e3a600 0 40%, #3c7393 40% 75%, #16242d 75%);
 }
-:root[data-theme='plum'] {
-  --page: #241926;
-  --surface: #312334;
-  --sidebar: #2b1e2d;
-  --subtle: #3a293d;
-  --soft: #442f48;
-  --selected: #513957;
-  --text: #f7eafa;
-  --secondary: #d6bddb;
-  --muted: #bda2c5;
-  --line: #553a5b;
-  --accent: #c489d6;
-  --accent-hover: #d4a2e3;
-  --on-accent: #29172f;
-  --accent-text: #e2adf2;
-  --focus: #e6b9f4;
+/* speranza: the underground city with warm lamplight, brown walls and painted teal shutters. */
+:root[data-theme='speranza'] {
+  --page: #1b1511;
+  --surface: #251d17;
+  --sidebar: #211a15;
+  --subtle: #2c231c;
+  --soft: #352a21;
+  --selected: #4a3820;
+  --text: #f7ebd9;
+  --secondary: #dfcbad;
+  --muted: #bea987;
+  --line: #4a3b2d;
+  --accent: #f2a43a;
+  --accent-hover: #f7b95f;
+  --on-accent: #231503;
+  --accent-text: #ffc574;
+  --focus: #5fd0c4;
+  --stripe: linear-gradient(90deg, #f2a43a 0 30%, #e0612e 30% 52%, #f7ebd9 52% 70%, #5fd0c4 70%);
 }
-:root[data-theme='coffee'] {
-  --page: #241e1a;
-  --surface: #302824;
-  --sidebar: #2b231e;
-  --subtle: #392f28;
-  --soft: #44362d;
-  --selected: #534235;
-  --text: #f5ede4;
-  --secondary: #d2c1ae;
-  --muted: #bba68f;
-  --line: #514337;
-  --accent: #d3a46d;
-  --accent-hover: #e2b984;
-  --on-accent: #2b2117;
-  --accent-text: #e9be8b;
-  --focus: #ecc99a;
+:root[data-theme='speranza'] .sidebar {
+  --surface: #173d3b;
+  --sidebar: #12302f;
+  --soft: #1a4240;
+  --selected: #23524f;
+  --text: #eaf6f2;
+  --secondary: #c0ddd6;
+  --muted: #95c0b6;
+  --line: #225049;
+  --accent-text: #ffc574;
+  --focus: #ffc574;
 }
-:root[data-theme='mint'] {
-  --page: #f2f9f7;
-  --surface: #fff;
-  --sidebar: #e9f4f1;
-  --subtle: #eff7f5;
-  --soft: #e0f0eb;
-  --selected: #d0e8e1;
-  --text: #1f3d36;
-  --secondary: #3f6158;
-  --muted: #4e6e66;
-  --line: #d2e5df;
-  --accent: #1b7a68;
-  --accent-hover: #136352;
-  --accent-text: #176d5c;
-  --focus: #3b9282;
+/* arc: gunmetal machine housing, cold HUD cyan and a red sensor glow. */
+:root[data-theme='arc'] {
+  --page: #13161a;
+  --surface: #1c2025;
+  --sidebar: #0d0f12;
+  --subtle: #21262c;
+  --soft: #282e35;
+  --selected: #2f3842;
+  --text: #e8edf2;
+  --secondary: #b9c3cd;
+  --muted: #95a1ad;
+  --line: #333b44;
+  --accent: #ff4d3d;
+  --accent-hover: #ff6d5f;
+  --on-accent: #1b0705;
+  --accent-text: #9fd3e8;
+  --focus: #ff7466;
+  --stripe: repeating-linear-gradient(90deg, #ff4d3d 0 18px, #0d0f12 18px 24px);
 }
-:root[data-theme='peach'] {
-  --page: #fdf7f3;
-  --surface: #fff;
-  --sidebar: #f8eee7;
-  --subtle: #fcf2ec;
-  --soft: #f8e6db;
-  --selected: #f1d6c5;
-  --text: #4a3328;
-  --secondary: #73513f;
-  --muted: #7d5b49;
-  --line: #eedccf;
-  --accent: #b14f29;
-  --accent-hover: #9a4421;
-  --accent-text: #9c4622;
-  --focus: #cd7650;
+/* terminal: a 1979 phosphor screen with green-tinted text on a black tube. */
+:root[data-theme='terminal'] {
+  --page: #07100a;
+  --surface: #0c1810;
+  --sidebar: #091309;
+  --subtle: #0f1e14;
+  --soft: #14271a;
+  --selected: #1b3a24;
+  --text: #cdf7d5;
+  --secondary: #a2ddb0;
+  --muted: #7cbb8d;
+  --line: #1f3c28;
+  --accent: #3ee07c;
+  --accent-hover: #6aeb9a;
+  --on-accent: #03130a;
+  --accent-text: #72f5a0;
+  --focus: #8dffb5;
+  --success: #9df7b9;
+  --success-bg: #133220;
+  --success-line: #25553a;
+  --warning: #f5c76a;
+  --warning-bg: #2c2610;
+  --warning-line: #54471c;
+  --error: #ff9f8f;
+  --error-bg: #331512;
+  --error-line: #5c2a23;
+  --stripe: linear-gradient(90deg, #3ee07c 0 40%, #239250 40% 64%, #15532d 64% 82%, #0c2e19 82%);
 }
-:root[data-theme='indigo'] {
-  --page: #f6f7fd;
-  --surface: #fff;
-  --sidebar: #eef0fa;
-  --subtle: #f2f4fc;
-  --soft: #e6e9f9;
-  --selected: #d8ddf5;
-  --text: #2a2f4f;
-  --secondary: #4b5179;
-  --muted: #575e85;
-  --line: #dde0f1;
-  --accent: #4653b8;
-  --accent-hover: #3843a0;
-  --accent-text: #3f4bab;
-  --focus: #6e79cc;
+/* dusk: violet sky after sunset with coral and pink afterglow. */
+:root[data-theme='dusk'] {
+  --page: #19152a;
+  --surface: #231d36;
+  --sidebar: #14101f;
+  --subtle: #29223e;
+  --soft: #312946;
+  --selected: #46284e;
+  --text: #f4edfb;
+  --secondary: #d4c6e4;
+  --muted: #ae9fc6;
+  --line: #3e3453;
+  --accent: #ff8a5b;
+  --accent-hover: #ffa37d;
+  --on-accent: #2a0e04;
+  --accent-text: #ff9fd0;
+  --focus: #ffb08f;
+  --stripe: linear-gradient(90deg, #ffb35c 0 22%, #ff8a5b 22% 46%, #ff6f9f 46% 70%, #a77bf0 70%);
 }
-:root[data-theme='fog'] {
-  --page: #f6f7f8;
-  --surface: #fff;
-  --sidebar: #eef0f2;
-  --subtle: #f3f4f6;
-  --soft: #e8ebee;
-  --selected: #dbe0e5;
-  --text: #2d3339;
-  --secondary: #4d565f;
-  --muted: #5b646d;
-  --line: #dfe3e7;
-  --accent: #4b5d6e;
-  --accent-hover: #3b4b5a;
-  --accent-text: #45576a;
-  --focus: #71879c;
+/* alarm: hazard signage with a black workspace and a yellow control panel. */
+:root[data-theme='alarm'] {
+  --page: #121211;
+  --surface: #1b1b19;
+  --sidebar: #171715;
+  --subtle: #21211e;
+  --soft: #2a2a26;
+  --selected: #3d3616;
+  --text: #f5f3eb;
+  --secondary: #d0cbbc;
+  --muted: #a9a493;
+  --line: #3a3833;
+  --accent: #ffd21a;
+  --accent-hover: #ffe066;
+  --on-accent: #171400;
+  --accent-text: #ffdc4d;
+  --focus: #ffe066;
+  --stripe: repeating-linear-gradient(-45deg, #15130a 0 7px, #f2c419 7px 14px);
 }
-:root[data-theme='olive'] {
-  --page: #f9f9f1;
-  --surface: #fff;
-  --sidebar: #f1f2e5;
-  --subtle: #f6f6ec;
-  --soft: #ecedd9;
-  --selected: #e0e2c4;
-  --text: #3a3c22;
-  --secondary: #5c5f3b;
-  --muted: #646742;
-  --line: #e2e3cd;
-  --accent: #626c1a;
-  --accent-hover: #535c13;
-  --accent-text: #5a6317;
-  --focus: #8a9542;
+:root[data-theme='alarm'] .sidebar {
+  --surface: #f6d343;
+  --sidebar: #f2c419;
+  --soft: #e2b40f;
+  --selected: #15130a;
+  --text: #15130a;
+  --secondary: #2b2610;
+  --muted: #4a4119;
+  --line: #c49c0b;
+  --accent: #15130a;
+  --on-accent: #ffd21a;
+  --accent-text: #ffd21a;
+  --focus: #15130a;
 }
-:root[data-theme='pine'] {
-  --page: #131e18;
-  --surface: #1c2a22;
-  --sidebar: #17241d;
-  --subtle: #22322a;
-  --soft: #283a30;
-  --selected: #31493b;
-  --text: #e8f4ec;
-  --secondary: #bcd4c4;
-  --muted: #a0bba9;
-  --line: #334b3d;
-  --accent: #7cc792;
-  --accent-hover: #96d6a9;
-  --on-accent: #12261a;
-  --accent-text: #a4e0b6;
-  --focus: #b0e8c0;
-}
-:root[data-theme='lagoon'] {
-  --page: #0f1e21;
-  --surface: #182b2f;
-  --sidebar: #142529;
-  --subtle: #1e3439;
-  --soft: #243d42;
-  --selected: #2c4b51;
-  --text: #e4f5f6;
-  --secondary: #b5d5d8;
-  --muted: #98bbbf;
-  --line: #30494e;
-  --accent: #4fc3c0;
-  --accent-hover: #70d2cf;
-  --on-accent: #0c2627;
-  --accent-text: #85dcd9;
-  --focus: #9ce6e3;
-}
-:root[data-theme='ember'] {
-  --page: #221714;
-  --surface: #2e201c;
-  --sidebar: #281b18;
-  --subtle: #372622;
-  --soft: #422d28;
-  --selected: #523731;
-  --text: #f8ebe6;
-  --secondary: #dcc1b8;
-  --muted: #c3a398;
-  --line: #553a33;
-  --accent: #f08a5d;
-  --accent-hover: #f5a37e;
-  --on-accent: #2c150c;
-  --accent-text: #f7ab88;
-  --focus: #f9bd9f;
-}
-:root[data-theme='garnet'] {
-  --page: #23151a;
-  --surface: #301e25;
-  --sidebar: #2a1920;
-  --subtle: #39242c;
-  --soft: #452b35;
-  --selected: #553441;
-  --text: #f9e9ee;
-  --secondary: #debfca;
-  --muted: #c6a1ae;
-  --line: #573a45;
-  --accent: #ec7a9a;
-  --accent-hover: #f294af;
-  --on-accent: #2c0f18;
-  --accent-text: #f6a2b9;
-  --focus: #f8b6c8;
-}
-:root[data-theme='obsidian'] {
-  --page: #0c0c0e;
-  --surface: #161619;
-  --sidebar: #111114;
-  --subtle: #1c1c20;
-  --soft: #232328;
-  --selected: #2e2e35;
-  --text: #f2f2f4;
-  --secondary: #c8c8cf;
-  --muted: #a5a5ae;
-  --line: #2f2f36;
-  --accent: #e4e4ea;
-  --accent-hover: #fff;
-  --on-accent: #121215;
-  --accent-text: #f0f0f5;
-  --focus: #fff;
+/* bunker: Cold War utility gear in olive drab, bone stencils and orange labels. */
+:root[data-theme='bunker'] {
+  --page: #2a2b23;
+  --surface: #34352b;
+  --sidebar: #212219;
+  --subtle: #393a30;
+  --soft: #414236;
+  --selected: #4d4f3c;
+  --text: #f2edda;
+  --secondary: #d8d1b8;
+  --muted: #b9b197;
+  --line: #4f503e;
+  --accent: #e6dcb8;
+  --accent-hover: #f3ebcd;
+  --on-accent: #23241b;
+  --accent-text: #ffb46b;
+  --focus: #ffb46b;
+  --stripe: linear-gradient(90deg, #e6dcb8 0 40%, #ff9a3c 40% 62%, #7b7d5f 62%);
 }
 /* Keep scrollbars consistent in task panels, dialogs and nested textareas. */
 * {
@@ -400,7 +395,7 @@ input, textarea, select { min-width: 0; max-width: 100%; accent-color: var(--acc
 input[type='checkbox'], input[type='radio'] { flex-shrink: 0; }
 /* Do not hide overflow on the page: each layout must reflow on its own. */
 .app-shell { display: flex; min-height: 100dvh; }
-.sidebar { position: fixed; inset: 0 auto 0 0; width: var(--sidebar-width); background: var(--sidebar); border-right: 1px solid var(--line); padding: 30px 18px 0; display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; z-index: 10; }
+.sidebar { position: fixed; inset: 0 auto 0 0; width: var(--sidebar-width); color: var(--text); background: var(--stripe) 0 0 / 100% 5px no-repeat, var(--sidebar); border-right: 1px solid var(--line); padding: 30px 18px 0; display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; z-index: 10; }
 .sidebar > * { flex-shrink: 0; min-width: 0; }
 .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 750; letter-spacing: -.6px; font-size: 2.38rem; width: fit-content; max-width: 100%; margin-left: 12px; }
 .brand-symbol { width: 36px; height: 36px; flex-shrink: 0; background: var(--accent); border-radius: var(--radius-md); display: grid; place-items: center; color: var(--on-accent); }
@@ -414,6 +409,11 @@ input[type='checkbox'], input[type='radio'] { flex-shrink: 0; }
 .main-nav button > span, .archive-button > span, .settings-button span { min-width: 0; overflow-wrap: anywhere; }
 .main-nav button:hover, .archive-button:hover, .settings-button:hover, .agent-nav button:hover { background: var(--soft); }
 .main-nav button.active, .archive-button.active { color: var(--accent-text); background: var(--selected); border-left-color: var(--accent); }
+.autopilot-nav-label { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: 3px 8px; }
+.autopilot-nav-status { display: inline-flex; align-items: center; gap: 5px; padding: 1px 5px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--subtle); color: var(--secondary); font-size: .69rem; line-height: 1.5; white-space: nowrap; }
+.autopilot-nav-dot { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: currentColor; }
+.autopilot-nav-status.is-enabled { color: var(--success); background: var(--success-bg); border-color: var(--success-line); }
+.autopilot-nav-status.is-unknown { color: var(--warning); background: var(--warning-bg); border-color: var(--warning-line); }
 .agents-label { margin-top: 30px; }
 .agents-label span { font-size: .69rem; border: 1px solid var(--line); border-radius: var(--radius-sm); min-width: 16px; text-align: center; padding: 1px 3px; }
 .agent-nav button { display: flex; align-items: center; gap: 10px; text-align: left; padding: 10px 12px; border-radius: var(--radius-md); border: 1px solid transparent; width: 100%; }
@@ -665,13 +665,13 @@ dialog::backdrop { background: var(--overlay); }
 .theme-settings > p { font-size: .85rem; color: var(--muted); margin: 5px 0 0; }
 .theme-group-title { font-size: .77rem; font-weight: 600; letter-spacing: .6px; text-transform: uppercase; color: var(--muted); margin: 20px 0 10px; }
 .theme-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr)); gap: 10px; }
-.theme-option { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 9px; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); cursor: pointer; }
+.theme-option { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-content: start; align-items: center; gap: 9px; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); cursor: pointer; }
 .theme-option:hover { border-color: var(--focus); background: var(--subtle); }
 .theme-option.selected { border-color: var(--accent); background: var(--soft); }
 .theme-option:has(input:focus-visible) { outline: 3px solid var(--focus); outline-offset: 3px; }
 .theme-option input { grid-column: 2; grid-row: 2; width: 15px; height: 15px; margin: 0; cursor: pointer; }
 .theme-option input:focus-visible { outline: none; }
-.theme-preview { grid-column: 1 / -1; grid-row: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); height: 34px; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+.theme-preview { grid-column: 1 / -1; grid-row: 1; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); height: 34px; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
 .theme-name { grid-column: 1; grid-row: 2; min-width: 0; font-size: .85rem; font-weight: 500; overflow-wrap: anywhere; }
 .settings-warning { color: var(--warning); font-size: .85rem; margin: 18px 0 0; }
 .language-options { margin-top: 18px; }

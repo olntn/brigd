@@ -198,6 +198,7 @@ export const messages: Dictionary = {
   'Для этого запуска нет подтверждённого Git worktree.': 'This run has no confirmed Git worktree.',
   'Сохранённый Git worktree недоступен или изменён.': 'The saved Git worktree is unavailable or has changed.',
   'Git вернул недопустимый путь.': 'Git returned an invalid path.',
+  'Git вернул неожиданное содержимое файла.': 'Git returned unexpected file contents.',
   'Путь файла выходит за пределы worktree.': 'The file path leads outside the worktree.',
   'Слишком много несохранённых файлов для точного снимка изменений запуска.':
     'Too many uncommitted files for an exact snapshot of the run changes.',

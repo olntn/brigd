@@ -34,7 +34,7 @@
   import { followupTargets, followupFingerprint, followupStage, runWorkflowSteps, taskHasCompletedRun, resolveFollowupTarget, followupSessionKey, type FollowupTarget } from './lib/followups';
   import { applyTheme, readTheme, saveTheme, themes, themeStorageKey, type Theme } from './lib/theme';
   import { applyLocale, formatDate, getLocale, localeStorageKey, locales, plural, readLocale, saveLocale, serverText, setLocale, t, tk, type Locale } from './lib/i18n';
-  import type { AppInfo, Attachment, AutopilotSettings as AutopilotSettingsValue, Comment, FollowupInput, GeneralSettings as GeneralSettingsValue, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskPriority, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
+  import type { AppInfo, Attachment, AutopilotSettings as AutopilotSettingsValue, AutopilotState, Comment, FollowupInput, GeneralSettings as GeneralSettingsValue, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskPriority, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
 
   type Scope = 'all' | 'scheduled' | 'autopilot' | 'attention' | 'completed';
   type View = 'board' | 'list';
@@ -76,6 +76,11 @@
   let autopilotSettingsSequence = 0;
   let autopilotSettingsReadSequence: number | null = null;
   let autopilotSettingsMutationPending = $state(false);
+  let autopilotEnabled = $state<boolean | null>(null);
+  let autopilotStatusLoading = $state(true);
+  let autopilotStatusSequence = 0;
+  let autopilotStatusReading = false;
+  let autopilotStatusLabel = $derived(autopilotEnabled === null ? (autopilotStatusLoading ? t('Загрузка…') : t('Неизвестно')) : autopilotEnabled ? t('Включён') : t('Выключен'));
   let backupsMutationPending = $state(false);
   let storageMutationPending = $state(false);
   let concurrencyMutationPending = $state(false);
@@ -476,8 +481,28 @@
     }
   }
 
+  function autopilotStatusChanged(enabled: boolean | null) {
+    // A response from the open page supersedes any older navigation poll.
+    autopilotStatusSequence++;
+    autopilotEnabled = enabled;
+    autopilotStatusLoading = false;
+  }
+
+  async function loadAutopilotStatus() {
+    // The autopilot page already polls and reports successful changes immediately.
+    if (page === 'autopilot' || autopilotStatusReading) return;
+    autopilotStatusReading = true;
+    const sequence = ++autopilotStatusSequence;
+    try {
+      const result = await api<AutopilotState>('/api/autopilot');
+      if (sequence === autopilotStatusSequence) autopilotStatusChanged(result.enabled);
+    } catch {
+      if (sequence === autopilotStatusSequence) autopilotStatusChanged(null);
+    } finally { autopilotStatusReading = false; }
+  }
+
   async function refresh() {
-    await Promise.all([loadTasks(), loadWorkers(), loadModels(), loadTags(), loadGeneralSettings(), loadAutopilotSettings(), selectedId ? loadDetail() : Promise.resolve()]);
+    await Promise.all([loadTasks(), loadWorkers(), loadModels(), loadTags(), loadGeneralSettings(), loadAutopilotSettings(), loadAutopilotStatus(), selectedId ? loadDetail() : Promise.resolve()]);
   }
 
   async function loadInfo() {
@@ -1080,7 +1105,9 @@
     <a class="brand" href="/" aria-label={t('brigd — главная')}><span class="brand-symbol"><BrigLogo size={28} /></span><span>brigd<span class="brand-dot">.</span></span></a>
     <nav class="main-nav" aria-label={t('Задачи')}>
       <button class:active={page === 'tasks'} aria-label={t('Задачи')} onclick={() => { page = 'tasks'; resetFilters(); }}><Icon name="board" /><span>{t('Задачи')}</span></button>
-      <button class:active={page === 'autopilot'} aria-label={t('Автопилот')} onclick={() => { page = 'autopilot'; }}><Icon name="moon" /><span>{t('Автопилот')}</span></button>
+      <button class:active={page === 'autopilot'} aria-label={t('Автопилот')} aria-describedby="autopilot-nav-status" title={t('Автопилот: {status}', { status: autopilotStatusLabel.toLowerCase() })} onclick={() => { page = 'autopilot'; }}>
+        <Icon name="moon" /><span class="autopilot-nav-label"><span>{t('Автопилот')}</span><span id="autopilot-nav-status" class="autopilot-nav-status" class:is-enabled={autopilotEnabled === true} class:is-unknown={autopilotEnabled === null}><span class="autopilot-nav-dot" aria-hidden="true"></span>{autopilotStatusLabel}</span></span>
+      </button>
       <button class:active={page === 'workers'} aria-label={t('Работники')} onclick={() => { page = 'workers'; void loadWorkers(); }}><Icon name="spark" /><span>{t('Работники')}</span></button>
       <button class:active={page === 'instructions'} aria-label={t('Инструкции')} onclick={() => { page = 'instructions'; }}><Icon name="list" /><span>{t('Инструкции')}</span></button>
       <button class:active={page === 'docs'} aria-label={t('Документация')} onclick={() => { page = 'docs'; }}><Icon name="book" /><span>{t('Документация')}</span></button>
@@ -1099,7 +1126,7 @@
       {:else if page === 'docs'}
         <Docs {notify} onopentask={(id) => { void openTaskById(id); }} />
       {:else if page === 'autopilot'}
-        <Autopilot {tasks} {notify} settings={autopilotSettings} checksRequired={info?.mode !== 'mock'} onopen={openTask} onchanged={taskChanged} onsettings={openSettings} />
+        <Autopilot {tasks} {notify} settings={autopilotSettings} checksRequired={info?.mode !== 'mock'} onopen={openTask} onchanged={taskChanged} onsettings={openSettings} onstatus={autopilotStatusChanged} />
       {:else if page === 'tags'}
         <Tags {tags} loading={tagsLoading} error={tagsError} onreload={loadTags} onchanged={tagChanged} ondeleted={tagDeleted} onmutation={tagMutation} {notify} />
       {:else if page === 'archive'}

@@ -227,7 +227,7 @@ test('readable legacy dark theme survives a blocked migration write', async ({ p
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 });
 
-test('all twenty color schemes apply, persist and synchronize across tabs', async ({ page, context }) => {
+test('every color scheme applies, persists and synchronizes across tabs', async ({ page, context }) => {
   await fixtureApi(page);
   await openApp(page);
   const other = await context.newPage();
@@ -235,7 +235,7 @@ test('all twenty color schemes apply, persist and synchronize across tabs', asyn
   await openApp(other);
   const otherSettings = await openSettings(other);
   let settings = await openSettings(page);
-  await expect(settings.dialog.getByRole('group', { name: 'Цветовая схема', exact: true }).getByRole('radio')).toHaveCount(20);
+  await expect(settings.dialog.getByRole('group', { name: 'Цветовая схема', exact: true }).getByRole('radio')).toHaveCount(themes.length);
   // Switch away from the default so every iteration triggers a real preference write.
   await settings.choice('dark').check();
   await expect(otherSettings.choice('dark')).toBeChecked();
@@ -256,7 +256,7 @@ test('all twenty color schemes apply, persist and synchronize across tabs', asyn
     settings = await openSettings(page);
     await expect(settings.choice(theme.id)).toBeChecked();
   }
-  expect(backgrounds.size, 'each scheme should provide its own page background').toBe(20);
+  expect(backgrounds.size, 'each scheme should provide its own page background').toBe(themes.length);
   await other.close();
 });
 

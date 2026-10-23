@@ -1,32 +1,35 @@
 import { tk } from './i18n/key';
 
-/** Theme names are Russian keys; render them through t(). */
+// Preview swatches: navigation, page, accent and the palette's second signature color.
+// Two-tone palettes color the browser UI like their navigation, which tops narrow screens.
+// Theme names are Russian keys; render them through t().
 export const themes = [
-  { id: 'light', label: tk('Светлая'), colorScheme: 'light', preview: ['#f4f5f7', '#ffffff', '#315c87'], themeColor: '#f4f5f7' },
-  { id: 'dark', label: tk('Тёмная'), colorScheme: 'dark', preview: ['#171b21', '#20262e', '#85add5'], themeColor: '#171b21' },
-  { id: 'ocean', label: tk('Океан'), colorScheme: 'light', preview: ['#f3f8fc', '#ffffff', '#26749d'], themeColor: '#f3f8fc' },
-  { id: 'forest', label: tk('Лес'), colorScheme: 'light', preview: ['#f5f9f4', '#ffffff', '#45744a'], themeColor: '#f5f9f4' },
-  { id: 'rose', label: tk('Роза'), colorScheme: 'light', preview: ['#fdf6f8', '#ffffff', '#b44f7b'], themeColor: '#fdf6f8' },
-  { id: 'sand', label: tk('Песок'), colorScheme: 'light', preview: ['#fbf8f1', '#ffffff', '#956723'], themeColor: '#fbf8f1' },
-  { id: 'midnight', label: tk('Полночь'), colorScheme: 'dark', preview: ['#111b2c', '#1b2940', '#72a7eb'], themeColor: '#111b2c' },
-  { id: 'graphite', label: tk('Графит'), colorScheme: 'dark', preview: ['#1d2024', '#282d33', '#abbfce'], themeColor: '#1d2024' },
-  { id: 'plum', label: tk('Слива'), colorScheme: 'dark', preview: ['#241926', '#312334', '#c489d6'], themeColor: '#241926' },
-  { id: 'coffee', label: tk('Кофе'), colorScheme: 'dark', preview: ['#241e1a', '#302824', '#d3a46d'], themeColor: '#241e1a' },
-  { id: 'mint', label: tk('Мята'), colorScheme: 'light', preview: ['#f2f9f7', '#ffffff', '#1b7a68'], themeColor: '#f2f9f7' },
-  { id: 'peach', label: tk('Персик'), colorScheme: 'light', preview: ['#fdf7f3', '#ffffff', '#b14f29'], themeColor: '#fdf7f3' },
-  { id: 'indigo', label: tk('Индиго'), colorScheme: 'light', preview: ['#f6f7fd', '#ffffff', '#4653b8'], themeColor: '#f6f7fd' },
-  { id: 'fog', label: tk('Туман'), colorScheme: 'light', preview: ['#f6f7f8', '#ffffff', '#4b5d6e'], themeColor: '#f6f7f8' },
-  { id: 'olive', label: tk('Олива'), colorScheme: 'light', preview: ['#f9f9f1', '#ffffff', '#626c1a'], themeColor: '#f9f9f1' },
-  { id: 'pine', label: tk('Хвоя'), colorScheme: 'dark', preview: ['#131e18', '#1c2a22', '#7cc792'], themeColor: '#131e18' },
-  { id: 'lagoon', label: tk('Лагуна'), colorScheme: 'dark', preview: ['#0f1e21', '#182b2f', '#4fc3c0'], themeColor: '#0f1e21' },
-  { id: 'ember', label: tk('Угли'), colorScheme: 'dark', preview: ['#221714', '#2e201c', '#f08a5d'], themeColor: '#221714' },
-  { id: 'garnet', label: tk('Гранат'), colorScheme: 'dark', preview: ['#23151a', '#301e25', '#ec7a9a'], themeColor: '#23151a' },
-  { id: 'obsidian', label: tk('Обсидиан'), colorScheme: 'dark', preview: ['#0c0c0e', '#161619', '#e4e4ea'], themeColor: '#0c0c0e' },
+  { id: 'light', label: tk('Светлая'), colorScheme: 'light', preview: ['#e9edf1', '#f4f5f7', '#315c87', '#dce6f0'], themeColor: '#f4f5f7' },
+  { id: 'dark', label: tk('Тёмная'), colorScheme: 'dark', preview: ['#1b2027', '#171b21', '#85add5', '#34465a'], themeColor: '#171b21' },
+  { id: 'spaceport', label: tk('Космопорт'), colorScheme: 'light', preview: ['#14213d', '#eef0f3', '#cc4a0c', '#d9e1ee'], themeColor: '#14213d' },
+  { id: 'poster', label: tk('Плакат'), colorScheme: 'light', preview: ['#e4d8bf', '#ede4d1', '#1b1915', '#f4d553'], themeColor: '#ede4d1' },
+  { id: 'dam', label: tk('Плотина'), colorScheme: 'light', preview: ['#bfcaa6', '#d6d5cd', '#4a7020', '#dde58f'], themeColor: '#d6d5cd' },
+  { id: 'rustbelt', label: tk('Ржавый пояс'), colorScheme: 'light', preview: ['#d8c39d', '#e3d3b4', '#ad421a', '#17676d'], themeColor: '#e3d3b4' },
+  { id: 'bluegate', label: tk('Голубые врата'), colorScheme: 'light', preview: ['#dce6ec', '#e9eff2', '#b37b00', '#24526c'], themeColor: '#e9eff2' },
+  { id: 'speranza', label: tk('Сперанца'), colorScheme: 'dark', preview: ['#12302f', '#1b1511', '#f2a43a', '#5fd0c4'], themeColor: '#12302f' },
+  { id: 'arc', label: tk('ARC'), colorScheme: 'dark', preview: ['#0d0f12', '#13161a', '#ff4d3d', '#9fd3e8'], themeColor: '#13161a' },
+  { id: 'terminal', label: tk('Терминал'), colorScheme: 'dark', preview: ['#091309', '#07100a', '#3ee07c', '#1b3a24'], themeColor: '#07100a' },
+  { id: 'dusk', label: tk('Сумерки'), colorScheme: 'dark', preview: ['#14101f', '#19152a', '#ff8a5b', '#ff9fd0'], themeColor: '#19152a' },
+  { id: 'alarm', label: tk('Тревога'), colorScheme: 'dark', preview: ['#f2c419', '#121211', '#ffd21a', '#3d3616'], themeColor: '#f2c419' },
+  { id: 'bunker', label: tk('Бункер'), colorScheme: 'dark', preview: ['#212219', '#2a2b23', '#e6dcb8', '#ffb46b'], themeColor: '#2a2b23' },
 ] as const;
 
 export type Theme = (typeof themes)[number]['id'];
 export const themeStorageKey = 'brigd.theme';
 export const legacyThemeStorageKey = 'trackt.theme';
+
+// Retired palettes open in the closest current one with the same brightness.
+export const retiredThemes: ReadonlyMap<string, Theme> = new Map([
+  ['ocean', 'bluegate'], ['forest', 'dam'], ['rose', 'poster'], ['sand', 'rustbelt'], ['mint', 'dam'],
+  ['peach', 'spaceport'], ['indigo', 'spaceport'], ['fog', 'bluegate'], ['olive', 'dam'],
+  ['midnight', 'arc'], ['graphite', 'arc'], ['plum', 'dusk'], ['coffee', 'speranza'], ['pine', 'terminal'],
+  ['lagoon', 'speranza'], ['ember', 'bunker'], ['garnet', 'dusk'], ['obsidian', 'alarm'],
+]);
 
 function isTheme(value: string | null): value is Theme {
   return themes.some(theme => theme.id === value);
@@ -36,6 +39,8 @@ export function readTheme(): Theme {
   try {
     const current = localStorage.getItem(themeStorageKey);
     if (isTheme(current)) return current;
+    const replacement = current === null ? undefined : retiredThemes.get(current);
+    if (replacement) return replacement;
     const legacy = localStorage.getItem(legacyThemeStorageKey);
     if (legacy === 'light' || legacy === 'dark') {
       // Copy once without removing the old preference. A full/blocked store must

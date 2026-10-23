@@ -4,6 +4,8 @@ const dictionary: Dictionary = {
   // Board, filters and navigation.
   'Основная навигация': 'Main navigation',
   'brigd — главная': 'brigd — home',
+  'Автопилот: {status}': 'Autopilot: {status}',
+  'Неизвестно': 'Unknown',
   'Архив': 'Archive',
   'Настройки': 'Settings',
   'Управление задачами': 'Task management',
