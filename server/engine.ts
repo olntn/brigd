@@ -62,7 +62,8 @@ export class Engine {
     this.defaultLimits = { maxParallel: options.maxParallel ?? DEFAULT_CONCURRENCY.maxParallel, maxPerRepository: options.maxPerRepository ?? DEFAULT_CONCURRENCY.maxPerRepository };
     this.defaultCheckTriage = options.checkTriage ?? DEFAULT_CHECK_TRIAGE;
     this.checkTriageTimeLimitMs = options.checkTriageTimeLimitMs ?? CHECK_TRIAGE_TIME_LIMIT_MS;
-    this.integrator = options.integrator ?? new GitIntegrator(() => this.integrationChecks(), { enabled: () => this.checkTriageEnabled(), timeLimitMs: this.checkTriageTimeLimitMs, checkTimeLimitMinutes: () => this.store.getTimeLimits().integrationCheckTimeLimitMinutes });
+    this.integrator = options.integrator ?? new GitIntegrator(() => this.integrationChecks(), { enabled: () => this.checkTriageEnabled(), timeLimitMs: this.checkTriageTimeLimitMs, checkTimeLimitMinutes: () => this.store.getTimeLimits().integrationCheckTimeLimitMinutes },
+      run => this.store.taskTitle(run.taskId));
     this.autoReconcile = options.autoReconcile ?? true;
     if (!isConcurrencyLimit(this.defaultLimits.maxParallel)) throw new Error('Лимит процессов должен быть 1–32');
     if (!isConcurrencyLimit(this.defaultLimits.maxPerRepository)) throw new Error('Лимит агентов на репозиторий должен быть 1–32');

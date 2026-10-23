@@ -6,10 +6,10 @@ import { Engine } from '../server/engine';
 import { Store, runFence } from '../server/store';
 import { GitWorkspaces } from '../server/workspaces';
 import { createHandler } from '../server/http';
-import { OutputTail } from '../server/integration';
+import { COMMIT_TITLE_LIMIT, commitTitle, mergedSubject, OutputTail, resultSubject, targetMergeSubject } from '../server/integration';
 import { createAppController } from '../server/task-mcp-app';
 import { CHECK_OUTPUT_LIMIT } from '../src/lib/integration-checks';
-import type { Run } from '../src/lib/types';
+import type { Run, TaskInput } from '../src/lib/types';
 import { controlledAgent, git, outcome, repository, taskInput, until } from './repository-helpers';
 
 let folder: string, root: string, store: Store, engine: Engine, agent: ReturnType<typeof controlledAgent>;
@@ -32,8 +32,8 @@ function conflictingTarget(content: string) {
   writeFileSync(join(root, 'src/value.txt'), content); git(root, 'add', '.'); git(root, 'commit', '-m', 'target edit');
   return git(root, 'rev-parse', 'HEAD');
 }
-async function start() {
-  const run = engine.start(store.createTask(taskInput(root)).id);
+async function start(patch: Partial<TaskInput> = {}) {
+  const run = engine.start(store.createTask(taskInput(root, patch)).id);
   await until(() => agent.calls.some(call => call.input.workspace?.id === run.id));
   return store.getRun(run.id);
 }
@@ -62,6 +62,10 @@ test('combined candidate is checked before a clean target receives the saved res
   // The worker's own result keeps the repository identity; the verified merge commit is the integrator's.
   expect(git(root, 'log', '-1', '--format=%an', integration.sourceCommit!)).toBe('Test');
   expect(git(root, 'log', '-1', '--format=%an <%ae>', integration.resultCommit!)).toBe('Интегратор <integrator@localhost>');
+  // Both commits are named after the task and found by the run's trailer.
+  expect(git(root, 'log', '-1', '--format=%B', integration.sourceCommit!)).toBe(`brigd: Isolated work\n\nBrigd-Run: ${run.id}`);
+  expect(git(root, 'log', '-1', '--format=%B', integration.resultCommit!)).toBe(`brigd: объединение «Isolated work»\n\nBrigd-Run: ${run.id}`);
+  expect(git(root, 'log', '--format=%H', `--grep=Brigd-Run: ${run.id}`).split('\n')).toEqual([integration.resultCommit!, integration.sourceCommit!]);
   expect(readFileSync(join(root, 'src/value.txt'), 'utf8')).toBe('worker result\n');
   expect(git(root, 'ls-files')).not.toContain('.brigd-outbox');
   expect(store.getTask(run.taskId).status).toBe('completed');
@@ -136,6 +140,49 @@ test('an output tail keeps the newest bytes, drops a split character and marks o
   expect(emoji.result()).toEqual({ output: 'x😀x', outputTruncated: true });
 });
 
+test('a task title becomes one commit subject line, cut between whole characters', () => {
+  expect(commitTitle('  Fix\nthe\r\n\tlogin\u2028page  ')).toBe('Fix the login page');
+  expect(commitTitle('Bidi \u202Eoverride\u2066 and \u0007bell\u0085next')).toBe('Bidi override and bell next');
+  const quoted = 'Кавычки "двойные", \'одинарные\', «ёлочки», `обратные` и $(echo нет) 🚀';
+  expect(commitTitle(quoted)).toBe(quoted);
+  expect(commitTitle(' \n\u0000\t\u202E ')).toBe(''); expect(commitTitle(null)).toBe('');
+  // A ZWJ family emoji is one character: it is kept whole or dropped whole.
+  const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}';
+  expect(commitTitle('a'.repeat(COMMIT_TITLE_LIMIT - 1) + family)).toBe('a'.repeat(COMMIT_TITLE_LIMIT - 1) + family);
+  expect(commitTitle('a'.repeat(COMMIT_TITLE_LIMIT - 2) + family + 'tail')).toBe('a'.repeat(COMMIT_TITLE_LIMIT - 2) + family + '…');
+  expect(commitTitle('a'.repeat(COMMIT_TITLE_LIMIT - 1) + family + 'tail')).toBe('a'.repeat(COMMIT_TITLE_LIMIT - 1) + '…');
+  // The ellipsis follows the last word rather than a space.
+  expect(commitTitle('a'.repeat(COMMIT_TITLE_LIMIT - 2) + ' ' + 'b'.repeat(10))).toBe('a'.repeat(COMMIT_TITLE_LIMIT - 2) + '…');
+});
+
+test('commit subjects name the task and its continued stage, falling back to the run ID', () => {
+  const run = { id: 'run-1', workspace: { branch: 'brigd/run-run-1' }, followup: null } as unknown as Run;
+  const stage = (title: string) => ({ ...run, followup: { sourceRunId: 'run-0', sourceStepIndex: 1, request: 'More.',
+    workflow: { steps: [{ title: 'Plan' }, { title }], currentStepIndex: 1 } } }) as unknown as Run;
+  expect(resultSubject(run, 'Читаемые коммиты')).toBe('brigd: Читаемые коммиты');
+  expect(resultSubject(stage('Review\nthe result'), 'Читаемые коммиты')).toBe('brigd: Читаемые коммиты · Review the result');
+  expect(resultSubject(stage('\n'), 'Читаемые коммиты')).toBe('brigd: Читаемые коммиты');
+  expect(targetMergeSubject(run, 'main', 'Читаемые коммиты')).toBe('brigd: объединение main в Читаемые коммиты');
+  expect(mergedSubject(run, 'Читаемые коммиты')).toBe('brigd: объединение «Читаемые коммиты»');
+  for (const title of [null, ' \n\u0007 ']) {
+    expect(resultSubject(stage('Review'), title)).toBe('brigd: результат run-1');
+    expect(targetMergeSubject(run, 'main', title)).toBe('brigd: объединение main в brigd/run-run-1');
+    expect(mergedSubject(run, title)).toBe('brigd: объединение run-1');
+  }
+});
+
+test('a multi-line, quoted, emoji and overlong task title still yields one-line subjects with the run trailer', async () => {
+  const title = 'Первая строка\nвторая "в кавычках" 🚀 ' + 'длинно '.repeat(15);
+  const run = await start({ title }); complete(run);
+  const merged = await settled(run);
+  expect(merged.status).toBe('merged');
+  const subject = `brigd: ${commitTitle(title)}`;
+  expect(subject).toStartWith('brigd: Первая строка вторая "в кавычках" 🚀 длинно'); expect(subject).toEndWith('длинно…');
+  expect(git(root, 'log', '-1', '--format=%B', merged.sourceCommit!)).toBe(`${subject}\n\nBrigd-Run: ${run.id}`);
+  expect(git(root, 'log', '-1', '--format=%B', merged.resultCommit!)).toBe(`brigd: объединение «${commitTitle(title)}»\n\nBrigd-Run: ${run.id}`);
+  expect(git(root, 'log', '--oneline', '-2').split('\n')).toHaveLength(2);
+});
+
 test('a merge saved before check output was kept still reads, restarts and is served unchanged', async () => {
   const run = await start(); complete(run);
   const merged = await settled(run);
@@ -189,7 +236,8 @@ test('a conflict is handed to the built-in integrator in the same worktree and i
   expect(merged.status).toBe('merged'); expect(git(root, 'rev-parse', 'HEAD')).toBe(merged.resultCommit!);
   expect(readFileSync(join(root, 'src/value.txt'), 'utf8')).toBe('resolved by integrator\n');
   expect(git(root, 'log', '-1', '--format=%P', merged.sourceCommit!).split(' ')).toHaveLength(2);
-  expect(git(root, 'log', '-1', '--format=%s', merged.sourceCommit!)).toBe(`brigd: объединение main в brigd/run-${run.id}`);
+  expect(git(root, 'log', '-1', '--format=%B', merged.sourceCommit!)).toBe(`brigd: объединение main в Isolated work\n\nBrigd-Run: ${integrator.id}`);
+  expect(git(root, 'log', '-1', '--format=%B', merged.resultCommit!)).toBe(`brigd: объединение «Isolated work»\n\nBrigd-Run: ${integrator.id}`);
   expect(store.getTask(run.taskId).status).toBe('completed'); expect(store.getRun(integrator.id).sessionId).toBe('integrator-session');
   expect(store.integrationForRun(run.id)!.status).toBe('conflict');
   // The shared worktree is reclaimed once the integrator's result is merged, even though the source merge stays a conflict.

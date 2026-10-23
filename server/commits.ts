@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import type { Run } from '../src/lib/types';
 import { AppError } from './errors';
-import { ARTIFACT_PATHSPECS, artifact, mergeInProgress, unmergedPaths, unresolvedConflicts } from './integration';
+import { ARTIFACT_PATHSPECS, artifact, mergeInProgress, runTrailer, unmergedPaths, unresolvedConflicts } from './integration';
 
 export interface CommitResult { committed: boolean; commit: string | null; branch: string | null; files: string[]; fileCount: number; }
 
@@ -66,7 +66,7 @@ export async function commitWorkspace(run: Run, message: string, paths?: string[
     const identity = await git([...base, 'var', 'GIT_AUTHOR_IDENT'], workspace.cwd, true);
     // Paths after -- commit only this scope, never unrelated changes staged elsewhere.
     await git([...base, ...(identity ? [] : ['-c', 'user.name=brigd', '-c', 'user.email=brigd@localhost']),
-      'commit', '-m', message, '-m', `Brigd-Run: ${run.id}`, ...(merging ? [] : ['--', ...scope])], workspace.cwd);
+      'commit', '-m', message, '-m', runTrailer(run.id), ...(merging ? [] : ['--', ...scope])], workspace.cwd);
   }
   const branch = (await git([...base, 'symbolic-ref', '--quiet', '--short', 'HEAD'], workspace.cwd, true)).trim() || null;
   const commit = (await git([...base, 'rev-parse', '--verify', '--quiet', 'HEAD'], workspace.cwd, true)).trim() || null;
