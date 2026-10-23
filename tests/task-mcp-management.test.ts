@@ -261,6 +261,8 @@ describe('MCP app management through the shared HTTP controller', () => {
     expect((await call(broker, 'update_general_settings', { data: { defaultWorkerId: 'missing-worker' }, idempotency_key: 'invalid-default-worker' })).isError).toBe(true);
     expect(store.getDefaultWorkerId()).toBe(worker.id);
     expect((await call(broker, 'update_general_settings', { data: { defaultSchedule: 'unknown' }, idempotency_key: 'invalid-settings' })).isError).toBe(true);
+    // A daily time is chosen per card, so the general default never preselects it.
+    expect((await call(broker, 'update_general_settings', { data: { defaultSchedule: 'daily' }, idempotency_key: 'daily-default' })).isError).toBe(true);
     expect(store.getDefaultSchedule()).toBe('auto');
     await mutate(broker, 'update_permission_settings', { data: { mode: 'full' } });
     expect(parse(await call(broker, 'get_permission_settings'))).toEqual({ mode: 'full' });
@@ -285,6 +287,20 @@ describe('MCP app management through the shared HTTP controller', () => {
     expect(store.getAutopilot().enabled).toBe(true);
     await mutate(broker, 'update_autopilot', { data: { enabled: false } });
     expect(store.getAutopilot().enabled).toBe(false);
+  });
+
+  test('creates and edits a daily card at a local time on chosen weekdays', async () => {
+    const { broker } = setup();
+    const card = await createCard(broker, 'Nightly report', crypto.randomUUID(), { schedule: 'daily', timeOfDay: '02:00', weekdays: [1, 2, 3, 4, 5], timeZone: 'Europe/Moscow' });
+    expect(card).toMatchObject({ schedule: 'daily', paused: false });
+    expect(store.getTask(card.id)).toMatchObject({ timeOfDay: '02:00', weekdays: [1, 2, 3, 4, 5], timeZone: 'Europe/Moscow', nextRunAt: card.nextRunAt });
+    expect(parse(await call(broker, 'get_task', { task_id: card.id })).task).toMatchObject({ schedule: 'daily', timeOfDay: '02:00', weekdays: [1, 2, 3, 4, 5], timeZone: 'Europe/Moscow' });
+    await mutate(broker, 'update_task', { task_id: card.id, data: { weekdays: null } });
+    expect(store.getTask(card.id)).toMatchObject({ timeOfDay: '02:00', weekdays: [1, 2, 3, 4, 5, 6, 7], timeZone: 'Europe/Moscow' });
+    for (const [key, data] of [['bad-time', { timeOfDay: '2:00' }], ['bad-days', { weekdays: [0] }], ['repeated-days', { weekdays: [1, 1] }], ['bad-zone', { timeZone: 'Mars/Olympus_Mons' }]] as const) {
+      expect((await call(broker, 'update_task', { task_id: card.id, data, idempotency_key: key })).isError).toBe(true);
+    }
+    expect(store.getTask(card.id)).toMatchObject({ timeOfDay: '02:00', weekdays: [1, 2, 3, 4, 5, 6, 7], timeZone: 'Europe/Moscow' });
   });
 
   test('reorders the autopilot queue by short card ID and rejects cards outside it', async () => {

@@ -2,15 +2,16 @@ import type { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CheckTriage, CheckTriageCounts, CheckTriageOutcome, CliAccessMode, Comment, ConcurrencySettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunCheckFailure, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, TokenUsage, TurnUsage, UsageTotals, Worker, WorkerInput, WorkerSnapshot, WorkerUsageOverview, WorkspaceSnapshot } from '../src/lib/types';
+import type { Attachment, DefaultSchedule, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CheckTriage, CheckTriageCounts, CheckTriageOutcome, CliAccessMode, Comment, ConcurrencySettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunCheckFailure, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, TokenUsage, TurnUsage, UsageTotals, Worker, WorkerInput, WorkerSnapshot, WorkerUsageOverview, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
 import type { IntegrationRecord, WorkspaceRun } from './workspace-storage';
 import { clock } from './clock';
 import { agentTimeoutMessage } from './adapter';
-import { validateTimeLimitMinutes } from './validation';
+import { validateDailySchedule, validateTimeLimitMinutes } from './validation';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { AUTOPILOT_FAILURE_LIMIT } from '../src/lib/autopilot';
 import { DEFAULT_TASK_PRIORITY, isTaskPriority, TASK_PRIORITIES, TASK_PRIORITY_LABELS } from '../src/lib/priority';
+import { isDefaultSchedule, isTimeOfDay, normalizeWeekdays, WEEKDAYS } from '../src/lib/schedule';
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
 import { CHECK_HANDBACK_LIMIT, CHECK_HANDBACK_OUTPUT_LIMIT, countTriage, emptyTriageCounts } from '../src/lib/check-triage';
 import { CONCURRENCY_LIMIT_MAX, validateConcurrencyLimit } from '../src/lib/concurrency';
@@ -107,8 +108,8 @@ function validatedDefaultCwd(value: unknown): string {
   if (cwd.length > 4_096) throw new AppError('Рабочая папка по умолчанию: не больше 4096 символов');
   return cwd;
 }
-function validatedDefaultSchedule(value: unknown): TaskInput['schedule'] {
-  if (value !== 'auto' && value !== 'manual' && value !== 'interval') {
+function validatedDefaultSchedule(value: unknown): DefaultSchedule {
+  if (!isDefaultSchedule(value)) {
     throw new AppError('Тип запуска по умолчанию: выберите Автопилот, Вручную или По расписанию');
   }
   return value;
@@ -270,6 +271,69 @@ export function nextOccurrence(due: number, intervalMinutes: number, now: number
   return { latest, next: latest + interval };
 }
 
+/** A daily schedule: a local time of day on ISO weekdays (1 is Monday), read in an IANA time zone. */
+export interface DailyRule { timeOfDay: string; weekdays: readonly number[]; timeZone: string }
+const DAY = 86_400_000;
+const zoneFormats = new Map<string, Intl.DateTimeFormat>();
+function zoneFormat(timeZone: string): Intl.DateTimeFormat {
+  let format = zoneFormats.get(timeZone);
+  if (format) return format;
+  const options: Intl.DateTimeFormatOptions = { hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' };
+  // Validation accepts only zones this runtime knows; one missing after a restore to an older runtime reads as UTC instead of halting the scheduler.
+  try { format = new Intl.DateTimeFormat('en-US', { ...options, timeZone }); }
+  catch { format = new Intl.DateTimeFormat('en-US', { ...options, timeZone: 'UTC' }); }
+  if (zoneFormats.size >= 100) zoneFormats.clear();
+  zoneFormats.set(timeZone, format);
+  return format;
+}
+/** The wall clock an instant shows in a zone, written as a UTC timestamp, to whole seconds. */
+function wallClock(instant: number, timeZone: string): number {
+  const parts: Record<string, number> = {};
+  for (const part of zoneFormat(timeZone).formatToParts(instant)) if (part.type !== 'literal') parts[part.type] = Number(part.value);
+  return Date.UTC(parts.year!, parts.month! - 1, parts.day!, parts.hour! % 24, parts.minute!, parts.second!);
+}
+const zoneOffset = (instant: number, timeZone: string) => wallClock(instant, timeZone) - Math.floor(instant / 1_000) * 1_000;
+/** The instant a wall-clock time (a UTC-written local date and time) denotes in a zone, without searching.
+ * A time the clocks skip moving forward keeps the offset before the change, so 02:30 in a 02:00→03:00 gap becomes 03:30;
+ * a time they repeat moving back is its first occurrence, so a schedule never runs twice in the repeated hour. */
+function zonedInstant(local: number, timeZone: string): number {
+  const before = local - zoneOffset(local - DAY, timeZone);
+  if (wallClock(before, timeZone) === local) return before;
+  const after = local - zoneOffset(local + DAY, timeZone);
+  return wallClock(after, timeZone) === local ? after : before;
+}
+/** Like nextOccurrence for a daily rule: the latest occurrence at or before `now` (never earlier than the stored due time)
+ * and the first after `now`. Both come from a bounded scan of the neighbouring local dates, so a long sleep costs nothing extra. */
+export function nextDailyOccurrence(due: number, rule: DailyRule, now: number): { latest: number; next: number } {
+  const [hours, minutes] = rule.timeOfDay.split(':').map(Number) as [number, number];
+  const today = Math.floor(wallClock(now, rule.timeZone) / DAY) * DAY;
+  let latest = -Infinity, next = Infinity;
+  // A week back and ahead contains every weekday; the extra day absorbs a local date skipped or shifted by a zone change.
+  for (let offset = -8; offset <= 8; offset++) {
+    const date = today + offset * DAY;
+    if (!rule.weekdays.includes(new Date(date).getUTCDay() || 7)) continue;
+    const instant = zonedInstant(date + (hours * 60 + minutes) * 60_000, rule.timeZone);
+    if (instant <= now) latest = Math.max(latest, instant);
+    else next = Math.min(next, instant);
+  }
+  if (next === Infinity) throw new Error('A daily schedule needs at least one weekday');
+  return { latest: Math.max(due, latest), next };
+}
+/** The first occurrence of a daily rule strictly after `now`: a new or changed schedule never fires for a time already past. */
+export const firstDailyRun = (rule: DailyRule, now: number) => nextDailyOccurrence(now, rule, now).next;
+/** A stored daily schedule. Weekdays that fail to parse read as every day, so the schedule always has a next occurrence. */
+function storedDailyRule(row: Row): DailyRule & { weekdays: number[] } {
+  let weekdays: number[] | null = null;
+  try { weekdays = normalizeWeekdays(JSON.parse(row.weekdays ?? 'null')); } catch { /* every day */ }
+  return { timeOfDay: isTimeOfDay(row.time_of_day) ? row.time_of_day : '00:00', weekdays: weekdays ?? [...WEEKDAYS],
+    timeZone: typeof row.time_zone === 'string' && row.time_zone ? row.time_zone : 'UTC' };
+}
+/** The latest due occurrence of a due interval or daily task and the one after it. */
+function dueOccurrence(task: Task, now: number) {
+  return task.schedule === 'daily' ? nextDailyOccurrence(task.nextRunAt!, { timeOfDay: task.timeOfDay!, weekdays: task.weekdays!, timeZone: task.timeZone! }, now)
+    : nextOccurrence(task.nextRunAt!, task.intervalMinutes!, now);
+}
+
 /** Sums over `run_usage u`; SUM keeps NULL when no turn reported a value. */
 const USAGE_TOTALS = `count(*) AS turns, count(u.cost_usd) AS priced_turns, SUM(u.input_tokens) AS input_tokens, SUM(u.output_tokens) AS output_tokens,
   SUM(u.cached_tokens) AS cached_tokens, SUM(u.cost_usd) AS cost_usd, COALESCE(SUM(u.duration_ms),0) AS duration_ms`;
@@ -397,6 +461,10 @@ export class Store {
         ['tasks', 'autopilot_position', 'INTEGER'],
         // Existing cards become normal; the autopilot claims more urgent cards first.
         ['tasks', 'priority', `TEXT NOT NULL DEFAULT '${DEFAULT_TASK_PRIORITY}' CHECK(priority IN (${TASK_PRIORITIES.map(priority => `'${priority}'`).join(',')}))`],
+        // A daily schedule's local "HH:MM", JSON list of ISO weekdays and IANA zone; NULL for every other schedule.
+        ['tasks', 'time_of_day', 'TEXT'],
+        ['tasks', 'weekdays', 'TEXT'],
+        ['tasks', 'time_zone', 'TEXT'],
       ]) {
         if (!(this.db.query(`PRAGMA table_info(${table})`).all() as Row[]).some(row => row.name === column)) {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
@@ -639,11 +707,11 @@ export class Store {
     this.db.query('UPDATE general_settings SET default_cwd=? WHERE singleton=1').run(cwd);
     return cwd;
   }
-  getDefaultSchedule(): TaskInput['schedule'] {
-    const row = this.db.query('SELECT default_schedule FROM general_settings WHERE singleton=1').get() as { default_schedule: TaskInput['schedule'] };
+  getDefaultSchedule(): DefaultSchedule {
+    const row = this.db.query('SELECT default_schedule FROM general_settings WHERE singleton=1').get() as { default_schedule: DefaultSchedule };
     return row.default_schedule;
   }
-  setDefaultSchedule(value: unknown): TaskInput['schedule'] {
+  setDefaultSchedule(value: unknown): DefaultSchedule {
     const schedule = validatedDefaultSchedule(value);
     this.db.query('UPDATE general_settings SET default_schedule=? WHERE singleton=1').run(schedule);
     return schedule;
@@ -1699,6 +1767,7 @@ export class Store {
     };
     return { tagIds: tags.map(tag => tag.id), tags, hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd, ultracode: readFlag(row.ultracode), timeLimitMinutes: validateTimeLimitMinutes(row.time_limit_minutes),
       priority: row.priority ?? DEFAULT_TASK_PRIORITY, schedule: row.schedule, intervalMinutes: row.interval_minutes, firstRunAt: row.first_run_at,
+      ...(row.schedule === 'daily' ? storedDailyRule(row) : { timeOfDay: null, weekdays: null, timeZone: null }),
       nextRunAt: row.next_run_at, paused: !!row.paused, createdAt: row.created_at, updatedAt: row.updated_at, archivedAt: row.archived_at ?? null,
       status: latestRun?.integration ? integrationStatuses[latestRun.integration.status] ?? latestRun.status : latest?.status ?? 'ready', latestRun,
       runCount: (this.db.query('SELECT count(*) AS n FROM runs WHERE task_id = ?').get(row.id) as Row).n };
@@ -1750,7 +1819,7 @@ export class Store {
     return this.db.transaction(() => {
       const task = this.getTask(id);
       if (task.archivedAt === null) return task;
-      const next = task.schedule === 'interval' && task.nextRunAt !== null && task.nextRunAt <= now ? nextOccurrence(task.nextRunAt, task.intervalMinutes!, now).next : task.nextRunAt;
+      const next = (task.schedule === 'interval' || task.schedule === 'daily') && task.nextRunAt !== null && task.nextRunAt <= now ? dueOccurrence(task, now).next : task.nextRunAt;
       this.db.query('UPDATE tasks SET archived_at=NULL,next_run_at=?,updated_at=?,autopilot_position=? WHERE id=?').run(next, now, task.schedule === 'auto' ? this.nextAutopilotPosition() : null, id);
       return this.getTask(id);
     }).immediate();
@@ -1844,10 +1913,12 @@ export class Store {
       const provider = steps.length ? this.getWorker(steps[0]!.workerId).provider : worker?.provider ?? input.provider;
       const ultracode = validatedTaskUltracode(input.ultracode);
       const priority = validatedTaskPriority(input.priority === undefined ? DEFAULT_TASK_PRIORITY : input.priority);
-      this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template,ultracode,autopilot_position,priority,time_limit_minutes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
+      const daily = input.schedule === 'daily' ? validateDailySchedule(input) : null;
+      this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template,ultracode,autopilot_position,priority,time_limit_minutes,time_of_day,weekdays,time_zone) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
         input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt,
-        input.schedule === 'interval' ? (input.firstRunAt ?? now) : null, +input.paused, now, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode),
-        input.schedule === 'auto' ? this.nextAutopilotPosition() : null, priority, validateTimeLimitMinutes(input.timeLimitMinutes));
+        input.schedule === 'interval' ? (input.firstRunAt ?? now) : daily ? firstDailyRun(daily, now) : null, +input.paused, now, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode),
+        input.schedule === 'auto' ? this.nextAutopilotPosition() : null, priority, validateTimeLimitMinutes(input.timeLimitMinutes),
+        daily?.timeOfDay ?? null, daily ? JSON.stringify(daily.weekdays) : null, daily?.timeZone ?? null);
       this.replaceTaskAttachments(id, input.attachmentIds, now);
       this.replaceTaskTags(id, input.tagIds === undefined ? [] : input.tagIds);
       return this.getTask(id);
@@ -1860,16 +1931,19 @@ export class Store {
       const steps = this.taskSteps(input.steps === undefined ? task.steps : input.steps, task.steps);
       const worker = steps.length ? null : this.assignedWorker(input.workerId === undefined ? task.workerId : input.workerId, task.workerId);
       const provider = steps.length ? this.getWorker(steps[0]!.workerId).provider : worker?.provider ?? input.provider;
-      const changedSchedule = input.schedule !== task.schedule || input.intervalMinutes !== task.intervalMinutes || input.firstRunAt !== task.firstRunAt;
+      const daily = input.schedule === 'daily' ? validateDailySchedule(input, task.timeZone) : null;
+      const changedSchedule = input.schedule !== task.schedule || input.intervalMinutes !== task.intervalMinutes || input.firstRunAt !== task.firstRunAt
+        || (daily !== null && (daily.timeOfDay !== task.timeOfDay || daily.weekdays.join() !== task.weekdays?.join() || daily.timeZone !== task.timeZone));
       let next = task.nextRunAt;
-      if (changedSchedule) next = input.schedule === 'interval' ? (input.firstRunAt ?? now) : null;
+      if (changedSchedule) next = input.schedule === 'interval' ? (input.firstRunAt ?? now) : daily ? firstDailyRun(daily, now) : null;
       const ultracode = validatedTaskUltracode(input.ultracode === undefined ? task.ultracode : input.ultracode);
       const priority = validatedTaskPriority(input.priority === undefined ? task.priority : input.priority);
       // A card switched to the autopilot, or moved to another priority, queues at the end of its priority; leaving it gives up its place.
       const position = input.schedule !== 'auto' ? null : task.schedule === 'auto' && priority === task.priority
         ? (this.db.query('SELECT autopilot_position FROM tasks WHERE id=?').get(id) as Row).autopilot_position : this.nextAutopilotPosition();
-      this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=?,ultracode=?,autopilot_position=?,priority=?,time_limit_minutes=? WHERE id=?`)
-        .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode), position, priority, validateTimeLimitMinutes(input.timeLimitMinutes === undefined ? task.timeLimitMinutes : input.timeLimitMinutes), id);
+      this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=?,ultracode=?,autopilot_position=?,priority=?,time_limit_minutes=?,time_of_day=?,weekdays=?,time_zone=? WHERE id=?`)
+        .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode), position, priority, validateTimeLimitMinutes(input.timeLimitMinutes === undefined ? task.timeLimitMinutes : input.timeLimitMinutes),
+          daily?.timeOfDay ?? null, daily ? JSON.stringify(daily.weekdays) : null, daily?.timeZone ?? null, id);
       this.replaceTaskAttachments(id, input.attachmentIds, now);
       if (input.tagIds !== undefined) this.replaceTaskTags(id, input.tagIds);
       return this.getTask(id);
@@ -2167,11 +2241,11 @@ export class Store {
   }
   claimDue(mock: boolean, now = clock(), settlingTaskIds: readonly string[] = []): Run[] {
     return this.db.transaction(() => {
-      const due = this.db.query("SELECT * FROM tasks WHERE paused=0 AND archived_at IS NULL AND schedule='interval' AND next_run_at<=?").all(now) as Row[];
+      const due = this.db.query("SELECT * FROM tasks WHERE paused=0 AND archived_at IS NULL AND schedule IN ('interval','daily') AND next_run_at<=?").all(now) as Row[];
       const claimed: Run[] = [];
       for (const row of due) {
         const task = this.mapTask(row);
-        const occurrence = nextOccurrence(task.nextRunAt!, task.intervalMinutes!, now);
+        const occurrence = dueOccurrence(task, now);
         // Consume this occurrence even while waiting. Never accumulate a missed backlog.
         this.db.query('UPDATE tasks SET next_run_at=? WHERE id=?').run(occurrence.next, task.id);
         const active = this.activeRun(task.id);

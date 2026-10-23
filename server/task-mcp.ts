@@ -21,7 +21,7 @@ const context = (a: Attachment): TaskAttachmentContext => ({ id: a.id, name: a.n
 const taskContext = (task: Task) => ({ id: task.id, title: task.title, instruction: task.instruction, status: task.status,
   archived: task.archivedAt !== null, createdAt: task.createdAt, updatedAt: task.updatedAt,
   provider: task.provider, cwd: task.cwd, schedule: task.schedule, paused: task.paused, priority: task.priority, timeLimitMinutes: task.timeLimitMinutes ?? null, intervalMinutes: task.intervalMinutes,
-  firstRunAt: task.firstRunAt, nextRunAt: task.nextRunAt, workerId: task.workerId, tagIds: task.tagIds, steps: task.steps,
+  firstRunAt: task.firstRunAt, timeOfDay: task.timeOfDay, weekdays: task.weekdays, timeZone: task.timeZone, nextRunAt: task.nextRunAt, workerId: task.workerId, tagIds: task.tagIds, steps: task.steps,
   latestRunId: task.latestRun?.id ?? null, hasCompletedRun: task.hasCompletedRun ?? false });
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const BUNDLED_HELPER = fileURLToPath(new URL('../dist/task-mcp-stdio.js', import.meta.url));

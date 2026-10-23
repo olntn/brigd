@@ -443,6 +443,18 @@ describe('scheduler and restart safety', () => {
     expect(store.getTask(task.id).nextRunAt).toBe(now + 23 * 60_000);
   });
 
+  test('tick starts a due daily occurrence once and plans the next local time', () => {
+    const now = Date.UTC(2026, 9, 26, 8, 5);
+    // Every day at 11:00 in Moscow: the 08:00 UTC occurrence fell due five minutes ago.
+    const task = store.createTask(input(folder, { schedule: 'daily', timeOfDay: '11:00', timeZone: 'Europe/Moscow' }), now - 10 * 60_000);
+    expect(task.nextRunAt).toBe(Date.UTC(2026, 9, 26, 8));
+    engine.tick(now);
+    engine.tick(now + 60_000);
+    expect(agent.calls).toHaveLength(1);
+    expect(store.detail(task.id).runs.map(run => run.scheduledFor)).toEqual([Date.UTC(2026, 9, 26, 8)]);
+    expect(store.getTask(task.id).nextRunAt).toBe(Date.UTC(2026, 9, 27, 8));
+  });
+
   test('restart keeps waiting sessions, interrupts running work, and never replays either', async () => {
     const now = Date.now();
     const taskInput = input(folder, { schedule: 'interval', intervalMinutes: 5, firstRunAt: now - 60 * 60_000 });
