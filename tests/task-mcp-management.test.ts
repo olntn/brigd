@@ -291,6 +291,11 @@ describe('MCP app management through the shared HTTP controller', () => {
     const checks = [['bun', 'test', '--test-name-pattern', 'literal $name; argument']];
     await mutate(broker, 'update_autopilot_settings', { data: { integrationChecks: checks } });
     expect(parse(await call(broker, 'get_autopilot_settings'))).toMatchObject({ integrationChecks: checks, source: 'settings' });
+    expect(parse(await call(broker, 'get_result_transfer_settings'))).toEqual({ mode: 'automatic', manualWait: 'continue' });
+    await mutate(broker, 'update_result_transfer_settings', { data: { mode: 'manual', manualWait: 'wait' } });
+    expect(parse(await call(broker, 'get_result_transfer_settings'))).toEqual({ mode: 'manual', manualWait: 'wait' });
+    expect((await call(broker, 'update_result_transfer_settings', { data: { manualWait: 'invalid' }, idempotency_key: 'invalid-transfer' })).isError).toBe(true);
+    expect(store.getResultTransferSettings()).toEqual({ mode: 'manual', manualWait: 'wait' });
     await mutate(broker, 'update_concurrency_settings', { data: { maxPerRepository: 3 } });
     expect(parse(await call(broker, 'get_concurrency_settings'))).toMatchObject({ maxPerRepository: 3, saved: { maxParallel: null, maxPerRepository: 3 } });
     expect((await call(broker, 'update_concurrency_settings', { data: { maxPerRepository: 33 }, idempotency_key: 'invalid-concurrency' })).isError).toBe(true);

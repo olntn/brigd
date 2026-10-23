@@ -42,10 +42,11 @@
   let dependencyWaiting = $derived((overview?.pool ?? []).filter(task => task.dependencies?.some(dependency => !dependency.satisfied)).length);
   let archivedAttempts = $derived((overview?.attempts.length ?? 0) - attempts.length);
   let summary = $derived.by(() => {
-    const counts = { done: 0, waiting: 0, failed: 0, merge: 0, active: 0 };
+    const counts = { done: 0, waiting: 0, failed: 0, merge: 0, manual: 0, active: 0 };
     for (const run of attempts) {
       const status = outcome(run);
       if (status === 'completed') counts.done++;
+      else if (status === 'awaiting_manual_transfer') counts.manual++;
       else if (status === 'waiting_input') counts.waiting++;
       else if (['failed', 'blocked', 'cancelled', 'interrupted'].includes(status)) counts.failed++;
       else if (status.startsWith('merge_')) counts.merge++;
@@ -81,7 +82,7 @@
     if (state.stoppedAt !== null && state.stopReason) {
       return t('Остановлен {time}: {reason}.', { time: dateTime(state.stoppedAt), reason: t(AUTOPILOT_STOP_REASONS[state.stopReason], { limit: AUTOPILOT_FAILURE_LIMIT }) });
     }
-    return t('Включите перед уходом: задачи из очереди будут запускаться в пределах лимитов из настроек «Параллельность», а результаты по одному проходить проверку и слияние.');
+    return t('Включите перед уходом: задачи из очереди будут запускаться в пределах лимитов из настроек «Параллельность». Перенос результатов определяется настройками в разделе «Автопилот».');
   }
 
   async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -260,7 +261,7 @@
         {#each overview.pool as task, index (task.id)}
           <li class="autopilot-row autopilot-queue-row" class:dependency-problem={task.dependencies?.some(dependency => dependency.archived && !dependency.satisfied)} class:dragging={dragId === task.id} class:drop-before={dropTarget?.id === task.id && dropTarget.zone === 'before'} class:drop-after={dropTarget?.id === task.id && dropTarget.zone === 'after'} aria-busy={pending === task.id} draggable={!pending} ondragstart={(event) => dragStart(event, task.id)} ondragend={dragEnd} ondragover={(event) => dragOver(event, task.id)} ondrop={drop}>
             <button type="button" class="autopilot-handle" data-queue-handle={task.id} aria-label={t('Переместить: {title}, место {position} из {total}', { title: task.title, position: index + 1, total: overview.pool.length })} aria-keyshortcuts="ArrowUp ArrowDown" title={t('Перетащите или нажмите ↑ и ↓, чтобы изменить порядок среди задач того же приоритета')} onkeydown={(event) => handleKey(event, task)}><Icon name="grip" size={15} /><span class="autopilot-position">{index + 1}</span></button>
-            <button class="autopilot-task" onclick={() => onopen(task)} aria-label={openLabel(task)}><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}<span class="priority-badge priority-{task.priority}">{t(TASK_PRIORITY_LABELS[task.priority])}</span>{/if}{shortPath(task.cwd)}{#if task.worker}{' · '}{task.worker.name}{/if}</small>{#each (task.dependencies ?? []).filter(dependency => !dependency.satisfied) as dependency (dependency.taskId)}<small class:dependency-problem={dependency.archived}>{t('ждёт задачу {title}', { title: dependency.title })}{#if dependency.archived} · {t('Зависимость в архиве без успешного результата. Восстановите её или уберите зависимость.')}{/if}</small>{/each}</button>
+            <button class="autopilot-task" onclick={() => onopen(task)} aria-label={openLabel(task)}><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}<span class="priority-badge priority-{task.priority}">{t(TASK_PRIORITY_LABELS[task.priority])}</span>{/if}{shortPath(task.cwd)}{#if task.worker}{' · '}{task.worker.name}{/if}</small>{#if task.launchWaitReason}<small>{serverText(task.launchWaitReason)}</small>{/if}{#each (task.dependencies ?? []).filter(dependency => !dependency.satisfied) as dependency (dependency.taskId)}<small class:dependency-problem={dependency.archived}>{t('ждёт задачу {title}', { title: dependency.title })}{#if dependency.archived} · {t('Зависимость в архиве без успешного результата. Восстановите её или уберите зависимость.')}{/if}</small>{/each}</button>
             <span class="status-badge status-{task.status}"><span class="status-dot"></span>{t(TASK_STATUS_LABELS[task.status])}</span>
             <button class="button secondary" disabled={!!pending} onclick={() => setPaused(task, true)} aria-label={t('Отложить: {title}', { title: task.title })}><Icon name="pause" size={14} />{t('Отложить')}</button>
           </li>
@@ -290,7 +291,7 @@
       <p class="autopilot-help">{t('Автопилот ещё не включали. После первой сессии здесь будет список взятых задач и их результаты.')}</p>
     {:else}
       <p class="autopilot-help">{overview.stoppedAt !== null ? t('С {start} по {end}.', { start: dateTime(overview.startedAt), end: dateTime(overview.stoppedAt) }) : t('С {start}.', { start: dateTime(overview.startedAt) })} {t('Готово: {done} · Ждут ответа: {waiting} · Ошибки и блокировки: {failed} · Проблемы слияния: {merge} · В работе: {active}.', { done: summary.done, waiting: summary.waiting, failed: summary.failed, merge: summary.merge, active: summary.active })}{#if archivedAttempts} {t('Задачи из архива не показаны: {count}.', { count: archivedAttempts })}{/if}</p>
-      <p class="autopilot-help">{t('Ждут зависимости: {count}.', { count: dependencyWaiting })}</p>
+      <p class="autopilot-help">{t('Ждут ручного переноса: {count}.', { count: summary.manual })} {t('Ждут зависимости: {count}.', { count: dependencyWaiting })}</p>
       {#if overview.usage}<p class="autopilot-help autopilot-usage" title={usageDetails(overview.usage)}>{t('Расход за сессию: {usage}', { usage: usageLine(overview.usage) })}</p>{/if}
       {#if overview.triage}<p class="autopilot-help autopilot-triage" aria-label={t('Разбор упавших проверок за сессию')}>{t('Разбор упавших проверок: прошли со второй попытки — {flaky} · целевая ветка не проходит — {targetFailed} · возвращено работникам — {returned} · исчерпан лимит возвратов — {exhausted} · без возврата — {notReturned} · остановлено — {stopped}.', { ...overview.triage })}</p>{/if}
       {#if attempts.length}

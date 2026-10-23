@@ -287,9 +287,11 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         if (Object.keys(value).length !== 1 || !Object.hasOwn(value, 'enabled')) throw new AppError('Укажите только поле enabled: true, false или null');
         return json(engine.setCheckTriageSettings({ enabled: value.enabled }));
       }
+      if (path === '/api/settings/result-transfer' && method === 'GET') return json(engine.getResultTransferSettings());
+      if (path === '/api/settings/result-transfer' && method === 'PATCH') return json(engine.setResultTransferSettings(await body(req)));
       if (path === '/api/settings/concurrency' && method === 'GET') return json(engine.getConcurrencySettings());
       if (path === '/api/settings/concurrency' && method === 'PATCH') return json(engine.setConcurrencySettings(await body(req)));
-      if (path === '/api/autopilot' && method === 'GET') return json(engine.store.autopilotOverview());
+      if (path === '/api/autopilot' && method === 'GET') return json(engine.autopilotOverview());
       if (path === '/api/autopilot' && method === 'PATCH') return json(engine.setAutopilot(validateAutopilot(await body(req))));
       if (path === '/api/integrator' && method === 'GET') return json(engine.store.getIntegratorProfile());
       if (path === '/api/integrator' && method === 'PATCH') {
@@ -396,10 +398,11 @@ export function createHandler(engine: Engine, options: HttpOptions) {
       }
       const diffMatch = path.match(/^\/api\/runs\/([a-zA-Z0-9-]+)\/diff$/);
       if (diffMatch && method === 'GET') return json(engine.codeDiffs.get(engine.store.getRun(diffMatch[1]!)));
-      const runMatch = path.match(/^\/api\/runs\/([a-zA-Z0-9-]+)\/(resume|cancel|retry|integrate|cancel-integration|reconcile)$/);
+      const runMatch = path.match(/^\/api\/runs\/([a-zA-Z0-9-]+)\/(resume|cancel|retry|integrate|skip-integration|cancel-integration|reconcile)$/);
       if (runMatch && method === 'POST') {
         const [, id, action] = runMatch;
         const value = await body(req);
+        if (action === 'skip-integration') return json(engine.skipIntegration(id));
         if (action === 'integrate') return json(engine.integrate(id, value.acknowledgeInterruption === true));
         if (action === 'reconcile') return json(engine.reconcile(id), 201);
         if (action === 'cancel-integration') return json(engine.cancelIntegration(id, value.acknowledgeInterruption === true));

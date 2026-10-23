@@ -114,6 +114,10 @@ export interface ConcurrencySettings extends ConcurrencyLimits {
   /** BRIGD_MAX_PARALLEL / BRIGD_MAX_PER_REPOSITORY of the running service, or the built-in 4 and 1. */
   defaults: ConcurrencyLimits;
 }
+export interface ResultTransferSettings {
+  mode: 'automatic' | 'manual';
+  manualWait: 'continue' | 'wait';
+}
 
 export interface InstructionInput {
   title: string;
@@ -137,7 +141,7 @@ export interface Tag extends TagInput {
 }
 
 export type RunStatus = 'queued' | 'preparing' | 'running' | 'cancelling' | 'waiting_input' | 'completed' | 'blocked' | 'failed' | 'interrupted' | 'cancelled';
-export type TaskStatus = 'ready' | RunStatus | 'awaiting_merge' | 'integrating' | 'merge_conflict' | 'merge_failed' | 'merge_blocked' | 'merge_interrupted';
+export type TaskStatus = 'ready' | RunStatus | 'awaiting_manual_transfer' | 'awaiting_merge' | 'integrating' | 'merge_conflict' | 'merge_failed' | 'merge_blocked' | 'merge_interrupted';
 export interface TaskStepInput {
   workerId: string;
   title: string;
@@ -222,6 +226,8 @@ export interface Task extends TaskInput {
   archivedAt: number | null;
   nextRunAt: number | null;
   status: TaskStatus;
+  /** Why a new execution is waiting for a manual result of this repository. */
+  launchWaitReason?: string | null;
   latestRun: Run | null;
   runCount: number;
 }
@@ -421,7 +427,7 @@ export interface StorageCleanupResult {
   failures: { path: string; error: string }[];
   overview: StorageOverview;
 }
-export type IntegrationStatus = 'queued' | 'checking' | 'merging' | 'cancelling' | 'merged' | 'conflict' | 'failed' | 'blocked' | 'interrupted' | 'cancelled';
+export type IntegrationStatus = 'awaiting_manual' | 'skipped' | 'queued' | 'checking' | 'merging' | 'cancelling' | 'merged' | 'conflict' | 'failed' | 'blocked' | 'interrupted' | 'cancelled';
 export interface Integration {
   id: string;
   runId: string;

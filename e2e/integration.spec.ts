@@ -1,8 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
-import type { AppInfo, CheckTriage, Integration, IntegrationStatus, Run, Task, TaskDetail, TaskStatus } from '../src/lib/types';
+import type { AppInfo, AutopilotOverview, CheckTriage, Integration, IntegrationStatus, Run, Task, TaskDetail, TaskStatus } from '../src/lib/types';
 
 const now = Date.UTC(2026, 9, 11);
-const states: Record<IntegrationStatus, TaskStatus> = { queued: 'awaiting_merge', checking: 'integrating', merging: 'integrating', cancelling: 'integrating',
+const states: Record<IntegrationStatus, TaskStatus> = { awaiting_manual: 'awaiting_manual_transfer', skipped: 'completed', queued: 'awaiting_merge', checking: 'integrating', merging: 'integrating', cancelling: 'integrating',
   merged: 'completed', conflict: 'merge_conflict', failed: 'merge_failed', blocked: 'merge_blocked', interrupted: 'merge_interrupted', cancelled: 'merge_blocked' };
 async function fixture(page: Page, status: IntegrationStatus, checks?: Integration['checks'], patch: { integration?: Partial<Integration>; run?: Partial<Run>; english?: boolean } = {}) {
   const integration: Integration = { id: 'integration-fixture', runId: 'run-fixture', repositoryId: '/project/.git', status, attempt: 1,
@@ -20,14 +20,17 @@ async function fixture(page: Page, status: IntegrationStatus, checks?: Integrati
     createdAt: now, updatedAt: now, status: states[status], latestRun: run, runCount: 1 };
   const detail: TaskDetail = { task, runs: [run], comments: [], logs: [] };
   const info: AppInfo = { mode: 'mock', cwd: '/project', scheduler: 'running', startedAt: now, providers: [] };
+  const overview: AutopilotOverview = { enabled: false, until: null, startedAt: now - 1000, stoppedAt: now, stopReason: 'manual', failures: 0, updatedAt: now,
+    pool: [], attempts: [run], triage: { flaky: 0, targetFailed: 0, returned: 0, exhausted: 0, notReturned: 0, stopped: 0 }, usage: null };
   const actions: { path: string; body: unknown }[] = [];
   await page.route('**/api/**', async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (request.method() === 'POST' && /^\/api\/runs\/run-fixture\/(integrate|cancel-integration|reconcile)$/.test(path)) {
+    if (request.method() === 'POST' && /^\/api\/runs\/run-fixture\/(integrate|skip-integration|cancel-integration|reconcile)$/.test(path)) {
       actions.push({ path, body: request.postDataJSON() });
-      integration.status = path.endsWith('/integrate') ? 'queued' : path.endsWith('/reconcile') ? 'conflict' : 'cancelled'; task.status = states[integration.status];
+      integration.status = path.endsWith('/skip-integration') ? 'skipped' : path.endsWith('/integrate') ? 'queued' : path.endsWith('/reconcile') ? 'conflict' : 'cancelled'; task.status = states[integration.status];
       await route.fulfill({ json: integration });
-    } else if (path === '/api/info') await route.fulfill({ json: info });
+    } else if (path === '/api/autopilot') await route.fulfill({ json: overview });
+    else if (path === '/api/info') await route.fulfill({ json: info });
     else if (path === '/api/tasks') await route.fulfill({ json: [task] });
     else if (path === `/api/tasks/${task.id}`) await route.fulfill({ json: detail });
     else await route.fulfill({ json: [] });
@@ -184,4 +187,43 @@ test('a running hand-back shows its number, the failed command and the output gi
   await expect(section.locator('pre')).toHaveText('FAIL value is kept\n');
   await dialog.getByRole('tab', { name: /Запуски/ }).click();
   await expect(dialog.getByRole('tabpanel', { name: /Запуски/ })).toContainText('Возврат после упавшей проверки · 2 из 3');
+});
+
+for (const action of ['integrate', 'skip-integration'] as const) {
+  test(`a manual result exposes its separate status and ${action} action`, async ({ page }) => {
+    const { dialog, actions, card } = await fixture(page, 'awaiting_manual', [], { integration: { attempt: 0, candidatePath: null } });
+    await expect(card).toContainText('Ожидает ручного переноса');
+    const panel = dialog.getByRole('region', { name: 'Слияние результата', exact: true });
+    await expect(panel.getByText('Ожидает ручного переноса', { exact: true })).toBeVisible();
+    await expect(panel.getByRole('button', { name: 'Проверить и перенести', exact: true })).toBeEnabled();
+    await expect(panel.getByRole('button', { name: 'Не переносить', exact: true })).toBeEnabled();
+    await panel.getByRole('button', { name: action === 'integrate' ? 'Проверить и перенести' : 'Не переносить', exact: true }).click();
+    await expect.poll(() => actions).toEqual([{ path: `/api/runs/run-fixture/${action}`, body: { acknowledgeInterruption: false } }]);
+  });
+}
+
+test('a skipped result keeps a transfer button and English labels', async ({ page }) => {
+  const { dialog, actions } = await fixture(page, 'skipped', [], { english: true, integration: { attempt: 0, candidatePath: null } });
+  const panel = dialog.getByRole('region', { name: 'Merging the result', exact: true });
+  await expect(panel.getByText('Transfer deferred', { exact: true })).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Do not transfer', exact: true })).toHaveCount(0);
+  await panel.getByRole('button', { name: 'Check and transfer', exact: true }).click();
+  await expect.poll(() => actions).toEqual([{ path: '/api/runs/run-fixture/integrate', body: { acknowledgeInterruption: false } }]);
+});
+
+test('manual results count separately in the autopilot session report', async ({ page }) => {
+  const { dialog } = await fixture(page, 'awaiting_manual', [], { integration: { attempt: 0, candidatePath: null } });
+  await dialog.getByRole('button', { name: 'Закрыть задачу', exact: true }).click();
+  await page.getByRole('button', { name: 'Автопилот', exact: true }).click();
+  const report = page.getByRole('region', { name: 'Итоги сессии автопилота', exact: true });
+  await expect(report).toContainText('Ждут ручного переноса: 1.');
+  await expect(report).toContainText('Ошибки и блокировки: 0');
+});
+
+test('the run history keeps the transfer action for a skipped result', async ({ page }) => {
+  const { dialog, actions } = await fixture(page, 'skipped', [], { integration: { attempt: 0, candidatePath: null } });
+  await dialog.getByRole('tab', { name: /Запуски/ }).click();
+  const history = dialog.getByRole('tabpanel', { name: /Запуски/ });
+  await history.getByRole('button', { name: 'Проверить и перенести', exact: true }).click();
+  await expect.poll(() => actions).toEqual([{ path: '/api/runs/run-fixture/integrate', body: { acknowledgeInterruption: false } }]);
 });
