@@ -1714,6 +1714,10 @@ export class Store {
     if (!row) throw new AppError('Задача не найдена', 404);
     return this.mapTask(row);
   }
+  /** The card's current title alone, for the subjects of brigd's commits; null once the task is deleted. */
+  taskTitle(id: string): string | null {
+    return (this.db.query('SELECT title FROM tasks WHERE id = ?').get(id) as Row | null)?.title ?? null;
+  }
   resolveTaskReference(reference: string): Task {
     // Task cards show six hex characters; the task drawer shows eight. Longer
     // references must remain a prefix of the canonical, hyphenated UUID.

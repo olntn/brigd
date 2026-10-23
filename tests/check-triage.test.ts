@@ -136,6 +136,7 @@ test('a failure of the result alone goes back to the worker\'s saved session wit
   expect(existsSync(join(worktree, 'external.txt'))).toBe(true);
   expect(git(worktree, 'rev-parse', 'HEAD^2')).toBe(target);
   expect(git(worktree, 'log', '-1', '--format=%an')).toBe('Интегратор');
+  expect(git(worktree, 'log', '-1', '--format=%B')).toBe(`brigd: объединение main в Isolated work\n\nBrigd-Run: ${followup.id}`);
 
   await finishTurn('fixed\n');
   const merged = await settled(followup.id);

@@ -7,10 +7,42 @@ import { AgentRunError, runBoundedProcess } from './adapter';
 import { GitWorkspaces } from './workspaces';
 import { gitExit, removeTree, TARGET_SUFFIX } from './workspace-storage';
 import { INTEGRATOR_WORKER } from '../src/lib/workers';
+import { singleLine } from '../src/lib/progress';
 import { clock } from './clock';
 
 /** Merge commits are authored by the built-in integrator so history separates them from human and worker commits; the committer stays the repository identity. */
 export const INTEGRATOR_AUTHOR = `${INTEGRATOR_WORKER.name} <integrator@localhost>`;
+/** Task and stage titles in brigd's commit subjects are cut to this many characters, the ellipsis included. */
+export const COMMIT_TITLE_LIMIT = 72;
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+/** A title fit for a commit subject: one line, cut between whole characters so an emoji is never split. Empty when nothing printable is left. */
+export function commitTitle(value: string | null | undefined, limit = COMMIT_TITLE_LIMIT): string {
+  const line = singleLine(value ?? '');
+  const characters = Array.from(graphemes.segment(line), ({ segment }) => segment);
+  return characters.length <= limit ? line : `${characters.slice(0, limit - 1).join('').trimEnd()}…`;
+}
+/** The last paragraph of every commit brigd makes for a run: `git log --grep='Brigd-Run: <ID>'` finds them. */
+export const runTrailer = (runId: string) => `Brigd-Run: ${runId}`;
+/** The checklist stage a follow-up continues; the result of a whole checklist is named after its task. */
+function stageTitle(run: Run): string | null {
+  const workflow = run.followup?.workflow;
+  return workflow?.steps[workflow.currentStepIndex]?.title ?? null;
+}
+// Each subject falls back to the run ID when the task title has nothing printable left.
+export function resultSubject(run: Run, taskTitle: string | null): string {
+  const title = commitTitle(taskTitle), stage = commitTitle(stageTitle(run));
+  return title ? `brigd: ${title}${stage ? ` · ${stage}` : ''}` : `brigd: результат ${run.id}`;
+}
+/** The target branch merged into the task's worktree. */
+export function targetMergeSubject(run: Run, targetBranch: string, taskTitle: string | null): string {
+  return `brigd: объединение ${targetBranch} в ${commitTitle(taskTitle) || run.workspace?.branch}`;
+}
+/** The verified merge the target branch receives. */
+export function mergedSubject(run: Run, taskTitle: string | null): string {
+  const title = commitTitle(taskTitle);
+  return title ? `brigd: объединение «${title}»` : `brigd: объединение ${run.id}`;
+}
+const commitMessage = (run: Run, subject: string) => ['-m', subject, '-m', runTrailer(run.id)];
 
 class IntegrationError extends Error {
   constructor(readonly status: 'conflict' | 'failed' | 'blocked' | 'queued', message: string, readonly patch: Partial<Integration> = {}) { super(message); }
@@ -133,7 +165,9 @@ function checkedOutTarget(cwd: string, ref: string): string | null {
   return matches[0] ?? null;
 }
 export class GitIntegrator implements Integrator {
-  constructor(private readonly configuredChecks?: string[][] | (() => string[][] | undefined), private readonly triageOptions: TriageOptions = {}) {}
+  /** `taskTitle` reads the card's current title for commit subjects; without it they carry the run ID. */
+  constructor(private readonly configuredChecks?: string[][] | (() => string[][] | undefined), private readonly triageOptions: TriageOptions = {},
+    private readonly taskTitle: (run: Run) => string | null = () => null) {}
   async execute(run: Run, job: Integration, signal: AbortSignal, update: IntegrationUpdate) {
     const workspace = run.workspace!;
     const checkLimitMinutes = this.triageOptions.checkTimeLimitMinutes?.() ?? null;
@@ -156,8 +190,9 @@ export class GitIntegrator implements Integrator {
       if (staged.some(Boolean) || merging) {
         const identity = readGit(workspace.path, ['var', 'GIT_AUTHOR_IDENT'], true);
         const options = identity ? [] : ['-c', 'user.name=brigd', '-c', 'user.email=brigd@localhost'];
-        const message = merging ? `brigd: объединение ${workspace.targetBranch} в ${workspace.branch}` : `brigd: результат ${run.id}`;
-        if (await git(workspace.path, [...options, 'commit', ...(merging ? ['--author', INTEGRATOR_AUTHOR] : []), '-m', message], signal)) throw new IntegrationError('blocked', 'Не удалось создать коммит результата. Проверьте Git-конфигурацию, hooks и нативные разрешения.');
+        const title = this.taskTitle(run);
+        const message = commitMessage(run, merging ? targetMergeSubject(run, workspace.targetBranch, title) : resultSubject(run, title));
+        if (await git(workspace.path, [...options, 'commit', ...(merging ? ['--author', INTEGRATOR_AUTHOR] : []), ...message], signal)) throw new IntegrationError('blocked', 'Не удалось создать коммит результата. Проверьте Git-конфигурацию, hooks и нативные разрешения.');
       }
       if (!sourceClean(workspace.path)) throw new IntegrationError('blocked', 'В worktree остались несохранённые изменения. Завершите их перед слиянием.');
       const sourceCommit = readGit(workspace.path, ['rev-parse', '--verify', 'HEAD^{commit}']);
@@ -217,7 +252,7 @@ export class GitIntegrator implements Integrator {
       if (readGit(workspace.path, ['rev-parse', targetRef]) !== targetCommit) throw new IntegrationError('queued', 'Целевая ветка изменилась во время проверки. Кандидат будет подготовлен заново.');
       update({ status: 'merging' });
       const identity = readGit(candidatePath, ['var', 'GIT_AUTHOR_IDENT'], true);
-      if (await git(candidatePath, [...(identity ? [] : ['-c', 'user.name=brigd', '-c', 'user.email=brigd@localhost']), 'commit', '--author', INTEGRATOR_AUTHOR, '-m', `brigd: объединение ${run.id}`], signal)) throw new IntegrationError('blocked', 'Не удалось создать проверенный коммит объединения.');
+      if (await git(candidatePath, [...(identity ? [] : ['-c', 'user.name=brigd', '-c', 'user.email=brigd@localhost']), 'commit', '--author', INTEGRATOR_AUTHOR, ...commitMessage(run, mergedSubject(run, this.taskTitle(run)))], signal)) throw new IntegrationError('blocked', 'Не удалось создать проверенный коммит объединения.');
       const resultCommit = readGit(candidatePath, ['rev-parse', 'HEAD']);
       if (readGit(candidatePath, ['rev-parse', 'HEAD^{tree}']) !== testedTree) throw new IntegrationError('failed', 'Git hook изменил коммит после проверки. Перенос остановлен.');
       update({ resultCommit });
@@ -272,7 +307,7 @@ export class GitIntegrator implements Integrator {
       throw new Error(`Не удалось объединить проверенный коммит ветки ${failure.targetBranch} с worktree задачи. Разрешите расхождение вручную и отправьте дополнительный запрос.`);
     }
     const identity = readGit(workspace.path, ['var', 'GIT_AUTHOR_IDENT'], true);
-    if (await git(workspace.path, [...(identity ? [] : ['-c', 'user.name=brigd', '-c', 'user.email=brigd@localhost']), 'commit', '--author', INTEGRATOR_AUTHOR, '-m', `brigd: объединение ${failure.targetBranch} в ${workspace.branch}`], signal)) {
+    if (await git(workspace.path, [...(identity ? [] : ['-c', 'user.name=brigd', '-c', 'user.email=brigd@localhost']), 'commit', '--author', INTEGRATOR_AUTHOR, ...commitMessage(run, targetMergeSubject(run, failure.targetBranch, this.taskTitle(run)))], signal)) {
       await git(workspace.path, ['merge', '--abort'], signal);
       throw new Error('Не удалось создать merge-коммит проверенной целевой ветки в worktree задачи. Проверьте Git-конфигурацию, hooks и нативные разрешения.');
     }

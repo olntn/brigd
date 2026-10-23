@@ -8,6 +8,7 @@ import { prepareAttachment } from '../server/attachments';
 import { Engine, type AgentFactory, type TaskBridgeFactory } from '../server/engine';
 import { createHandler } from '../server/http';
 import { AppError, Store, runFence } from '../server/store';
+import { resultSubject } from '../server/integration';
 import { createTaskBroker, type TaskBroker } from '../server/task-mcp';
 import type { Envelope, FollowupInput, Run, RunStatus, Task, TaskInput, Worker } from '../src/lib/types';
 
@@ -274,6 +275,9 @@ describe('immutable follow-up source selection', () => {
     expect(store.getRun(source.id)).toEqual(source);
     expect(store.getRun(run.id).status).toBe('completed');
     expect(store.getRun(run.id).steps).toEqual([]);
+    // Its result commit names the continued stage, and so does a follow-up of this follow-up.
+    expect(resultSubject(run, task.title)).toBe(`brigd: Review the completed work · Stage ${index + 1}`);
+    expect(resultSubject(engine.followup(task.id, input(store.getRun(run.id))), task.title)).toBe(`brigd: Review the completed work · Stage ${index + 1}`);
   });
 
   test('a completed chain with failed and interrupted historical attempts can be followed up without reviving those attempts', async () => {
