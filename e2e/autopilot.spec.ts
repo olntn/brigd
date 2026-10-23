@@ -69,3 +69,65 @@ test('autopilot tab shows the queue, starts pool tasks once enabled and reports 
   await expect(drawer.locator('.run-meta').getByText('Автопилот', { exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test('the queue is reordered by dragging or with arrow keys, the autopilot follows it and archived tasks leave the report', async ({ page, request }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const info = await (await request.get('/api/info')).json();
+  const titles = [unique('Первая в очереди'), unique('Вторая в очереди'), unique('Третья в очереди')];
+  const ids: string[] = [];
+  for (const title of titles) {
+    const created = await request.post('/api/tasks', { headers: origin, data: {
+      title, instruction: 'Проверь проект и опиши структуру.', provider: 'codex', cwd: info.cwd, schedule: 'auto', intervalMinutes: null, firstRunAt: null, paused: false,
+    } });
+    expect(created.status()).toBe(201);
+    ids.push((await created.json() as Task).id);
+  }
+  const pool = async () => (await (await request.get('/api/autopilot')).json() as AutopilotOverview).pool.map(task => task.id);
+
+  await page.getByRole('button', { name: 'Автопилот', exact: true }).click();
+  const queue = page.getByRole('region', { name: 'Очередь автопилота' });
+  const order = queue.locator('.autopilot-queue-row .autopilot-task strong');
+  const row = (title: string) => queue.locator('.autopilot-queue-row', { hasText: title });
+  await expect(order).toHaveText(titles);
+
+  // Dropping onto the upper half of a row puts the task above it.
+  await row(titles[2]!).dragTo(row(titles[0]!), { targetPosition: { x: 300, y: 3 } });
+  await expect(order).toHaveText([titles[2]!, titles[0]!, titles[1]!]);
+  await expect.poll(pool).toEqual([ids[2], ids[0], ids[1]]);
+
+  // The handle moves a task one place per arrow key and keeps the focus.
+  const handle = queue.getByRole('button', { name: new RegExp(`^Переместить: ${titles[2]}`) });
+  await handle.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(order).toHaveText([titles[0]!, titles[2]!, titles[1]!]);
+  await expect(handle).toBeFocused();
+  await expect(handle).toHaveAccessibleName(`Переместить: ${titles[2]}, место 2 из 3`);
+  await expect.poll(pool).toEqual([ids[0], ids[2], ids[1]]);
+  await page.reload();
+  await page.getByRole('button', { name: 'Автопилот', exact: true }).click();
+  await expect(order).toHaveText([titles[0]!, titles[2]!, titles[1]!]);
+
+  // One repository takes one task at a time, so the attempts follow the arranged order.
+  const status = page.getByRole('region', { name: 'Состояние автопилота' });
+  await status.getByLabel('Остановить в').uncheck();
+  await status.getByRole('button', { name: 'Включить автопилот', exact: true }).click();
+  await expect(status.getByText('Включён', { exact: true })).toBeVisible();
+  const attempts = async () => (await (await request.get('/api/autopilot')).json() as AutopilotOverview).attempts.map(run => run.taskId);
+  await expect.poll(attempts).toEqual([ids[0], ids[2], ids[1]]);
+  const report = page.getByRole('region', { name: 'Итоги сессии автопилота' });
+  for (const title of titles) await expect(report.getByRole('button', { name: `Открыть: ${title}`, exact: true })).toBeVisible();
+
+  // An archived task leaves the session report, as it leaves the board.
+  await expect.poll(async () => ((await (await request.get(`/api/tasks/${ids[2]}`)).json()) as TaskDetail).task.status).toBe('completed');
+  expect((await request.post(`/api/tasks/${ids[2]}/archive`, { headers: origin, data: {} })).ok()).toBe(true);
+  await page.reload();
+  await page.getByRole('button', { name: 'Автопилот', exact: true }).click();
+  await expect(report.getByRole('button', { name: `Открыть: ${titles[0]}`, exact: true })).toBeVisible();
+  await expect(report.getByRole('button', { name: `Открыть: ${titles[2]}`, exact: true })).toHaveCount(0);
+  await expect(report.getByText(/Задачи из архива не показаны: 1\./)).toBeVisible();
+
+  await status.getByRole('button', { name: 'Выключить автопилот', exact: true }).click();
+  await expect(status.getByText('Выключен', { exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});

@@ -272,6 +272,17 @@ describe('MCP app management through the shared HTTP controller', () => {
     expect(store.getAutopilot().enabled).toBe(false);
   });
 
+  test('reorders the autopilot queue by short card ID and rejects cards outside it', async () => {
+    const { broker } = setup();
+    const [first, second] = [await createCard(broker, 'Queued first', undefined, { schedule: 'auto' }), await createCard(broker, 'Queued second', undefined, { schedule: 'auto' })];
+    const manual = await createCard(broker, 'Manual card');
+    await mutate(broker, 'move_autopilot_task', { task_id: second.id.slice(0, 8), data: { beforeTaskId: first.id } });
+    expect(parse(await call(broker, 'get_autopilot')).pool.map((card: any) => card.id)).toEqual([second.id, first.id]);
+    expect((await call(broker, 'move_autopilot_task', { task_id: manual.id, data: { beforeTaskId: null }, idempotency_key: 'manual-move' })).isError).toBe(true);
+    expect((await call(broker, 'move_autopilot_task', { task_id: first.id, data: {}, idempotency_key: 'missing-before' })).isError).toBe(true);
+    expect(store.autopilotPool(null).map(task => task.id)).toEqual([second.id, first.id]);
+  });
+
   test('autopilot overview pages compact pool summaries even when raw cards exceed the response budget', async () => {
     const worker = store.createWorker({
       name: 'Pool worker', provider: 'codex', model: null, effort: 'default', avatarUrl: null,

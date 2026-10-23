@@ -507,6 +507,24 @@ describe('autopilot', () => {
     expect(store.autopilotOverview()).toMatchObject({ enabled: true, failures: 1, pool: [] });
   });
 
+  test('claims the repository\'s next task from the head of the queue as the person arranged it', async () => {
+    const now = Date.now();
+    const first = store.createTask(input(folder, { schedule: 'auto' }), now - 3);
+    const second = store.createTask(input(folder, { schedule: 'auto' }), now - 2);
+    const third = store.createTask(input(folder, { schedule: 'auto' }), now - 1);
+    store.moveAutopilotTask(third.id, first.id);
+    store.moveAutopilotTask(second.id, third.id);
+    engine.setAutopilot({ enabled: true, until: null }, now);
+    await flush();
+    expect(store.autopilotOverview().attempts.map(run => run.taskId)).toEqual([second.id]);
+    agent.calls[0]!.resolve(outcome());
+    await flush();
+    engine.tick(now + 1_000);
+    await flush();
+    expect(store.autopilotOverview().attempts.map(run => run.taskId)).toEqual([second.id, third.id]);
+    expect(store.autopilotPool(now).map(task => task.id)).toEqual([first.id]);
+  });
+
   test('stops claiming at the stop time while started work finishes; a restart switches it off', async () => {
     const now = Date.now();
     const first = store.createTask(input(folder, { schedule: 'auto' }), now - 2);

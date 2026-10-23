@@ -6,7 +6,7 @@ import type { AppInfo, GeneralSettings } from '../src/lib/types';
 import { Engine } from './engine';
 import { AppError } from './store';
 import { MAX_AVATAR_BYTES, validateAvatar } from './avatars';
-import { textField, validateAutopilot, validateIntegratorProfile, validateTask, validateWorker } from './validation';
+import { textField, validateAutopilot, validateAutopilotMove, validateIntegratorProfile, validateTask, validateWorker } from './validation';
 import { TASK_JSON_LIMIT } from './workflows';
 import { ATTACHMENT_MAX_BYTES } from '../src/lib/attachments';
 import { attachmentIds, attachmentDisposition, prepareAttachment, renderAttachmentView } from './attachments';
@@ -328,7 +328,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         options.authorizeMutation?.();
         return json(engine.store.createTask(input), 201);
       }
-      const taskMatch = path.match(/^\/api\/tasks\/([a-zA-Z0-9-]+)(?:\/(run|comments|followups|archive|restore|tags))?$/);
+      const taskMatch = path.match(/^\/api\/tasks\/([a-zA-Z0-9-]+)(?:\/(run|comments|followups|archive|restore|tags|queue))?$/);
       if (taskMatch) {
         const [, id, action] = taskMatch;
         if (!action && method === 'GET') return json(engine.store.detail(id));
@@ -349,6 +349,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         if (action === 'run' && method === 'POST') { await body(req); return json(engine.start(id), 201); }
         if (action === 'archive' && method === 'POST') { await body(req); return json(engine.store.archiveTask(id)); }
         if (action === 'restore' && method === 'POST') { await body(req); return json(engine.store.restoreTask(id)); }
+        if (action === 'queue' && method === 'POST') return json(engine.store.moveAutopilotTask(id, validateAutopilotMove(await body(req), id).beforeTaskId));
         if (action === 'followups' && method === 'POST') return json(engine.followup(id, validateFollowup(await body(req))), 201);
         if (action === 'comments' && method === 'POST') {
           const value = await body(req);
