@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { legacyThemeStorageKey, readTheme, saveTheme, themes, themeStorageKey } from '../src/lib/theme';
+import { legacyThemeStorageKey, readTheme, retiredThemes, saveTheme, themes, themeStorageKey } from '../src/lib/theme';
 
 const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
 afterEach(() => {
@@ -45,6 +45,15 @@ describe('brigd theme migration', () => {
     expect(data.get(themeStorageKey)).toBe(id);
     expect(readTheme()).toBe(id);
     expect(data.get(legacyThemeStorageKey)).toBe('dark');
+  });
+
+  const retiredLight = new Set(['ocean', 'forest', 'rose', 'sand', 'mint', 'peach', 'indigo', 'fog', 'olive']);
+  test.each([...retiredThemes])('a retired %s preference opens %s with the same brightness', (retired, replacement) => {
+    const data = storage({ [themeStorageKey]: retired, [legacyThemeStorageKey]: 'light' });
+    expect(themes.some(theme => theme.id === retired)).toBe(false);
+    expect(readTheme()).toBe(replacement);
+    expect(themes.find(theme => theme.id === replacement)!.colorScheme).toBe(retiredLight.has(retired) ? 'light' : 'dark');
+    expect(data.get(themeStorageKey)).toBe(retired);
   });
 
   test('invalid or absent settings fall back to legacy, then light', () => {
