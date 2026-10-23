@@ -17,6 +17,11 @@ const dictionary: Dictionary = {
   'Пример': 'Example',
 
   // General settings.
+  'Максимальная длительность хода агента, мин': 'Maximum agent turn duration, min',
+  'Максимальная длительность проверки слияния, мин': 'Maximum merge check duration, min',
+  'Пусто — без лимита. Применяется к новым ходам, включая ответы, дополнительные запросы и Интегратора. В задаче можно задать свой лимит.': 'Leave empty for no limit. Applies to new turns, including answers, follow-ups and the Integrator. Tasks can override this limit.',
+  'Пусто — без лимита. Ограничивает каждую команду проверки и её повторы; изменение применяется к новым попыткам слияния.': 'Leave empty for no limit. Bounds each check command and its retries; changes apply to new merge attempts.',
+
   'Параметры для новых задач и замена работников при исчерпании лимитов.': 'Defaults for new tasks and worker fallback when limits run out.',
   'Загружаем общие настройки…': 'Loading general settings…',
   'Общие настройки': 'General settings',

@@ -5,6 +5,7 @@ import type { Dictionary, Pattern } from './types';
  * attachments and the engine. Messages that store.ts shares are in server-store.ts.
  */
 export const messages: Dictionary = {
+  'Лимит времени: введите целое число от 1 до 1440 минут или null': 'Time limit: enter an integer from 1 to 1440 minutes, or null',
   // Requests and routing.
   'Недопустимый Host': 'Host not allowed',
   'Недопустимый Origin': 'Origin not allowed',

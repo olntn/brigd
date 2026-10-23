@@ -29,6 +29,8 @@ export interface TriageOptions {
   enabled?: () => boolean;
   /** Reruns and the target check of one attempt together; CHECK_TRIAGE_TIME_LIMIT_MS by default. */
   timeLimitMs?: number;
+  /** Per check invocation; read once at the start of each merge attempt. */
+  checkTimeLimitMinutes?: () => number | null;
 }
 function readGit(cwd: string, args: string[], optional = false): string {
   const child = Bun.spawnSync(['git', '-C', cwd, ...args], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
@@ -67,22 +69,27 @@ export class OutputTail {
   }
 }
 /** Runs one check command and keeps the end of its output. Past `timeoutMs` the process tree is stopped and exitCode is null. */
-async function runCheck(argv: string[], cwd: string, signal: AbortSignal, timeoutMs?: number): Promise<TriageCommand> {
+interface CheckResult extends TriageCommand { timeLimitExceeded?: boolean; }
+const checkTimeoutMessage = (minutes: number) => `Превышен лимит времени проверки слияния ${minutes} мин; команда остановлена. Целевая ветка сохранена.`;
+async function runCheck(argv: string[], cwd: string, signal: AbortSignal, timeoutMs?: number, checkLimitMinutes?: number | null): Promise<CheckResult> {
+  const checkMs = checkLimitMinutes == null ? undefined : checkLimitMinutes * 60_000;
+  const limitedByCheck = checkMs !== undefined && (timeoutMs === undefined || checkMs <= timeoutMs);
+  if (limitedByCheck) timeoutMs = checkMs;
   const tail = new OutputTail();
   try {
     const exitCode = await runBoundedProcess(argv, { cwd, signal, onStdout: tail.push, onStderr: tail.push, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
     return { argv, exitCode, ...tail.result() };
   } catch (error) {
-    if (error instanceof AgentRunError && error.code === 'TIMEOUT' && !signal.aborted) return { argv, exitCode: null, ...tail.result() };
+    if (error instanceof AgentRunError && error.code === 'TIMEOUT' && !signal.aborted) return { argv, exitCode: null, ...tail.result(), ...(limitedByCheck ? { timeLimitExceeded: true } : {}) };
     throw error;
   }
 }
 /** A triage command within the attempt's remaining budget; nothing starts once it is spent. */
-async function budgeted(triage: CheckTriage, argv: string[], cwd: string, signal: AbortSignal): Promise<TriageCommand> {
+async function budgeted(triage: CheckTriage, argv: string[], cwd: string, signal: AbortSignal, checkLimitMinutes?: number | null): Promise<CheckResult> {
   const remaining = triage.limitMs - triage.spentMs;
   if (remaining <= 0) return { argv, exitCode: null };
   const started = performance.now();
-  try { return await runCheck(argv, cwd, signal, Math.ceil(remaining)); }
+  try { return await runCheck(argv, cwd, signal, Math.ceil(remaining), checkLimitMinutes); }
   finally { triage.spentMs = Math.min(triage.limitMs, triage.spentMs + Math.round(performance.now() - started)); }
 }
 /** Removes a worktree brigd created for itself, without the abort signal: it runs after a cancellation too. */
@@ -129,6 +136,7 @@ export class GitIntegrator implements Integrator {
   constructor(private readonly configuredChecks?: string[][] | (() => string[][] | undefined), private readonly triageOptions: TriageOptions = {}) {}
   async execute(run: Run, job: Integration, signal: AbortSignal, update: IntegrationUpdate) {
     const workspace = run.workspace!;
+    const checkLimitMinutes = this.triageOptions.checkTimeLimitMinutes?.() ?? null;
     try {
       await new GitWorkspaces(dirname(workspace.path)).prepare(workspace);
       signal.throwIfAborted();
@@ -176,25 +184,26 @@ export class GitIntegrator implements Integrator {
       const checks: Integration['checks'] = [];
       let triage: CheckTriage | null = null;
       const report = () => update({ checks: [...checks], ...(triage ? { triage: structuredClone(triage) } : {}) });
-      const failure = (message: string) => new IntegrationError('failed', message, triage ? { checks: [...checks], triage: structuredClone(triage) } : {});
+      const failure = (message: string) => new IntegrationError('failed', message, { checks: [...checks], ...(triage ? { triage: structuredClone(triage) } : {}) });
       for (const [index, argv] of commands.entries()) {
         signal.throwIfAborted();
-        const { exitCode, ...tail } = await runCheck(argv, candidatePath, signal);
-        checks.push({ ...tail, exitCode: exitCode! }); report();
+        const { exitCode, timeLimitExceeded, ...tail } = await runCheck(argv, candidatePath, signal, undefined, checkLimitMinutes);
+        checks.push({ ...tail, exitCode: exitCode ?? -1 }); report();
+        if (timeLimitExceeded) throw failure(checkTimeoutMessage(checkLimitMinutes!));
         if (exitCode === 0) continue;
         if (!this.triageOptions.enabled?.()) throw failure(`Проверка ${index + 1} завершилась с кодом ${exitCode}. Целевая ветка сохранена.`);
         // Exit codes alone decide: one rerun tells a flaky check from a failing one, the target commit tells whose failure it is.
         triage ??= { stage: 'retry', startedAt: clock(), limitMs: this.triageOptions.timeLimitMs ?? CHECK_TRIAGE_TIME_LIMIT_MS, spentMs: 0, retries: [], target: null, handback: null, outcome: null };
         triage.stage = 'retry'; triage.retries.push({ check: index, exitCode: null }); report();
-        const { argv: _argv, ...retry } = await budgeted(triage, argv, candidatePath, signal);
+        const { argv: _argv, timeLimitExceeded: retryTimedOut, ...retry } = await budgeted(triage, argv, candidatePath, signal, checkLimitMinutes);
         triage.retries[triage.retries.length - 1] = { check: index, ...retry };
         const stopped = `Разбор упавшей проверки ${index + 1} остановлен: повтор и проверка целевой ветки вместе превысили лимит ${minutes(triage.limitMs)} мин. Задача не возвращена работнику.`;
-        if (retry.exitCode === null) { Object.assign(triage, { stage: 'done', outcome: 'timeout' }); throw failure(stopped); }
+        if (retry.exitCode === null) { Object.assign(triage, { stage: 'done', outcome: 'timeout' }); throw failure(retryTimedOut ? checkTimeoutMessage(checkLimitMinutes!) : stopped); }
         if (retry.exitCode === 0) { triage.stage = 'done'; report(); continue; }
-        const verdict = await this.checkTarget(workspace.repositoryRoot, `${candidatePath}${TARGET_SUFFIX}`, targetCommit, commands.slice(0, index + 1), signal, triage, report);
+        const verdict = await this.checkTarget(workspace.repositoryRoot, `${candidatePath}${TARGET_SUFFIX}`, targetCommit, commands.slice(0, index + 1), signal, triage, report, checkLimitMinutes);
         const target = triage.target!.checks.at(-1)!;
         triage.stage = 'done';
-        if (verdict === 'timeout') { triage.outcome = 'timeout'; throw failure(stopped); }
+        if (verdict === 'timeout' || verdict === 'check_timeout') { triage.outcome = 'timeout'; throw failure(verdict === 'check_timeout' ? checkTimeoutMessage(checkLimitMinutes!) : stopped); }
         if (verdict === 'failed') {
           triage.outcome = 'target_failed';
           throw failure(`Целевая ветка ${workspace.targetBranch} не проходит проверку ${command(target.argv)}: код ${target.exitCode} на коммите ${targetCommit.slice(0, 12)}. Задача не возвращена работнику; исправьте целевую ветку и повторите проверку.`);
@@ -230,7 +239,7 @@ export class GitIntegrator implements Integrator {
     }
   }
   /** The failed command and the commands before it (dependencies are installed by them) on the target commit in a clean worktree. */
-  private async checkTarget(repositoryRoot: string, path: string, commit: string, commands: string[][], signal: AbortSignal, triage: CheckTriage, report: () => void): Promise<'passed' | 'failed' | 'timeout'> {
+  private async checkTarget(repositoryRoot: string, path: string, commit: string, commands: string[][], signal: AbortSignal, triage: CheckTriage, report: () => void, checkLimitMinutes?: number | null): Promise<'passed' | 'failed' | 'timeout' | 'check_timeout'> {
     const target: TargetCheck = { commit, checks: [], passed: null };
     Object.assign(triage, { stage: 'target', target }); report();
     if (existsSync(path)) await discardWorktree(repositoryRoot, path);
@@ -238,9 +247,9 @@ export class GitIntegrator implements Integrator {
     try {
       for (const argv of commands) {
         target.checks.push({ argv, exitCode: null }); report();
-        const result = await budgeted(triage, argv, path, signal);
+        const { timeLimitExceeded, ...result } = await budgeted(triage, argv, path, signal, checkLimitMinutes);
         target.checks[target.checks.length - 1] = result;
-        if (result.exitCode === null) return 'timeout';
+        if (result.exitCode === null) return timeLimitExceeded ? 'check_timeout' : 'timeout';
         if (result.exitCode !== 0) { target.passed = false; return 'failed'; }
       }
       target.passed = true;

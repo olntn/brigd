@@ -112,3 +112,8 @@ test('missing recipient blocks instead of falling back, while a genuinely new dr
   expect(followupSessionKey({ ...targets[0]!, sessionId: null })).toBe('');
   expect(resolveFollowupTarget([], '', '')).toBeNull();
 });
+
+test('a timed-out scalar session is available for a deliberate follow-up', () => {
+  const timed = run('timed-out', { status: 'failed', timeLimitMinutes: 1, timeLimitExceeded: true });
+  expect(followupTargets([timed])).toMatchObject([{ sourceRunId: timed.id, sessionId: timed.sessionId }]);
+});

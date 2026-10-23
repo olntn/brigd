@@ -80,6 +80,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
   const startedAt = options.startedAt ?? Date.now();
   const cliHome = options.cliHome ?? homedir();
   const generalSettings = (): GeneralSettings => ({
+    ...engine.store.getTimeLimits(),
     defaultCwd: engine.store.getDefaultCwd() ?? options.defaultCwd ?? process.cwd(),
     defaultSchedule: engine.store.getDefaultSchedule(),
     defaultWorkerId: engine.store.getDefaultWorkerId(),

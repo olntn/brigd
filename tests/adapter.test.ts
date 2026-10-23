@@ -1190,3 +1190,41 @@ describe('exhausted usage limits', () => {
     expect((claudeLimited as PromiseRejectedResult).reason).toBeInstanceOf(UsageLimitError);
   });
 });
+
+describe('agent turn time limits', () => {
+  test('mock timeout keeps the announced session and does not affect an unlimited turn', async () => {
+    const nativeSetTimeout = globalThis.setTimeout;
+    const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((...[handler, delay, ...args]: Parameters<typeof setTimeout>) =>
+      nativeSetTimeout(handler, delay === 60_000 ? 20 : delay, ...args)) as typeof setTimeout);
+    const callbacks = capture();
+    try {
+      await expect(startAgent({ provider: 'codex', cwd: process.cwd(), instruction: '[delay:100]', mock: true, timeLimitMinutes: 1 }, callbacks).result)
+        .rejects.toMatchObject({ code: 'TIMEOUT', message: 'Превышен лимит времени 1 мин; CLI остановлен' });
+      expect(callbacks.sessions).toHaveLength(1);
+      expect((await startAgent({ provider: 'codex', cwd: process.cwd(), instruction: '[delay:100]', mock: true }, capture()).result).envelope.status).toBe('completed');
+    } finally { timer.mockRestore(); }
+  });
+
+  test('a timed synthetic CLI persists its session and is killed before the handle settles', async () => {
+    const folder = mkdtempSync(join(tmpdir(), 'brigd-timeout-cli-')), oldPath = process.env.PATH;
+    const marker = join(folder, 'pid');
+    writeFileSync(join(folder, 'claude'), `#!${process.execPath}\nif(process.argv.includes('--help')) console.log('--print --output-format stream-json --verbose --resume --permission-mode --permission-prompts'); else {
+      require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid));
+      process.on('SIGTERM', () => {});
+      console.log(JSON.stringify({type:'system',subtype:'init',session_id:${JSON.stringify(sid)}}));
+      setInterval(() => {}, 1000);
+    }`, { mode: 0o700 });
+    const nativeSetTimeout = globalThis.setTimeout;
+    const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((...[handler, delay, ...args]: Parameters<typeof setTimeout>) =>
+      nativeSetTimeout(handler, delay === 60_000 ? 500 : delay, ...args)) as typeof setTimeout);
+    const callbacks = capture();
+    try {
+      process.env.PATH = folder + ':' + oldPath;
+      await expect(startAgent({ provider: 'claude', cwd: folder, instruction: 'Synthetic stuck CLI.', timeLimitMinutes: 1 }, callbacks).result)
+        .rejects.toMatchObject({ code: 'TIMEOUT', message: 'Превышен лимит времени 1 мин; CLI остановлен' });
+      expect(callbacks.sessions).toEqual([sid]);
+      const pid = Number(readFileSync(marker, 'utf8'));
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally { timer.mockRestore(); process.env.PATH = oldPath; rmSync(folder, { recursive: true, force: true }); }
+  });
+});

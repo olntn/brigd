@@ -62,7 +62,7 @@ export class Engine {
     this.defaultLimits = { maxParallel: options.maxParallel ?? DEFAULT_CONCURRENCY.maxParallel, maxPerRepository: options.maxPerRepository ?? DEFAULT_CONCURRENCY.maxPerRepository };
     this.defaultCheckTriage = options.checkTriage ?? DEFAULT_CHECK_TRIAGE;
     this.checkTriageTimeLimitMs = options.checkTriageTimeLimitMs ?? CHECK_TRIAGE_TIME_LIMIT_MS;
-    this.integrator = options.integrator ?? new GitIntegrator(() => this.integrationChecks(), { enabled: () => this.checkTriageEnabled(), timeLimitMs: this.checkTriageTimeLimitMs });
+    this.integrator = options.integrator ?? new GitIntegrator(() => this.integrationChecks(), { enabled: () => this.checkTriageEnabled(), timeLimitMs: this.checkTriageTimeLimitMs, checkTimeLimitMinutes: () => this.store.getTimeLimits().integrationCheckTimeLimitMinutes });
     this.autoReconcile = options.autoReconcile ?? true;
     if (!isConcurrencyLimit(this.defaultLimits.maxParallel)) throw new Error('Лимит процессов должен быть 1–32');
     if (!isConcurrencyLimit(this.defaultLimits.maxPerRepository)) throw new Error('Лимит агентов на репозиторий должен быть 1–32');
@@ -460,7 +460,7 @@ export class Engine {
       if (!run.mock && (this.factory === startAgent || this.bridgeFactory)) {
         launch.bridge = (this.bridgeFactory ?? createTaskBridge)(this.store, { ...run, cwd: run.workspace?.cwd ?? run.cwd }, fence, this.taskAppAccess);
       }
-      const input: AgentInput = { provider: run.provider, cwd: run.workspace?.cwd ?? run.cwd, instruction: run.instruction, instructions: run.instructions,
+      const input: AgentInput = { ...(run.timeLimitMinutes != null ? { timeLimitMinutes: run.timeLimitMinutes } : {}), provider: run.provider, cwd: run.workspace?.cwd ?? run.cwd, instruction: run.instruction, instructions: run.instructions,
         ...(this.getCliAccessSettings().mode === 'full' ? { cliAccess: 'full' as const } : {}),
         ...(run.workspace?.mode === 'worktree' ? { workspace: run.workspace } : {}),
         ...(run.inputAttachments?.length ? { attachments: run.inputAttachments } : {}), ...(launch.bridge ? { taskBridge: launch.bridge.agentConfig } : {}),

@@ -121,6 +121,10 @@ function appErrorMessages(source: string): string[] {
 }
 
 describe('server messages in English', () => {
+  test('translates configurable timeout errors', () => {
+    expect(translateServer('en', 'Превышен лимит времени 5 мин; CLI остановлен')).toBe('The time limit of 5 min was exceeded; CLI stopped');
+    expect(translateServer('en', 'Превышен лимит времени проверки слияния 1 мин; команда остановлена. Целевая ветка сохранена.')).toBe('The merge check time limit of 1 min was exceeded; command stopped. Target branch preserved.');
+  });
   test('cover every API error the interface can show', () => {
     const files = sourceFiles(join(root, 'server'), /\.ts$/).filter(path => !agentOnly.has(relative(join(root, 'server'), path)));
     const untranslated = files.flatMap(path => appErrorMessages(read(path)).map(message => ({ file: relative(root, path), message })))

@@ -245,6 +245,8 @@ const blockedNext: Dictionary = {
 
 /** Server messages with embedded values. The first matching pattern wins. */
 export const patterns: Pattern[] = [
+  [/^Превышен лимит времени (\d+) мин; CLI остановлен$/, 'The time limit of $1 min was exceeded; CLI stopped'],
+  [/^Превышен лимит времени проверки слияния (\d+) мин; команда остановлена\. Целевая ветка сохранена\.$/, 'The merge check time limit of $1 min was exceeded; command stopped. Target branch preserved.'],
   // Notes appended to a merge conflict (store.noteIntegration joins them with a space).
   [/^([\s\S]+) Конфликт передан Интегратору\.$/, (match, translate) => `${translate(match[1]!)} The conflict was handed to the Integrator.`],
   [/^(?:([\s\S]+?) )?Интегратор не запущен автоматически: ([\s\S]+)$/, (match, translate) =>

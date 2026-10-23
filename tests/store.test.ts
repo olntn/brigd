@@ -758,3 +758,67 @@ describe('change revision', () => {
     } finally { other.close(); }
   });
 });
+
+describe('frozen turn time limits', () => {
+  test('defaults are unlimited, task override wins, snapshots survive edits and reopening', () => {
+    const inherited = store.createTask(input());
+    const unlimited = store.startManual(inherited.id, true);
+    expect(unlimited.timeLimitMinutes).toBeNull();
+    store.finish(unlimited.id, 'failed', null, 'Synthetic failure');
+    store.updateGeneralSettings({ agentTimeLimitMinutes: 5 });
+    const run = store.startManual(inherited.id, true);
+    const own = store.createTask(input({ timeLimitMinutes: 2 }));
+    const ownRun = store.startManual(own.id, true);
+    store.updateGeneralSettings({ agentTimeLimitMinutes: 10 });
+    store.updateTask(own.id, { ...own, timeLimitMinutes: 3 });
+    expect(store.getRun(run.id).timeLimitMinutes).toBe(5);
+    expect(store.getRun(ownRun.id).timeLimitMinutes).toBe(2);
+    store.close();
+    store = new Store(join(folder, 'trackt.sqlite'));
+    expect(store.getTask(own.id).timeLimitMinutes).toBe(3);
+    expect(store.getRun(ownRun.id).timeLimitMinutes).toBe(2);
+    expect(store.getRun(run.id).timeLimitMinutes).toBe(5);
+  });
+
+  test('answers and follow-ups snapshot current settings for each new turn', () => {
+    store.updateGeneralSettings({ agentTimeLimitMinutes: 2 });
+    const task = store.createTask(input());
+    const first = store.startManual(task.id, true);
+    store.setSession(first.id, 'saved-session');
+    store.finish(first.id, 'waiting_input', 'Which?', null);
+    store.updateGeneralSettings({ agentTimeLimitMinutes: 3 });
+    expect(store.getRun(first.id).timeLimitMinutes).toBe(2);
+    expect(store.resume(first.id, 'Answer').timeLimitMinutes).toBe(3);
+    store.finish(first.id, 'completed', 'Done', null);
+    store.updateTask(task.id, { ...task, timeLimitMinutes: 4 });
+    const next = store.startFollowup(task.id, { sourceRunId: first.id, sourceStepIndex: null, body: 'More work', attachmentIds: [], requestId: 'timed-followup' }).run;
+    expect(next).toMatchObject({ timeLimitMinutes: 4, sessionId: 'saved-session' });
+    expect(store.getRun(first.id).timeLimitMinutes).toBe(3);
+  });
+
+  test('workflow transitions and retries snapshot the new turn limit', () => {
+    const worker = store.createWorker({ name: 'Worker', provider: 'codex', effort: 'default', communicationStyle: '', avatarUrl: null });
+    const task = store.createTask(input({ steps: [1, 2].map(n => ({ workerId: worker.id, title: `Step ${n}`, instruction: 'Work.' })) }));
+    store.updateGeneralSettings({ agentTimeLimitMinutes: 2 });
+    const run = store.startManual(task.id, true);
+    store.updateGeneralSettings({ agentTimeLimitMinutes: 3 });
+    expect(store.finish(run.id, 'completed', 'Done', null)).toMatchObject({ turn: 2, timeLimitMinutes: 3 });
+    store.finish(run.id, 'failed', null, 'Failure');
+    store.updateGeneralSettings({ agentTimeLimitMinutes: 4 });
+    expect(store.retry(run.id)).toMatchObject({ turn: 3, timeLimitMinutes: 4 });
+  });
+});
+
+test('a timed-out workflow stage resumes its saved session with a fresh deadline', () => {
+  store.updateGeneralSettings({ agentTimeLimitMinutes: 1 });
+  const worker = store.createWorker({ name: 'Worker', provider: 'codex', effort: 'default', communicationStyle: '', avatarUrl: null });
+  const task = store.createTask(input({ steps: [1, 2].map(n => ({ workerId: worker.id, title: `Step ${n}`, instruction: 'Work.' })) }));
+  const run = store.startManual(task.id, true);
+  store.setSession(run.id, 'timeout-stage-session');
+  store.finish(run.id, 'failed', null, 'Превышен лимит времени 1 мин; CLI остановлен');
+  store.updateGeneralSettings({ agentTimeLimitMinutes: 2 });
+  const resumed = store.resume(run.id, 'Continue');
+  expect(resumed).toMatchObject({ status: 'running', sessionId: 'timeout-stage-session', turn: 2, timeLimitMinutes: 2 });
+  expect(resumed.steps[0]).toMatchObject({ status: 'running', sessionId: 'timeout-stage-session' });
+  expect(store.finish(run.id, 'completed', 'Done', null)).toMatchObject({ currentStepIndex: 1 });
+});
