@@ -6,7 +6,7 @@
   import { DEFAULT_TASK_PRIORITY, TASK_PRIORITIES, TASK_PRIORITY_LABELS } from './priority';
   import type { AutopilotInput, AutopilotOverview, AutopilotSettings, Run, Task, TaskStatus } from './types';
 
-  let { tasks, settings, checksRequired, notify, onopen, onchanged, onsettings }: {
+  let { tasks, settings, checksRequired, notify, onopen, onchanged, onsettings, onstatus }: {
     tasks: Task[];
     settings: AutopilotSettings | null;
     checksRequired: boolean;
@@ -14,6 +14,7 @@
     onopen: (task: Task) => void;
     onchanged: (task: Task) => void;
     onsettings: (section: 'autopilot' | 'permissions') => void;
+    onstatus: (enabled: boolean | null) => void;
   } = $props();
   let overview = $state<AutopilotOverview | null>(null);
   let loading = $state(true);
@@ -82,6 +83,7 @@
 
   function apply(result: AutopilotOverview) {
     overview = result;
+    onstatus(result.enabled);
     error = '';
     loading = false;
     if (formInitialized) return;
@@ -99,7 +101,7 @@
       if (!alive || readSequence !== sequence) return;
       apply(result);
     } catch (failure) {
-      if (alive && readSequence === sequence) { error = message(failure); loading = false; }
+      if (alive && readSequence === sequence) { error = message(failure); loading = false; onstatus(null); }
     } finally { reading = false; }
   }
 
