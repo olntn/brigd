@@ -61,7 +61,7 @@ test('English interface shows no Russian on pages and settings sections', async 
   await page.addInitScript(() => localStorage.setItem('brigd.locale', 'en'));
   await emptyLists(page);
   await openApp(page, 'New task');
-  for (const name of ['Tasks', 'Autopilot', 'Workers', 'Instructions', 'Docs', 'Tags', 'Archive']) {
+  for (const name of ['Tasks', 'Analytics', 'Autopilot', 'Workers', 'Instructions', 'Docs', 'Tags', 'Archive']) {
     await page.getByRole('button', { name, exact: true }).click();
     await page.waitForLoadState('networkidle');
     expect(await russianText(page), `${name} page`).toEqual([]);

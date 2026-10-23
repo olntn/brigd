@@ -15,6 +15,7 @@
   import Instructions from './lib/Instructions.svelte';
   import Docs from './lib/Docs.svelte';
   import Autopilot from './lib/Autopilot.svelte';
+  import Analytics from './lib/Analytics.svelte';
   import CliSetup from './lib/CliSetup.svelte';
   import { TASK_STATUS_LABELS } from './lib/status';
   import Tags from './lib/Tags.svelte';
@@ -49,7 +50,7 @@
   type View = 'board' | 'list';
   let info = $state<AppInfo | null>(null);
   let tasks = $state<Task[]>([]);
-  let page = $state<'tasks' | 'autopilot' | 'workers' | 'instructions' | 'docs' | 'tags' | 'archive'>(location.hash.startsWith('#/docs') ? 'docs' : 'tasks');
+  let page = $state<'tasks' | 'analytics' | 'autopilot' | 'workers' | 'instructions' | 'docs' | 'tags' | 'archive'>(location.hash.startsWith('#/docs') ? 'docs' : 'tasks');
   let tags = $state<Tag[]>([]);
   let tagsLoading = $state(true);
   let tagsError = $state('');
@@ -1206,6 +1207,7 @@
     <a class="brand" href="/" aria-label={t('brigd — главная')}><span class="brand-symbol"><BrigLogo size={28} /></span><span>brigd<span class="brand-dot">.</span></span></a>
     <nav class="main-nav" aria-label={t('Задачи')}>
       <button class:active={page === 'tasks'} aria-label={t('Задачи')} onclick={() => { page = 'tasks'; resetFilters(); }}><Icon name="board" /><span>{t('Задачи')}</span></button>
+      <button class:active={page === 'analytics'} aria-label={t('Аналитика')} onclick={() => { page = 'analytics'; }}><Icon name="chart" /><span>{t('Аналитика')}</span></button>
       <button class:active={page === 'autopilot'} aria-label={t('Автопилот')} aria-describedby="autopilot-nav-status" title={t('Автопилот: {status}', { status: autopilotStatusLabel.toLowerCase() })} onclick={() => { page = 'autopilot'; }}>
         <Icon name="moon" /><span class="autopilot-nav-label"><span>{t('Автопилот')}</span><span class="autopilot-nav-status" class:is-enabled={autopilotEnabled === true} class:is-unknown={autopilotEnabled === null} aria-hidden="true"></span></span><span id="autopilot-nav-status" class="sr-only">{autopilotStatusLabel}</span>
       </button>
@@ -1226,6 +1228,8 @@
         <Instructions {notify} />
       {:else if page === 'docs'}
         <Docs {notify} onopentask={(id) => { void openTaskById(id); }} />
+      {:else if page === 'analytics'}
+        <Analytics {tasks} {loading} error={connectionError} onreload={loadTasks} />
       {:else if page === 'autopilot'}
         <Autopilot {tasks} {notify} settings={autopilotSettings} checksRequired={info?.mode !== 'mock'} onopen={openTask} onchanged={taskChanged} onsettings={openSettings} onstatus={autopilotStatusChanged} onoverview={observeAutopilot} />
       {:else if page === 'tags'}
