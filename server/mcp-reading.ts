@@ -32,10 +32,10 @@ export function readMcpTask(store: Store, name: string, raw: unknown): TaskToolR
   const offset = args.offset as number | undefined ?? 0, limit = args.limit as number | undefined ?? 20;
   if (name === 'get_task') {
     const attachments = store.listTaskAttachments(task.id);
-    const { id, title, instruction, status, archivedAt, provider, cwd, schedule, paused, intervalMinutes, firstRunAt, nextRunAt,
+    const { id, title, instruction, status, archivedAt, provider, cwd, schedule, paused, intervalMinutes, firstRunAt, timeOfDay, weekdays, timeZone, nextRunAt,
       workerId, tagIds, steps, createdAt, updatedAt, ultracode, priority } = task;
     return text({ task: { id, title, instruction, status, archived: archivedAt !== null, provider, cwd, schedule, paused,
-      intervalMinutes, firstRunAt, nextRunAt, workerId, tagIds, steps, createdAt, updatedAt, ultracode, priority,
+      intervalMinutes, firstRunAt, timeOfDay, weekdays, timeZone, nextRunAt, workerId, tagIds, steps, createdAt, updatedAt, ultracode, priority,
       latestRunId: task.latestRun?.id ?? null, hasCompletedRun: task.hasCompletedRun ?? false },
     attachments: attachments.slice(0, 20).map(metadata), attachment_count: attachments.length, next_offset: attachments.length > 20 ? 20 : null });
   }

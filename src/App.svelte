@@ -38,11 +38,12 @@
   import { localWorker } from './lib/worker-label';
   import { tagColorStyle } from './lib/tags';
   import { DEFAULT_TASK_PRIORITY, TASK_PRIORITIES, TASK_PRIORITY_LABELS } from './lib/priority';
+  import { isTimeOfDay, WEEKDAY_LABELS, WEEKDAY_NAMES, WEEKDAYS, WORKDAYS, type Weekday } from './lib/schedule';
   import { followupTargets, followupFingerprint, followupStage, runWorkflowSteps, taskHasCompletedRun, resolveFollowupTarget, followupSessionKey, type FollowupTarget } from './lib/followups';
   import { applyTheme, readTheme, saveTheme, themes, themeStorageKey, type Theme } from './lib/theme';
   import { applyLocale, formatDate, getLocale, localeStorageKey, locales, plural, readLocale, saveLocale, serverText, setLocale, t, tk, type Locale } from './lib/i18n';
   import { subscribe } from './lib/events';
-  import type { AppInfo, Attachment, AutopilotSettings as AutopilotSettingsValue, AutopilotState, Comment, FollowupInput, GeneralSettings as GeneralSettingsValue, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskPriority, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
+  import type { AppInfo, Attachment, AutopilotSettings as AutopilotSettingsValue, AutopilotState, Comment, FollowupInput, GeneralSettings as GeneralSettingsValue, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskPriority, TaskSchedule, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
 
   type Scope = 'all' | 'scheduled' | 'autopilot' | 'attention' | 'completed';
   type View = 'board' | 'list';
@@ -177,8 +178,11 @@
   let answerComposer = $state<AttachmentComposer>();
   let formOriginalWorker = $state<Worker | null>(null);
   let formCwd = $state('');
-  let formSchedule = $state<'manual' | 'interval' | 'auto'>('manual');
+  let formSchedule = $state<TaskSchedule>('manual');
   let formInterval = $state(60);
+  let formTimeOfDay = $state('09:00');
+  let formWeekdays = $state<number[]>([...WEEKDAYS]);
+  let formTimeZone = $state('');
   let formTimeLimitMinutes = $state<number | undefined>();
   let formFirstRun = $state('');
   let formPaused = $state(false);
@@ -189,6 +193,8 @@
   let toastTimer: ReturnType<typeof setTimeout>;
 
   const labels = TASK_STATUS_LABELS;
+  /** Saved into a new daily card, so a server in another zone (often UTC in a container) runs it at this browser's local time. */
+  const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const columnData: { status: TaskStatus; title: string; icon: string; empty: string }[] = [
     { status: 'ready', title: tk('К запуску'), icon: 'circle', empty: tk('Следующая идея начинается здесь') },
     { status: 'running', title: tk('В работе'), icon: 'bolt', empty: tk('Агенты готовы к работе') },
@@ -210,7 +216,7 @@
     const query = search.trim().toLocaleLowerCase();
     return (provider === 'all' || taskProviders(task).includes(provider))
       && matchesTag(task, tagFilter)
-      && (scope === 'all' || (scope === 'scheduled' && task.schedule === 'interval') || (scope === 'attention' && (attentionStatuses.includes(task.status) || dependencyProblem(task))) || (scope === 'completed' && task.status === 'completed') || (scope === 'autopilot' && task.schedule === 'auto'))
+      && (scope === 'all' || (scope === 'scheduled' && timedSchedule(task)) || (scope === 'attention' && (attentionStatuses.includes(task.status) || dependencyProblem(task))) || (scope === 'completed' && task.status === 'completed') || (scope === 'autopilot' && task.schedule === 'auto'))
       && (!query || `${task.title} ${task.instruction} ${task.cwd} ${task.worker?.name ?? ''} ${task.latestRun?.worker?.name ?? ''} ${(task.steps ?? []).map(step => `${step.title} ${workers.find(worker => worker.id === step.workerId)?.name ?? ''}`).join(' ')} ${(task.latestRun?.steps ?? []).map(step => `${step.title} ${step.worker.name}`).join(' ')}`.toLocaleLowerCase().includes(query));
   }));
   let problemTasks = $derived(filtered.filter(task => problemStatuses.includes(task.status) || dependencyProblem(task)).sort((a, b) => problemStatuses.indexOf(a.status) - problemStatuses.indexOf(b.status)));
@@ -684,6 +690,10 @@
     formCwd = task?.cwd ?? generalSettings?.defaultCwd ?? info?.cwd ?? '';
     formSchedule = task?.schedule ?? generalSettings?.defaultSchedule ?? 'manual';
     formInterval = task?.intervalMinutes ?? 60;
+    formTimeOfDay = task?.timeOfDay ?? '09:00';
+    formWeekdays = [...(task?.weekdays ?? WEEKDAYS)];
+    // A saved card keeps the zone it was planned in; a new one is planned in this browser's zone.
+    formTimeZone = task?.timeZone ?? browserTimeZone;
     formTimeLimitMinutes = task?.timeLimitMinutes ?? undefined;
     formFirstRun = localInputDate(task?.firstRunAt ?? null);
     formPaused = task?.paused ?? false;
@@ -713,6 +723,8 @@
     }
     const firstRunAt = formSchedule === 'interval' && formFirstRun ? new Date(formFirstRun).getTime() : null;
     if (firstRunAt !== null && !Number.isFinite(firstRunAt)) { formError = t('Проверьте время первого запуска.'); return; }
+    if (formSchedule === 'daily' && !isTimeOfDay(formTimeOfDay)) { formError = t('Укажите время запуска в формате ЧЧ:ММ.'); return; }
+    if (formSchedule === 'daily' && !formWeekdays.length) { formError = t('Выберите хотя бы один день недели.'); return; }
     if (formComplex && (formSteps.length < WORKFLOW_MIN_STEPS || formSteps.length > WORKFLOW_MAX_STEPS)) { formError = t('В сложной задаче должно быть от 2 до 20 этапов.'); return; }
     if (formComplex && formSteps.some(step => !step.title.trim() || !step.instruction.trim() || !step.workerId)) { formError = t('Укажите название, работника и задание каждого этапа.'); return; }
     if (formComplex && formSteps.some(step => !workers.some(worker => worker.id === step.workerId && (!worker.archived || formOriginalStepWorkers.includes(worker.id))))) { formError = t('Проверьте работников этапов: недоступного или нового архивного работника нужно заменить.'); return; }
@@ -725,6 +737,9 @@
       steps: formComplex ? formSteps.map(({ workerId, title, instruction }) => ({ workerId, title: title.trim(), instruction: instruction.trim() })) : [],
       schedule: formSchedule, intervalMinutes: formSchedule === 'interval' ? formInterval : null,
       firstRunAt, paused: formPaused,
+      timeOfDay: formSchedule === 'daily' ? formTimeOfDay : null,
+      weekdays: formSchedule === 'daily' ? [...formWeekdays].sort((a, b) => a - b) : null,
+      timeZone: formSchedule === 'daily' ? formTimeZone : null,
       timeLimitMinutes: formTimeLimitMinutes ?? null,
       ultracode: formUltracode,
       priority: formPriority,
@@ -992,12 +1007,32 @@
     return t('Каждые {count} мин.', { count: minutes });
   }
 
+  function weekdaysLabel(days: readonly number[]): string {
+    if (days.length === WEEKDAYS.length) return t('Каждый день');
+    if (days.join() === WORKDAYS.join()) return t('По будням');
+    if (days.join() === '6,7') return t('По выходным');
+    return days.map(day => t(WEEKDAY_LABELS[day as Weekday])).join(', ');
+  }
+  /** The time is the card's own zone; it is named only when this browser is elsewhere. */
+  function dailyLabel(task: Task): string {
+    const label = t('{days} в {time}', { days: weekdaysLabel(task.weekdays ?? WEEKDAYS), time: task.timeOfDay ?? '' });
+    return task.timeZone && task.timeZone !== browserTimeZone ? `${label} (${task.timeZone})` : label;
+  }
   function scheduleLabel(task: Task, short = false): string {
     if (task.schedule === 'auto') return task.paused ? t('Автопилот: отложено') : t('Автопилот');
     if (task.paused) return short ? t('На паузе') : t('Расписание на паузе');
-    return task.schedule === 'interval' ? intervalLabel(task.intervalMinutes) : t('Вручную');
+    return task.schedule === 'interval' ? intervalLabel(task.intervalMinutes) : task.schedule === 'daily' ? dailyLabel(task) : t('Вручную');
   }
-  function scheduleIcon(task: Task): string { return task.paused ? 'pause' : task.schedule === 'interval' ? 'clock' : task.schedule === 'auto' ? 'moon' : 'play'; }
+  function scheduleIcon(task: Task): string { return task.paused ? 'pause' : task.schedule === 'interval' ? 'clock' : task.schedule === 'daily' ? 'calendar' : task.schedule === 'auto' ? 'moon' : 'play'; }
+  function timedSchedule(task: Task) { return task.schedule === 'interval' || task.schedule === 'daily'; }
+  /** Shown in this browser's local time, with the weekday a daily schedule depends on. */
+  function upcomingRun(task: Task): string | null {
+    if (!timedSchedule(task) || !task.nextRunAt || task.paused || task.archivedAt !== null) return null;
+    return t('Следующий запуск: {time}', { time: formatDate(task.nextRunAt, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) });
+  }
+  function toggleWeekday(day: number) {
+    formWeekdays = formWeekdays.includes(day) ? formWeekdays.filter(item => item !== day) : [...formWeekdays, day].sort((a, b) => a - b);
+  }
   function taskIsOccupied(task: Task) { return activeStatuses.includes(task.status) || !!task.latestRun?.steps?.length && ['failed', 'blocked'].includes(task.status); }
   function canStartManual(task: Task) { return !taskIsOccupied(task) && !taskHasCompletedRun(task); }
   function workflowSteps(task: Task) { const saved = runWorkflowSteps(task.latestRun); return saved.length ? saved : task.steps ?? []; }
@@ -1137,6 +1172,7 @@
       <p class="card-description">{task.latestRun?.summary || task.instruction}</p>
       {@render taskTags(task)}
       {#if workflowSteps(task).length}<div class="card-workflow-progress"><Icon name="list" size={14} /><span>{workflowProgress(task)}</span></div>{/if}
+      {#if upcomingRun(task)}<div class="card-next-run"><Icon name="clock" size={13} /><span>{upcomingRun(task)}</span></div>{/if}
       {#if task.latestRun?.followup?.checkFailure}<div class="card-followup-label"><Icon name="refresh" size={14} /><span>{t('Возврат после упавшей проверки · {round} из {limit}', { round: task.latestRun.followup.checkFailure.round, limit: CHECK_HANDBACK_LIMIT })}</span></div>
       {:else if task.latestRun?.followup}<div class="card-followup-label"><Icon name="message" size={14} /><span>{t('Дополнительный запрос')}{#if followupStage(task.latestRun)} · {t('Этап {number}', { number: followupStage(task.latestRun)!.index + 1 })}{/if}</span></div>
       {:else if task.latestRun?.reconcile}<div class="card-followup-label"><Icon name="refresh" size={14} /><span>{t('Разрешение конфликта слияния')}</span></div>{/if}
@@ -1253,7 +1289,7 @@
             {/each}
           </div>
         {:else}
-          <div class="task-list"><div class="list-heading"><span>{t('ЗАДАЧА')}</span><span>{t('АГЕНТ')}</span><span>{t('СТАТУС')}</span><span>{t('ЗАПУСК')}</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row" class:dependency-problem={dependencyProblem(task)}><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : task.schedule === 'auto' ? 'moon' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}{@render priorityBadge(task.priority)}{/if}{shortPath(task.cwd)}</small>{@render taskTags(task)}{#if task.latestRun?.followup?.checkFailure}<small class="list-followup-label">{t('Возврат после упавшей проверки · {round} из {limit}', { round: task.latestRun.followup.checkFailure.round, limit: CHECK_HANDBACK_LIMIT })}</small>{:else if task.latestRun?.followup}<small class="list-followup-label">{t('Дополнительный запрос')}{#if followupStage(task.latestRun)} · {t('Этап {number}', { number: followupStage(task.latestRun)!.index + 1 })}{/if}</small>{/if}{#if passedOnRetry(task.latestRun?.integration?.triage)}<small class="list-flaky-label">{t('Проверка прошла со второй попытки')}</small>{/if}{#if workflowSteps(task).length}<small class="list-workflow-progress">{workflowProgress(task)}</small>{/if}{#if task.latestRun?.progress}<small class="list-progress" title={t('Статус выполнения: {text}', { text: task.latestRun.progress.text })}>{task.latestRun.progress.text}</small>{/if}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{scheduleLabel(task, true)}</span><button class="icon-button" aria-label={t('Открыть: {title}', { title: task.title })} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>{t('Новые задачи появятся здесь')}</span></div>{/each}</div>
+          <div class="task-list"><div class="list-heading"><span>{t('ЗАДАЧА')}</span><span>{t('АГЕНТ')}</span><span>{t('СТАТУС')}</span><span>{t('ЗАПУСК')}</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row" class:dependency-problem={dependencyProblem(task)}><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : task.schedule === 'daily' ? 'calendar' : task.schedule === 'auto' ? 'moon' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}{@render priorityBadge(task.priority)}{/if}{shortPath(task.cwd)}</small>{@render taskTags(task)}{#if task.latestRun?.followup?.checkFailure}<small class="list-followup-label">{t('Возврат после упавшей проверки · {round} из {limit}', { round: task.latestRun.followup.checkFailure.round, limit: CHECK_HANDBACK_LIMIT })}</small>{:else if task.latestRun?.followup}<small class="list-followup-label">{t('Дополнительный запрос')}{#if followupStage(task.latestRun)} · {t('Этап {number}', { number: followupStage(task.latestRun)!.index + 1 })}{/if}</small>{/if}{#if passedOnRetry(task.latestRun?.integration?.triage)}<small class="list-flaky-label">{t('Проверка прошла со второй попытки')}</small>{/if}{#if workflowSteps(task).length}<small class="list-workflow-progress">{workflowProgress(task)}</small>{/if}{#if task.latestRun?.progress}<small class="list-progress" title={t('Статус выполнения: {text}', { text: task.latestRun.progress.text })}>{task.latestRun.progress.text}</small>{/if}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule" title={upcomingRun(task) ?? undefined}>{scheduleLabel(task, true)}</span><button class="icon-button" aria-label={t('Открыть: {title}', { title: task.title })} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>{t('Новые задачи появятся здесь')}</span></div>{/each}</div>
         {/if}
       {/if}
       {/if}
@@ -1274,7 +1310,7 @@
       <div class="drawer-heading">
         <h2 id="detail-title">{selectedTask.title}</h2><p class="detail-created">{t('Создано {time}', { time: dateTime(selectedTask.createdAt) })}</p>
         {#if currentRun?.progress}<p class="detail-progress" role="status"><Icon name="refresh" size={14} class="spin" /><span><strong>{t('Статус выполнения:')}</strong> {currentRun.progress.text}{' · '}<time datetime={new Date(currentRun.progress.updatedAt).toISOString()}>{t('с {time}', { time: clockTime(currentRun.progress.updatedAt) })}</time></span></p>{/if}
-        {#if selectedTask.nextRunAt && !selectedTask.paused && selectedTask.archivedAt === null}<p class="detail-next-run"><Icon name="clock" size={14} /><span>{t('Следующий запуск {time}', { time: dateTime(selectedTask.nextRunAt) })}</span></p>{/if}
+        {#if upcomingRun(selectedTask)}<p class="detail-next-run"><Icon name={scheduleIcon(selectedTask)} size={14} /><span>{upcomingRun(selectedTask)}</span></p>{/if}
         <div class="detail-actions">
           {#if selectedTask.archivedAt !== null}
             <button class="button primary" disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'restore')}><Icon name={taskBusy ? 'refresh' : 'restore'} size={15} class={taskBusy ? 'spin' : ''} />{t('Восстановить')}</button>
@@ -1339,7 +1375,7 @@
         </section>
       {:else if currentRun?.steps?.length}<div class="current-workflow"><WorkflowChecklist run={currentRun} /></div>{/if}
       {#if selectedTask.steps?.length}
-        <details class="workflow-template" open={!currentRun}><summary>{currentRun && selectedTask.schedule === 'interval' ? t('План следующего запуска по расписанию') : t('План задачи')}</summary><p class="workflow-help">{t('Все работники используют общую рабочую папку, цель задачи и общие инструкции. Этапы идут по порядку.')}</p><ol>{#each selectedTask.steps as step}{@const worker = workers.find(worker => worker.id === step.workerId)}<li><strong>{step.title}</strong><div class="workflow-template-worker">{#if worker}<WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={36} /><span>{worker.name}{#if worker.description?.trim()}<small class="worker-description">{worker.description}</small>{/if}</span>{:else}<span>{t('Работник недоступен')}</span>{/if}</div><p>{step.instruction}</p></li>{/each}</ol></details>
+        <details class="workflow-template" open={!currentRun}><summary>{currentRun && timedSchedule(selectedTask) ? t('План следующего запуска по расписанию') : t('План задачи')}</summary><p class="workflow-help">{t('Все работники используют общую рабочую папку, цель задачи и общие инструкции. Этапы идут по порядку.')}</p><ol>{#each selectedTask.steps as step}{@const worker = workers.find(worker => worker.id === step.workerId)}<li><strong>{step.title}</strong><div class="workflow-template-worker">{#if worker}<WorkerAvatar name={worker.name} avatarUrl={worker.avatarUrl} size={36} /><span>{worker.name}{#if worker.description?.trim()}<small class="worker-description">{worker.description}</small>{/if}</span>{:else}<span>{t('Работник недоступен')}</span>{/if}</div><p>{step.instruction}</p></li>{/each}</ol></details>
       {/if}
       {#if currentRun}<div class="current-run-instructions">{@render instructionSnapshot(currentRun)}</div>{/if}
       {#if currentRun}{@render workspaceNote(currentRun)}{/if}
@@ -1539,7 +1575,7 @@
         {#if workersError}<div class="field-warning"><span>{t('Не удалось обновить список работников.')} {!formComplex ? t('Можно выбрать модель вручную.') : t('Проверьте подключения и повторите загрузку.')}</span><button type="button" onclick={() => { void loadWorkers(); }}>{t('Повторить')}</button></div>{/if}
         <label class="form-field"><span>{t('Рабочая папка')} <span class="required">*</span></span><div class="input-with-icon"><Icon name="folder" size={16} /><input bind:value={formCwd} name="cwd" maxlength="4096" placeholder="/workspace/projects/my-project" required disabled={submitting} spellcheck="false" /></div><small>{formComplex ? t('Одна общая папка для всех этапов. Следующий работник увидит файлы предыдущего.') : t('Абсолютный путь к папке, в которой будет работать агент.')}</small></label>
         <label class="form-field"><span>{t('Лимит времени, мин')}</span><input type="number" name="timeLimitMinutes" min="1" max="1440" step="1" bind:value={formTimeLimitMinutes} disabled={submitting} /><small>{t('Пусто — общая настройка. Лимит фиксируется отдельно для каждого нового хода агента.')}</small></label>
-        <div class="schedule-section"><div class="schedule-title"><span class="schedule-title-icon"><Icon name="clock" size={18} /></span><div><strong>{t('Когда запускать')}</strong><span>{t('Вручную, регулярно или из очереди автопилота')}</span></div></div><div class="schedule-switch"><button type="button" class:selected={formSchedule === 'auto'} aria-pressed={formSchedule === 'auto'} disabled={submitting} onclick={() => formSchedule = 'auto'}><Icon name="moon" size={14} />{t('Автопилот')}</button><button type="button" class:selected={formSchedule === 'manual'} aria-pressed={formSchedule === 'manual'} disabled={submitting} onclick={() => formSchedule = 'manual'}><Icon name="play" size={14} />{t('Вручную')}</button><button type="button" class:selected={formSchedule === 'interval'} aria-pressed={formSchedule === 'interval'} disabled={submitting} onclick={() => formSchedule = 'interval'}><Icon name="clock" size={14} />{t('По расписанию')}</button></div>{#if formSchedule === 'interval'}<div class="schedule-fields"><label class="form-field"><span>{t('Повторять каждые')}</span><div class="input-suffix"><input type="number" bind:value={formInterval} name="intervalMinutes" min="1" max="525600" step="1" required disabled={submitting} /><span>{t('минут')}</span></div></label><label class="form-field"><span>{t('Первый запуск')}</span><input type="datetime-local" bind:value={formFirstRun} name="firstRunAt" disabled={submitting} /><small>{t('Пусто: сразу после сохранения. Местное время.')}</small></label></div><label class="pause-option"><input type="checkbox" bind:checked={formPaused} disabled={submitting} /><span>{t('Сохранить расписание на паузе')}</span></label><p class="schedule-note">{t('Планировщик работает, пока запущен сервер brigd. Активные запуски одной задачи не накладываются.')}</p>{/if}{#if formSchedule === 'auto'}<label class="pause-option"><input type="checkbox" bind:checked={formPaused} disabled={submitting} /><span>{t('Пока отложить: не брать из очереди')}</span></label><p class="schedule-note">{t('Задача встанет в очередь автопилота и запустится, когда дойдёт её очередь и освободится место. Включить автопилот на ночь можно в разделе «Автопилот».')}</p>{/if}</div>
+        <div class="schedule-section"><div class="schedule-title"><span class="schedule-title-icon"><Icon name="clock" size={18} /></span><div><strong>{t('Когда запускать')}</strong><span>{t('Вручную, с интервалом, в заданное время или из очереди автопилота')}</span></div></div><div class="schedule-switch"><button type="button" class:selected={formSchedule === 'auto'} aria-pressed={formSchedule === 'auto'} disabled={submitting} onclick={() => formSchedule = 'auto'}><Icon name="moon" size={14} />{t('Автопилот')}</button><button type="button" class:selected={formSchedule === 'manual'} aria-pressed={formSchedule === 'manual'} disabled={submitting} onclick={() => formSchedule = 'manual'}><Icon name="play" size={14} />{t('Вручную')}</button><button type="button" class:selected={formSchedule === 'interval'} aria-pressed={formSchedule === 'interval'} disabled={submitting} onclick={() => formSchedule = 'interval'}><Icon name="clock" size={14} />{t('По расписанию')}</button><button type="button" class:selected={formSchedule === 'daily'} aria-pressed={formSchedule === 'daily'} disabled={submitting} onclick={() => formSchedule = 'daily'}><Icon name="calendar" size={14} />{t('По времени')}</button></div>{#if formSchedule === 'interval'}<div class="schedule-fields"><label class="form-field"><span>{t('Повторять каждые')}</span><div class="input-suffix"><input type="number" bind:value={formInterval} name="intervalMinutes" min="1" max="525600" step="1" required disabled={submitting} /><span>{t('минут')}</span></div></label><label class="form-field"><span>{t('Первый запуск')}</span><input type="datetime-local" bind:value={formFirstRun} name="firstRunAt" disabled={submitting} /><small>{t('Пусто: сразу после сохранения. Местное время.')}</small></label></div>{/if}{#if formSchedule === 'daily'}<div class="schedule-fields"><label class="form-field"><span>{t('Время запуска')}</span><input type="time" bind:value={formTimeOfDay} name="timeOfDay" required disabled={submitting} /><small>{t('Часовой пояс: {zone}', { zone: formTimeZone })}{#if formTimeZone !== browserTimeZone}{' '}<button type="button" class="inline-link" disabled={submitting} onclick={() => { formTimeZone = browserTimeZone; }}>{t('Использовать пояс браузера: {zone}', { zone: browserTimeZone })}</button>{/if}</small></label><div class="form-field weekday-field"><span id="task-weekdays-label">{t('Дни недели')}</span><div class="weekday-chips" role="group" aria-labelledby="task-weekdays-label">{#each WEEKDAYS as day (day)}<button type="button" class="weekday-chip" class:selected={formWeekdays.includes(day)} aria-pressed={formWeekdays.includes(day)} aria-label={t(WEEKDAY_NAMES[day])} title={t(WEEKDAY_NAMES[day])} disabled={submitting} onclick={() => toggleWeekday(day)}>{t(WEEKDAY_LABELS[day])}</button>{/each}</div><small>{t('Если сервис был остановлен в это время, пропущенный запуск выполнится один раз после старта.')}</small></div></div>{/if}{#if formSchedule === 'interval' || formSchedule === 'daily'}<label class="pause-option"><input type="checkbox" bind:checked={formPaused} disabled={submitting} /><span>{t('Сохранить расписание на паузе')}</span></label><p class="schedule-note">{t('Планировщик работает, пока запущен сервер brigd. Активные запуски одной задачи не накладываются.')}</p>{/if}{#if formSchedule === 'auto'}<label class="pause-option"><input type="checkbox" bind:checked={formPaused} disabled={submitting} /><span>{t('Пока отложить: не брать из очереди')}</span></label><p class="schedule-note">{t('Задача встанет в очередь автопилота и запустится, когда дойдёт её очередь и освободится место. Включить автопилот на ночь можно в разделе «Автопилот».')}</p>{/if}</div>
         {#if info?.mode === 'mock'}<div class="editor-mode-note"><Icon name="spark" size={14} /><span>{t('Демо-режим: реальные CLI не вызываются.')}</span></div>{:else}<div class="editor-mode-note"><Icon name="terminal" size={14} /><span>{t('Агент может изменять файлы в рабочей папке согласно инструкции.')}</span></div>{/if}
       </div>
       <footer class="editor-footer"><button type="button" class="button secondary" onclick={closeEditor} disabled={submitting}>{t('Отмена')}</button><button type="submit" class="button primary" disabled={submitting || formUploading || formAttachmentInvalid}>{#if submitting}<Icon name="refresh" class="spin" size={16} />{:else}<Icon name={editingId ? 'check' : 'plus'} size={16} />{/if}{submitting ? t('Сохраняем…') : editingId ? t('Сохранить изменения') : t('Создать задачу')}</button></footer>

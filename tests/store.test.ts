@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { AppError, nextOccurrence, Store } from '../server/store';
+import { AppError, firstDailyRun, nextDailyOccurrence, nextOccurrence, Store } from '../server/store';
 import { TABLE_SCOPES, writeScopes } from '../server/changes';
 import type { ChangeScope } from '../src/lib/change-scopes';
 import type { RunStatus, TaskInput, TaskPriority } from '../src/lib/types';
@@ -290,6 +290,140 @@ describe('recurrence and durable scheduling', () => {
       await Promise.all(children.map(({ child }) => child.exited));
     }
   }, 10_000);
+});
+
+describe('daily schedules', () => {
+  const EVERY_DAY = [1, 2, 3, 4, 5, 6, 7];
+  const WORKDAYS = [1, 2, 3, 4, 5];
+  // Saturday 24 October 2026, 12:00 in Moscow (UTC+3 all year).
+  const SATURDAY = Date.UTC(2026, 9, 24, 9);
+  const moscow = (day: number, hour: number) => Date.UTC(2026, 9, day, hour - 3);
+  const daily = (patch: Partial<TaskInput> = {}) => input({ schedule: 'daily', timeOfDay: '02:00', weekdays: WORKDAYS, timeZone: 'Europe/Moscow', ...patch });
+
+  test.each([
+    ['Europe/Moscow', '02:00', WORKDAYS, SATURDAY, moscow(23, 2), moscow(26, 2)],
+    ['UTC', '09:00', EVERY_DAY, Date.UTC(2026, 9, 23, 9), Date.UTC(2026, 9, 23, 9), Date.UTC(2026, 9, 24, 9)],
+    ['Asia/Kathmandu', '00:00', EVERY_DAY, Date.UTC(2026, 9, 3), Date.UTC(2026, 9, 2, 18, 15), Date.UTC(2026, 9, 3, 18, 15)],
+    ['America/New_York', '09:00', [7], Date.UTC(2026, 9, 31, 12), Date.UTC(2026, 9, 25, 13), Date.UTC(2026, 10, 1, 14)],
+    ['Asia/Tokyo', '10:00', [1, 4], SATURDAY, Date.UTC(2026, 9, 22, 1), Date.UTC(2026, 9, 26, 1)],
+  ])('%s at %s on %j: the latest occurrence up to now and the next one', (timeZone, timeOfDay, weekdays, now, latest, next) => {
+    expect(nextDailyOccurrence(0, { timeOfDay, weekdays, timeZone }, now)).toEqual({ latest, next });
+  });
+
+  test.each([
+    ['a time skipped by spring-forward runs as late as the jump', 'Europe/Berlin', '02:30', Date.UTC(2026, 2, 28, 12), Date.UTC(2026, 2, 29, 1, 30)],
+    ['the day after the jump keeps the local time', 'Europe/Berlin', '02:30', Date.UTC(2026, 2, 29, 1, 30), Date.UTC(2026, 2, 30, 0, 30)],
+    ['a time repeated by fall-back runs at its first occurrence', 'Europe/Berlin', '02:30', Date.UTC(2026, 9, 24, 12), Date.UTC(2026, 9, 25, 0, 30)],
+    ['the repeated hour does not run a second time', 'Europe/Berlin', '02:30', Date.UTC(2026, 9, 25, 0, 30), Date.UTC(2026, 9, 26, 1, 30)],
+    ['a New York spring-forward gap', 'America/New_York', '02:30', Date.UTC(2026, 2, 7, 12), Date.UTC(2026, 2, 8, 7, 30)],
+    ['a New York repeated hour, first pass', 'America/New_York', '01:30', Date.UTC(2026, 9, 31, 12), Date.UTC(2026, 10, 1, 5, 30)],
+    ['a New York repeated hour, then standard time', 'America/New_York', '01:30', Date.UTC(2026, 10, 1, 5, 30), Date.UTC(2026, 10, 2, 6, 30)],
+    ['a half-hour daylight saving shift', 'Australia/Lord_Howe', '02:15', Date.UTC(2026, 9, 3), Date.UTC(2026, 9, 3, 15, 45)],
+    ['a local date the zone skipped altogether', 'Pacific/Apia', '10:00', Date.UTC(2011, 11, 29, 21), Date.UTC(2011, 11, 30, 20)],
+  ])('%s (%s %s)', (_name, timeZone, timeOfDay, now, next) => {
+    expect(firstDailyRun({ timeOfDay, weekdays: EVERY_DAY, timeZone }, now)).toBe(next);
+  });
+
+  test('a long sleep still yields one latest occurrence; an unaligned due time is never moved back', () => {
+    const rule = { timeOfDay: '02:00', weekdays: WORKDAYS, timeZone: 'Europe/Moscow' };
+    expect(nextDailyOccurrence(Date.UTC(2020, 0, 1), rule, SATURDAY)).toEqual({ latest: moscow(23, 2), next: moscow(26, 2) });
+    expect(nextDailyOccurrence(moscow(23, 3), rule, SATURDAY)).toEqual({ latest: moscow(23, 3), next: moscow(26, 2) });
+  });
+
+  test('a weekday 02:00 Moscow card created on Saturday first runs on Monday, then on Tuesday', () => {
+    const task = store.createTask(daily(), SATURDAY);
+    expect(task).toMatchObject({ schedule: 'daily', timeOfDay: '02:00', weekdays: WORKDAYS, timeZone: 'Europe/Moscow', nextRunAt: moscow(26, 2) });
+    expect(store.createTask(input(), SATURDAY)).toMatchObject({ timeOfDay: null, weekdays: null, timeZone: null });
+    expect(store.claimDue(true, moscow(26, 2) - 1)).toEqual([]);
+    const [run] = store.claimDue(true, moscow(26, 2));
+    expect(run).toMatchObject({ taskId: task.id, trigger: 'schedule', scheduledFor: moscow(26, 2) });
+    expect(store.getTask(task.id).nextRunAt).toBe(moscow(27, 2));
+  });
+
+  test('the local time holds across daylight saving changes', () => {
+    const task = store.createTask(daily({ timeOfDay: '02:30', weekdays: EVERY_DAY, timeZone: 'Europe/Berlin' }), Date.UTC(2026, 2, 27, 12));
+    expect(task.nextRunAt).toBe(Date.UTC(2026, 2, 28, 1, 30));
+    for (const [due, next] of [[Date.UTC(2026, 2, 28, 1, 30), Date.UTC(2026, 2, 29, 1, 30)], [Date.UTC(2026, 2, 29, 1, 30), Date.UTC(2026, 2, 30, 0, 30)]]) {
+      const [run] = store.claimDue(true, due!);
+      expect(run?.scheduledFor).toBe(due!);
+      expect(store.getTask(task.id).nextRunAt).toBe(next!);
+      store.finish(run!.id, 'blocked', 'Done', null, due! + 1);
+    }
+  });
+
+  test('occurrences missed while the service slept produce one late run and no backlog', () => {
+    const task = store.createTask(daily(), SATURDAY);
+    const runs = store.claimDue(true, moscow(29, 15));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.scheduledFor).toBe(moscow(29, 2));
+    expect(store.getTask(task.id).nextRunAt).toBe(moscow(30, 2));
+    store.finish(runs[0]!.id, 'completed', 'Done', null, moscow(29, 16));
+    expect(store.claimDue(true, moscow(29, 16))).toEqual([]);
+    expect(store.claimDue(true, moscow(30, 2))[0]?.scheduledFor).toBe(moscow(30, 2));
+    expect(store.detail(task.id).runs).toHaveLength(2);
+  });
+
+  test('a busy or waiting card consumes its occurrences without queueing them', () => {
+    const task = store.createTask(daily(), SATURDAY);
+    const run = store.startManual(task.id, true, SATURDAY);
+    store.finish(run.id, 'waiting_input', 'Which branch?', null, SATURDAY + 1);
+    expect(store.claimDue(true, moscow(26, 2))).toEqual([]);
+    expect(store.getTask(task.id).nextRunAt).toBe(moscow(27, 2));
+    store.cancel(run.id, moscow(26, 3));
+    expect(store.claimDue(true, moscow(26, 4))).toEqual([]);
+    expect(store.claimDue(true, moscow(27, 2))).toHaveLength(1);
+  });
+
+  test('pause keeps the next time; resuming runs at most the latest missed occurrence', () => {
+    const task = store.createTask(daily({ paused: true }), SATURDAY);
+    expect(store.claimDue(true, moscow(28, 12))).toEqual([]);
+    expect(store.getTask(task.id).nextRunAt).toBe(moscow(26, 2));
+    store.updateTask(task.id, { ...store.getTask(task.id), paused: false }, moscow(28, 12));
+    expect(store.claimDue(true, moscow(28, 12)).map(run => run.scheduledFor)).toEqual([moscow(28, 2)]);
+    expect(store.getTask(task.id).nextRunAt).toBe(moscow(29, 2));
+  });
+
+  test('editing the time, days or zone recalculates the next run; other edits keep it; another schedule clears the fields', () => {
+    const task = store.createTask(daily(), SATURDAY);
+    expect(store.updateTask(task.id, { ...task, title: 'Renamed' }, SATURDAY + MINUTE).nextRunAt).toBe(moscow(26, 2));
+    expect(store.updateTask(task.id, { ...task, timeOfDay: '13:30' }, SATURDAY).nextRunAt).toBe(moscow(26, 13) + 30 * MINUTE);
+    expect(store.updateTask(task.id, { ...task, timeOfDay: '13:30', weekdays: [6] }, SATURDAY).nextRunAt).toBe(moscow(24, 13) + 30 * MINUTE);
+    expect(store.updateTask(task.id, { ...task, timeOfDay: '13:30', weekdays: [6], timeZone: 'Asia/Tokyo' }, SATURDAY).nextRunAt).toBe(Date.UTC(2026, 9, 31, 4, 30));
+    const manual = store.updateTask(task.id, input(), SATURDAY);
+    expect(manual).toMatchObject({ schedule: 'manual', timeOfDay: null, weekdays: null, timeZone: null, nextRunAt: null });
+    expectAppError(() => store.updateTask(task.id, daily({ timeOfDay: '25:00' }), SATURDAY), 400);
+    expectAppError(() => store.createTask(daily({ weekdays: [] }), SATURDAY), 400);
+    expectAppError(() => store.createTask(daily({ timeZone: 'Mars/Olympus_Mons' }), SATURDAY), 400);
+  });
+
+  test('restoring from the archive skips occurrences missed there', () => {
+    const task = store.createTask(daily(), SATURDAY);
+    store.archiveTask(task.id, SATURDAY);
+    expect(store.claimDue(true, moscow(28, 12))).toEqual([]);
+    expect(store.restoreTask(task.id, moscow(28, 12)).nextRunAt).toBe(moscow(29, 2));
+    expect(store.claimDue(true, moscow(28, 12))).toEqual([]);
+  });
+
+  test('daily fields survive reopening; an older database gains them and keeps interval cards unchanged', () => {
+    const scheduled = store.createTask(daily(), SATURDAY);
+    store.close();
+    store = new Store(join(folder, 'trackt.sqlite'));
+    expect(store.getTask(scheduled.id)).toEqual(scheduled);
+    store.close();
+    const legacyFolder = mkdtempSync(join(tmpdir(), 'trackt-store-legacy-'));
+    try {
+      let legacy = new Store(join(legacyFolder, 'trackt.sqlite'));
+      const interval = legacy.createTask(input({ schedule: 'interval', intervalMinutes: 5, firstRunAt: BASE }), BASE);
+      for (const column of ['time_of_day', 'weekdays', 'time_zone']) legacy.db.exec(`ALTER TABLE tasks DROP COLUMN ${column}`);
+      legacy.close();
+      legacy = new Store(join(legacyFolder, 'trackt.sqlite'));
+      expect(legacy.getTask(interval.id)).toEqual(interval);
+      expect(legacy.claimDue(true, BASE + 62 * MINUTE)[0]?.scheduledFor).toBe(BASE + 60 * MINUTE);
+      expect(legacy.createTask(daily(), SATURDAY).nextRunAt).toBe(moscow(26, 2));
+      legacy.close();
+    } finally { rmSync(legacyFolder, { recursive: true, force: true }); }
+    store = new Store(join(folder, 'trackt.sqlite'));
+  });
 });
 
 describe('run lifecycle and persistence', () => {

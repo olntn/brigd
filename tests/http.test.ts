@@ -281,6 +281,33 @@ describe('bounded JSON and task validation', () => {
     expect((await request('/api/tasks', 'POST', { ...valid(), schedule: 'interval', intervalMinutes: 5, firstRunAt })).status).toBe(400);
   });
 
+  test.each(['2:00', '24:00', '12:60', '12:00:00', '', null, 200])('rejects invalid daily time %j', async timeOfDay => {
+    expect((await request('/api/tasks', 'POST', { ...valid(), schedule: 'daily', timeOfDay })).status).toBe(400);
+  });
+
+  // Each row is wrapped: test.each spreads a bare array row into separate arguments.
+  test.each([[[]], [[0]], [[8]], [[1, 1]], [[1.5]], ['1-5'], [[1, 2, 3, 4, 5, 6, 7, 1]]])('rejects invalid weekdays %j', async weekdays => {
+    expect((await request('/api/tasks', 'POST', { ...valid(), schedule: 'daily', timeOfDay: '02:00', weekdays })).status).toBe(400);
+  });
+
+  test.each(['Mars/Olympus_Mons', ' ', 5, `Europe/${'x'.repeat(60)}`])('rejects invalid time zone %j', async timeZone => {
+    expect((await request('/api/tasks', 'POST', { ...valid(), schedule: 'daily', timeOfDay: '02:00', timeZone })).status).toBe(400);
+  });
+
+  test('daily defaults to every day in the service zone, stores canonical values and clears them for other schedules', async () => {
+    const task = await createTask({ schedule: 'daily', timeOfDay: '02:00', weekdays: [5, 1, 3], timeZone: 'europe/moscow', intervalMinutes: 5 });
+    expect(task).toMatchObject({ schedule: 'daily', timeOfDay: '02:00', weekdays: [1, 3, 5], timeZone: 'Europe/Moscow', intervalMinutes: null });
+    expect(task.nextRunAt).toBeGreaterThan(Date.now() - 1_000);
+    const defaults = await createTask({ schedule: 'daily', timeOfDay: '23:59' });
+    expect(defaults).toMatchObject({ weekdays: [1, 2, 3, 4, 5, 6, 7], timeZone: new Intl.DateTimeFormat().resolvedOptions().timeZone });
+    const paused = await (await request(`/api/tasks/${task.id}`, 'PATCH', { paused: true })).json() as Task;
+    expect(paused).toMatchObject({ paused: true, timeOfDay: '02:00', weekdays: [1, 3, 5], timeZone: 'Europe/Moscow', nextRunAt: task.nextRunAt });
+    const retimed = await (await request(`/api/tasks/${task.id}`, 'PATCH', { timeZone: 'Asia/Tokyo' })).json() as Task;
+    expect(retimed).toMatchObject({ timeOfDay: '02:00', weekdays: [1, 3, 5], timeZone: 'Asia/Tokyo' });
+    const interval = await (await request(`/api/tasks/${task.id}`, 'PATCH', { schedule: 'interval', intervalMinutes: 30 })).json() as Task;
+    expect(interval).toMatchObject({ schedule: 'interval', intervalMinutes: 30, timeOfDay: null, weekdays: null, timeZone: null });
+  });
+
   test('invalid task patch preserves all existing data', async () => {
     const task = await createTask();
     const before = await detail(task.id);

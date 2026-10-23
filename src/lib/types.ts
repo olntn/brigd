@@ -78,7 +78,7 @@ export interface GeneralSettings {
   /** Per invocation of a merge-check command; null leaves it unlimited. */
   integrationCheckTimeLimitMinutes: number | null;
   defaultCwd: string;
-  defaultSchedule: TaskInput['schedule'];
+  defaultSchedule: DefaultSchedule;
   /** Preselected in the form of a new single-worker card; an archived profile is skipped there. */
   defaultWorkerId: string | null;
   fallbackWorkers: FallbackWorkers;
@@ -169,6 +169,10 @@ export interface RunStep extends TaskStepInput {
 }
 /** How urgent a card is; the autopilot claims a more urgent card first. */
 export type TaskPriority = 'critical' | 'high' | 'normal' | 'low';
+/** manual waits for a start; interval repeats from the first run; daily runs at a local time on chosen weekdays; auto joins the autopilot queue. */
+export type TaskSchedule = 'manual' | 'interval' | 'daily' | 'auto';
+/** The launch modes the general settings can preselect; a daily time is always chosen per card. */
+export type DefaultSchedule = Exclude<TaskSchedule, 'daily'>;
 export interface TaskInput {
   /** Automatic starts wait for a successful and (for worktrees) merged latest result. */
   dependsOnTaskIds?: string[];
@@ -187,9 +191,15 @@ export interface TaskInput {
   /** Omitted on creation means normal; omitted on update keeps the saved priority. */
   priority?: TaskPriority;
   /** auto: the autopilot starts the task when its turn comes and a slot is free. */
-  schedule: 'manual' | 'interval' | 'auto';
+  schedule: TaskSchedule;
   intervalMinutes: number | null;
   firstRunAt: number | null;
+  /** daily only: local 24-hour "HH:MM" in timeZone; null for other schedules, and always present in a saved task. */
+  timeOfDay?: string | null;
+  /** daily only: ISO weekdays in ascending order, 1 is Monday and 7 is Sunday; omitted on input means every day. */
+  weekdays?: number[] | null;
+  /** daily only: the IANA zone timeOfDay is read in, e.g. Europe/Moscow; omitted on input means the server's zone. */
+  timeZone?: string | null;
   paused: boolean;
 }
 export interface Task extends TaskInput {
