@@ -40,7 +40,7 @@ function taskFixture(worker: Worker, workflow = false): TaskDetail {
     updatedAt: timestamp + 1000, finishedAt: timestamp + 1000, summary: 'Обзор готов.', error: null, turn: 1, mock: true,
   };
   const task: Task = {
-    tagIds: [], tags: [],
+    dependsOnTaskIds: [], dependencies: [], tagIds: [], tags: [],
     id, workerId: workflow ? null : worker.id, worker: workflow ? null : { ...worker },
     steps: steps.map(({ workerId, title, instruction }) => ({ workerId, title, instruction })),
     title: workflow ? 'Последовательность с описанием' : 'Задача с описанием', instruction: run.instruction,

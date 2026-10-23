@@ -170,6 +170,8 @@ export interface RunStep extends TaskStepInput {
 /** How urgent a card is; the autopilot claims a more urgent card first. */
 export type TaskPriority = 'critical' | 'high' | 'normal' | 'low';
 export interface TaskInput {
+  /** Automatic starts wait for a successful and (for worktrees) merged latest result. */
+  dependsOnTaskIds?: string[];
   /** null/omitted follows the general agent time limit on each new turn. */
   timeLimitMinutes?: number | null;
   tagIds?: string[];
@@ -191,6 +193,9 @@ export interface TaskInput {
   paused: boolean;
 }
 export interface Task extends TaskInput {
+  dependsOnTaskIds: string[];
+  /** Computed by Store, shared by the scheduler and UI. */
+  dependencies: TaskDependency[];
   priority: TaskPriority;
   tagIds: string[];
   tags: Tag[];
@@ -209,6 +214,13 @@ export interface Task extends TaskInput {
   status: TaskStatus;
   latestRun: Run | null;
   runCount: number;
+}
+/** A prerequisite and the readiness of its latest result. */
+export interface TaskDependency {
+  taskId: string;
+  title: string;
+  satisfied: boolean;
+  archived: boolean;
 }
 /** A deliberately requested new turn in a completed run's exact saved session. */
 export interface FollowupInput {

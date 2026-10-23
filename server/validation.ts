@@ -22,6 +22,29 @@ export function validateTimeLimitMinutes(value: unknown): number | null {
   return value;
 }
 
+export function validateDependencyIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 10 || value.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(id)) || new Set(value).size !== value.length) {
+    throw new AppError('Зависимости: укажите массив до 10 уникальных ID задач');
+  }
+  return [...value];
+}
+
+/** Called inside the saving transaction so concurrent edits cannot introduce a cycle. */
+export function validateTaskDependencies(value: unknown, taskId: string, lookup: (id: string) => string[] | null): string[] {
+  const ids = validateDependencyIds(value);
+  if (ids.includes(taskId)) throw new AppError('Задача не может зависеть от самой себя');
+  for (const id of ids) if (lookup(id) === null) throw new AppError('Задача зависимости не найдена');
+  const pending = [...ids], visited = new Set<string>();
+  while (pending.length) {
+    const id = pending.pop()!;
+    if (id === taskId) throw new AppError('Зависимости задач образуют цикл');
+    if (visited.has(id)) continue;
+    visited.add(id);
+    pending.push(...(lookup(id) ?? []));
+  }
+  return ids;
+}
+
 export async function validateTask(value: unknown): Promise<TaskInput> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError('Ожидается JSON-объект');
   const v = value as Record<string, unknown>;
@@ -53,7 +76,7 @@ export async function validateTask(value: unknown): Promise<TaskInput> {
       firstRunAt = v.firstRunAt;
     }
   }
-  return { ...(v.timeLimitMinutes !== undefined ? { timeLimitMinutes: validateTimeLimitMinutes(v.timeLimitMinutes) } : {}), ...(v.tagIds !== undefined ? { tagIds: validateTagIds(v.tagIds) } : {}), ...(v.attachmentIds !== undefined ? { attachmentIds: attachmentIds(v.attachmentIds) } : {}), steps: validateWorkflowSteps(v.steps), workerId, title, instruction, provider: v.provider, cwd, ultracode, priority, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
+  return { ...(v.dependsOnTaskIds !== undefined ? { dependsOnTaskIds: validateDependencyIds(v.dependsOnTaskIds) } : {}), ...(v.timeLimitMinutes !== undefined ? { timeLimitMinutes: validateTimeLimitMinutes(v.timeLimitMinutes) } : {}), ...(v.tagIds !== undefined ? { tagIds: validateTagIds(v.tagIds) } : {}), ...(v.attachmentIds !== undefined ? { attachmentIds: attachmentIds(v.attachmentIds) } : {}), steps: validateWorkflowSteps(v.steps), workerId, title, instruction, provider: v.provider, cwd, ultracode, priority, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
 }
 
 /** The autopilot switch. A stop time is optional; when enabling it must lie ahead and within a month. */

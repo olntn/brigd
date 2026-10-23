@@ -19,6 +19,50 @@ test.beforeEach(async ({ page, request }) => {
   await expect(page.getByRole('button', { name: 'Новая задача', exact: true })).toBeEnabled();
 });
 
+test('dependency picker, waiting reasons, manual warning and archived prerequisite problem', async ({ page, request }) => {
+  const info = await (await request.get('/api/info')).json();
+  const prerequisiteTitle = unique('Зависимость');
+  const title = unique('После зависимости');
+  const created = await request.post('/api/tasks', { headers: origin, data: {
+    title: prerequisiteTitle, instruction: 'Проверь проект.', provider: 'codex', cwd: info.cwd,
+    schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false,
+  } });
+  expect(created.status()).toBe(201);
+  const prerequisite = await created.json() as Task;
+  await page.reload();
+  await page.getByRole('button', { name: 'Новая задача', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Новая задача', exact: true });
+  await editor.getByLabel('Название задачи').fill(title);
+  await editor.getByLabel('Что нужно сделать?').fill('Проверь результат после первой задачи.');
+  const picker = editor.getByRole('group', { name: 'После задач…' });
+  await picker.getByRole('searchbox').fill(prerequisiteTitle);
+  await picker.getByRole('checkbox', { name: prerequisiteTitle, exact: true }).check();
+  await expect(editor.getByText('Ручной запуск разрешён и может начаться до выполнения зависимостей.')).toBeVisible();
+  await editor.getByRole('button', { name: 'Автопилот', exact: true }).click();
+  await editor.getByRole('button', { name: 'Создать задачу', exact: true }).click();
+  const drawer = page.getByRole('dialog', { name: title, exact: true });
+  await expect(drawer.getByText('Ручной запуск начнётся без ожидания зависимостей.')).toBeVisible();
+  await expect(drawer.getByRole('button', { name: 'Запустить', exact: true })).toBeEnabled();
+  await drawer.getByRole('link', { name: prerequisiteTitle, exact: true }).click();
+  const prerequisiteDrawer = page.getByRole('dialog', { name: prerequisiteTitle, exact: true });
+  await expect(prerequisiteDrawer).toBeVisible();
+  await prerequisiteDrawer.getByRole('button', { name: 'Закрыть задачу', exact: true }).click();
+  await page.getByRole('button', { name: 'Автопилот', exact: true }).click();
+  const queue = page.getByRole('region', { name: 'Очередь автопилота' });
+  await expect(queue.getByText(`ждёт задачу ${prerequisiteTitle}`, { exact: true })).toBeVisible();
+  expect((await request.patch('/api/autopilot', { headers: origin, data: { enabled: true, until: null } })).ok()).toBe(true);
+  await expect(page.getByText('Ждут зависимости: 1.', { exact: true })).toBeVisible();
+  expect((await request.post(`/api/tasks/${prerequisite.id}/archive`, { headers: origin, data: {} })).ok()).toBe(true);
+  await expect(queue.locator('.dependency-problem').filter({ hasText: title }).first()).toBeVisible();
+  await expect(queue.getByText('Зависимость в архиве без успешного результата. Восстановите её или уберите зависимость.', { exact: false })).toBeVisible();
+  expect((await request.patch('/api/autopilot', { headers: origin, data: { enabled: false, until: null } })).ok()).toBe(true);
+  await page.getByRole('button', { name: 'Задачи', exact: true }).click();
+  const problems = page.getByRole('region', { name: 'Проблемные задачи' });
+  await expect(problems).toBeVisible();
+  if (await problems.getByRole('button', { expanded: false }).count()) await problems.getByRole('button', { expanded: false }).click();
+  await expect(problems.getByRole('button', { name: `Открыть задачу: ${title}`, exact: true })).toBeVisible();
+});
+
 test('navigation shows autopilot changes on other pages and after reloading', async ({ page, request }) => {
   const navigation = page.getByRole('button', { name: 'Автопилот', exact: true });
   const badge = navigation.locator('.autopilot-nav-status');

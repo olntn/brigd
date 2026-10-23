@@ -2,12 +2,12 @@ import type { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CheckTriage, CheckTriageCounts, CheckTriageOutcome, CliAccessMode, Comment, ConcurrencySettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunCheckFailure, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, TokenUsage, TurnUsage, UsageTotals, Worker, WorkerInput, WorkerSnapshot, WorkerUsageOverview, WorkspaceSnapshot } from '../src/lib/types';
+import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CheckTriage, CheckTriageCounts, CheckTriageOutcome, CliAccessMode, Comment, ConcurrencySettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunCheckFailure, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskDependency, TaskInput, TaskLog, TaskLogInput, TaskStepInput, TokenUsage, TurnUsage, UsageTotals, Worker, WorkerInput, WorkerSnapshot, WorkerUsageOverview, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
 import type { IntegrationRecord, WorkspaceRun } from './workspace-storage';
 import { clock } from './clock';
 import { agentTimeoutMessage } from './adapter';
-import { validateTimeLimitMinutes } from './validation';
+import { validateTaskDependencies, validateTimeLimitMinutes } from './validation';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { AUTOPILOT_FAILURE_LIMIT } from '../src/lib/autopilot';
 import { DEFAULT_TASK_PRIORITY, isTaskPriority, TASK_PRIORITIES, TASK_PRIORITY_LABELS } from '../src/lib/priority';
@@ -383,6 +383,7 @@ export class Store {
         ['runs', 'worker_id', 'TEXT REFERENCES workers(id)'],
         ['runs', 'worker_snapshot', 'TEXT'],
         ['runs', 'instructions_snapshot', "TEXT NOT NULL DEFAULT '[]'"],
+        ['tasks', 'depends_on_task_ids', "TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(depends_on_task_ids) AND json_type(depends_on_task_ids)='array')"],
         ['tasks', 'steps_template', "TEXT NOT NULL DEFAULT '[]'"],
         ['runs', 'steps_snapshot', "TEXT NOT NULL DEFAULT '[]'"],
         ['runs', 'current_step_index', 'INTEGER'],
@@ -1392,8 +1393,10 @@ export class Store {
     }).immediate();
   }
   autopilotPool(sessionStart: number | null): Task[] { return this.autopilotRows(sessionStart).map(row => this.mapTask(row)); }
-  /** The scheduler tick needs only identity and folder. */
-  autopilotCandidates(sessionStart: number | null): { id: string; cwd: string }[] { return this.autopilotRows(sessionStart).map(row => ({ id: row.id, cwd: row.cwd })); }
+  /** Keep waiting cards in the candidate list so the queue is not reported as empty. */
+  autopilotCandidates(sessionStart: number | null): { id: string; cwd: string; dependsOnTaskIds: string[] }[] {
+    return this.autopilotRows(sessionStart).map(row => ({ id: row.id, cwd: row.cwd, dependsOnTaskIds: JSON.parse(row.depends_on_task_ids) }));
+  }
   autopilotAttempts(sessionStart: number | null): Run[] {
     if (sessionStart === null) return [];
     return (this.db.query("SELECT * FROM runs WHERE trigger='autopilot' AND started_at>=? ORDER BY started_at ASC, rowid ASC").all(sessionStart) as Row[]).map(row => this.mapRun(row));
@@ -1416,7 +1419,8 @@ export class Store {
   startAutopilot(taskId: string, mock: boolean, now = clock()): Run | null {
     return this.db.transaction(() => {
       const state = this.getAutopilot();
-      if (!state.enabled || (state.until !== null && now >= state.until) || !this.autopilotRows(state.startedAt, taskId).length) return null;
+      if (!state.enabled || (state.until !== null && now >= state.until) || !this.autopilotRows(state.startedAt, taskId).length ||
+          this.taskDependencies(this.savedDependencyIds(taskId) ?? []).some(dependency => !dependency.satisfied)) return null;
       const run = this.insertRun(this.getTask(taskId), 'autopilot', null, mock, now);
       this.log(taskId, run.id, { kind: 'lifecycle', summary: 'Запуск автопилотом', details: ['Подошла очередь задачи, и освободилось место для запуска.'] }, now);
       return run;
@@ -1426,14 +1430,14 @@ export class Store {
   claimAutopilot(taskId: string, location: RepositoryLocation, mock: boolean, maximum: number, perRepository: number, now = clock()): Run | null {
     return this.db.transaction(() => {
       if (this.autopilotCapacity(maximum) < 1 || this.repositoryBusy(location.repositoryId, perRepository, false) ||
-          this.db.query("SELECT seq FROM execution_requests WHERE repository_id=? AND state='queued'").get(location.repositoryId)) return null;
+          this.pendingExecutions(location.repositoryId).length) return null;
       const run = this.startAutopilot(taskId, mock, now);
       return run && this.enqueueExecution(run, location);
     }).immediate();
   }
-  /** Process slots left for lazily claimed work: requests already queued count as reserved. */
+  /** Runnable queued requests reserve a slot; automatic requests waiting on prerequisites do not. */
   autopilotCapacity(maximum: number): number {
-    const queued = (this.db.query(`SELECT COUNT(*) AS n FROM execution_requests e JOIN runs r ON r.id=e.run_id AND r.turn=e.turn WHERE e.state='queued' AND r.status='queued'`).get() as { n: number }).n;
+    const queued = this.pendingExecutions().length;
     return Math.max(0, maximum - this.occupiedSlots() - queued);
   }
   saveAvatar(data: Uint8Array, mime: string, now = clock()): string {
@@ -1725,17 +1729,32 @@ export class Store {
       startedAt: row.started_at, updatedAt: row.updated_at, finishedAt: row.finished_at, summary: row.summary,
       error: row.error, turn: row.turn, mock: !!row.mock };
   }
+  /** No recursive task mapping: even waiting/archived dependencies expose their live latest result. */
+  taskDependencies(dependsOnTaskIds: readonly string[]): TaskDependency[] {
+    return dependsOnTaskIds.map(taskId => {
+      const task = this.db.query('SELECT title,archived_at FROM tasks WHERE id=?').get(taskId) as Row | null;
+      const latest = this.db.query('SELECT * FROM runs WHERE task_id=? ORDER BY started_at DESC,rowid DESC LIMIT 1').get(taskId) as Row | null;
+      const run = latest ? this.mapRun(latest) : null;
+      return { taskId, title: task?.title ?? taskId, archived: task?.archived_at != null,
+        satisfied: !!task && run?.status === 'completed' && (run.workspace?.mode !== 'worktree' || run.integration?.status === 'merged') };
+    });
+  }
+  private savedDependencyIds(taskId: string): string[] | null {
+    const row = this.db.query('SELECT depends_on_task_ids FROM tasks WHERE id=?').get(taskId) as Row | null;
+    return row ? JSON.parse(row.depends_on_task_ids) : null;
+  }
   private mapTask(row: Row): Task {
     const latest = this.db.query('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1').get(row.id) as Row | null;
     const worker = row.worker_id ? this.getWorker(row.worker_id) : null;
     const hasCompletedRun = !!this.db.query("SELECT 1 FROM runs WHERE task_id=? AND status='completed' LIMIT 1").get(row.id);
     const tags = this.taskTags(row.id);
     const latestRun = latest ? this.mapRun(latest) : null;
+    const dependsOnTaskIds: string[] = JSON.parse(row.depends_on_task_ids);
     const integrationStatuses: Partial<Record<Integration['status'], Task['status']>> = {
       queued: 'awaiting_merge', checking: 'integrating', merging: 'integrating', cancelling: 'integrating',
       conflict: 'merge_conflict', failed: 'merge_failed', blocked: 'merge_blocked', interrupted: 'merge_interrupted', cancelled: 'merge_blocked',
     };
-    return { tagIds: tags.map(tag => tag.id), tags, hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd, ultracode: readFlag(row.ultracode), timeLimitMinutes: validateTimeLimitMinutes(row.time_limit_minutes),
+    return { dependsOnTaskIds, dependencies: this.taskDependencies(dependsOnTaskIds), tagIds: tags.map(tag => tag.id), tags, hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd, ultracode: readFlag(row.ultracode), timeLimitMinutes: validateTimeLimitMinutes(row.time_limit_minutes),
       priority: row.priority ?? DEFAULT_TASK_PRIORITY, schedule: row.schedule, intervalMinutes: row.interval_minutes, firstRunAt: row.first_run_at,
       nextRunAt: row.next_run_at, paused: !!row.paused, createdAt: row.created_at, updatedAt: row.updated_at, archivedAt: row.archived_at ?? null,
       status: latestRun?.integration ? integrationStatuses[latestRun.integration.status] ?? latestRun.status : latest?.status ?? 'ready', latestRun,
@@ -1818,6 +1837,11 @@ export class Store {
     }).immediate();
   }
   private purgeTask(id: string) {
+    // Purge removes incoming edges too, including edges on archived cards.
+    for (const row of this.db.query('SELECT id,depends_on_task_ids FROM tasks WHERE EXISTS (SELECT 1 FROM json_each(depends_on_task_ids) WHERE value=?)').all(id) as Row[]) {
+      const ids = (JSON.parse(row.depends_on_task_ids) as string[]).filter(dependency => dependency !== id);
+      this.db.query('UPDATE tasks SET depends_on_task_ids=? WHERE id=?').run(JSON.stringify(ids), row.id);
+    }
     const runs = 'SELECT id FROM runs WHERE task_id=?1';
     const files = 'SELECT id FROM attachments WHERE task_id=?1';
     for (const statement of [
@@ -1877,15 +1901,16 @@ export class Store {
   createTask(input: TaskInput, now = clock()): Task {
     return this.db.transaction(() => {
       const id = crypto.randomUUID();
+      const dependencies = validateTaskDependencies(input.dependsOnTaskIds === undefined ? [] : input.dependsOnTaskIds, id, dependency => this.savedDependencyIds(dependency));
       const steps = this.taskSteps(input.steps);
       const worker = steps.length ? null : this.assignedWorker(input.workerId);
       const provider = steps.length ? this.getWorker(steps[0]!.workerId).provider : worker?.provider ?? input.provider;
       const ultracode = validatedTaskUltracode(input.ultracode);
       const priority = validatedTaskPriority(input.priority === undefined ? DEFAULT_TASK_PRIORITY : input.priority);
-      this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template,ultracode,autopilot_position,priority,time_limit_minutes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
+      this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template,ultracode,autopilot_position,priority,time_limit_minutes,depends_on_task_ids) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
         input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt,
         input.schedule === 'interval' ? (input.firstRunAt ?? now) : null, +input.paused, now, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode),
-        input.schedule === 'auto' ? this.nextAutopilotPosition() : null, priority, validateTimeLimitMinutes(input.timeLimitMinutes));
+        input.schedule === 'auto' ? this.nextAutopilotPosition() : null, priority, validateTimeLimitMinutes(input.timeLimitMinutes), JSON.stringify(dependencies));
       this.replaceTaskAttachments(id, input.attachmentIds, now);
       this.replaceTaskTags(id, input.tagIds === undefined ? [] : input.tagIds);
       return this.getTask(id);
@@ -1895,6 +1920,7 @@ export class Store {
     return this.db.transaction(() => {
       const task = this.getTask(id);
       this.assertNotArchived(task);
+      const dependencies = validateTaskDependencies(input.dependsOnTaskIds === undefined ? task.dependsOnTaskIds : input.dependsOnTaskIds, id, dependency => this.savedDependencyIds(dependency));
       const steps = this.taskSteps(input.steps === undefined ? task.steps : input.steps, task.steps);
       const worker = steps.length ? null : this.assignedWorker(input.workerId === undefined ? task.workerId : input.workerId, task.workerId);
       const provider = steps.length ? this.getWorker(steps[0]!.workerId).provider : worker?.provider ?? input.provider;
@@ -1906,8 +1932,8 @@ export class Store {
       // A card switched to the autopilot, or moved to another priority, queues at the end of its priority; leaving it gives up its place.
       const position = input.schedule !== 'auto' ? null : task.schedule === 'auto' && priority === task.priority
         ? (this.db.query('SELECT autopilot_position FROM tasks WHERE id=?').get(id) as Row).autopilot_position : this.nextAutopilotPosition();
-      this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=?,ultracode=?,autopilot_position=?,priority=?,time_limit_minutes=? WHERE id=?`)
-        .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode), position, priority, validateTimeLimitMinutes(input.timeLimitMinutes === undefined ? task.timeLimitMinutes : input.timeLimitMinutes), id);
+      this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=?,ultracode=?,autopilot_position=?,priority=?,time_limit_minutes=?,depends_on_task_ids=? WHERE id=?`)
+        .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode), position, priority, validateTimeLimitMinutes(input.timeLimitMinutes === undefined ? task.timeLimitMinutes : input.timeLimitMinutes), JSON.stringify(dependencies), id);
       this.replaceTaskAttachments(id, input.attachmentIds, now);
       if (input.tagIds !== undefined) this.replaceTaskTags(id, input.tagIds);
       return this.getTask(id);
@@ -2209,6 +2235,7 @@ export class Store {
       const claimed: Run[] = [];
       for (const row of due) {
         const task = this.mapTask(row);
+        if (task.dependencies.some(dependency => !dependency.satisfied)) continue;
         const occurrence = nextOccurrence(task.nextRunAt!, task.intervalMinutes!, now);
         // Consume this occurrence even while waiting. Never accumulate a missed backlog.
         this.db.query('UPDATE tasks SET next_run_at=? WHERE id=?').run(occurrence.next, task.id);
@@ -2287,15 +2314,19 @@ export class Store {
     }).immediate();
   }
   /** The integrator takes the first free place: merges of its repository wait for it, so a conflict must not queue behind new tasks. */
-  pendingExecutions(): ExecutionRequest[] {
-    return (this.db.query(`SELECT e.* FROM execution_requests e JOIN runs r ON r.id=e.run_id AND r.turn=e.turn
-      WHERE e.state='queued' AND r.status='queued' ORDER BY ${INTEGRATOR_WORK} DESC, e.seq`).all() as Row[])
+  pendingExecutions(repositoryId: string | null = null): ExecutionRequest[] {
+    return (this.db.query(`SELECT e.*,r.trigger,t.depends_on_task_ids FROM execution_requests e JOIN runs r ON r.id=e.run_id AND r.turn=e.turn
+      JOIN tasks t ON t.id=r.task_id WHERE e.state='queued' AND r.status='queued' AND (? IS NULL OR e.repository_id=?)
+      ORDER BY ${INTEGRATOR_WORK} DESC, e.seq`).all(repositoryId, repositoryId) as Row[])
+      .filter(row => !['schedule', 'autopilot'].includes(row.trigger) || this.taskDependencies(JSON.parse(row.depends_on_task_ids)).every(dependency => dependency.satisfied))
       .map(row => ({ runId: row.run_id, turn: row.turn, answer: row.answer ?? undefined, location: JSON.parse(row.location) }));
   }
   claimExecution(request: ExecutionRequest, maximum: number, perRepository = 1): Run | null {
     return this.db.transaction(() => {
       const run = this.getRun(request.runId);
       if (run.status !== 'queued' || run.turn !== request.turn) return null;
+      if ((run.trigger === 'schedule' || run.trigger === 'autopilot') &&
+          this.taskDependencies(this.savedDependencyIds(run.taskId) ?? []).some(dependency => !dependency.satisfied)) return null;
       // Demo runs share the folder too, but never write to it, so they follow the per-repository limit like worktrees.
       const direct = !run.mock && (run.workspace?.mode === 'direct' || !run.workspace && !!run.sessionId);
       if (this.repositoryBusy(request.location.repositoryId, perRepository, direct) || this.occupiedSlots() >= maximum) return null;

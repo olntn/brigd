@@ -19,6 +19,58 @@ afterEach(async () => {
   await engine.shutdown(); store.close(); rmSync(folder, { recursive: true, force: true });
 });
 
+test('cross-repository dependent waits for the successful worktree merge, while another chain runs', async () => {
+  await engine.shutdown();
+  const release = join(folder, 'release-check');
+  engine = new Engine(store, false, agent.factory, undefined, {
+    workspaces: new GitWorkspaces(join(folder, 'workspaces')),
+    integrationChecks: [[process.execPath, '-e', 'while (!(await Bun.file(process.argv[1]).exists())) await Bun.sleep(10)', release]],
+    maxParallel: 2,
+  });
+  const a = store.createTask(taskInput(root, { title: 'A', schedule: 'auto' }));
+  const b = store.createTask(taskInput(repository(folder, 'dependent'), { title: 'B', schedule: 'auto', priority: 'critical', dependsOnTaskIds: [a.id] }));
+  const independent = store.createTask(taskInput(repository(folder, 'independent'), { schedule: 'auto' }));
+  engine.setAutopilot({ enabled: true, until: null });
+  await until(() => agent.calls.length === 2);
+  expect(store.detail(b.id).runs).toEqual([]);
+  expect(store.detail(independent.id).runs).toHaveLength(1);
+  const call = agent.calls.find(call => call.input.workspace?.projectCwd === root)!;
+  writeFileSync(join(call.input.cwd, 'src/value.txt'), 'prerequisite result\n');
+  call.resolve(outcome());
+  await until(() => store.getTask(a.id).latestRun?.integration?.status === 'checking');
+  expect(store.getTask(a.id).latestRun?.status).toBe('completed');
+  engine.tick();
+  expect(store.detail(b.id).runs).toEqual([]);
+  expect(store.getTask(b.id).dependencies[0]!.satisfied).toBe(false);
+  writeFileSync(release, 'go');
+  await until(() => store.getTask(a.id).latestRun?.integration?.status === 'merged');
+  store.archiveTask(a.id);
+  engine.tick();
+  await until(() => agent.calls.length === 3);
+  expect(store.detail(b.id).runs[0]).toMatchObject({ trigger: 'autopilot', status: 'running' });
+  expect(store.getTask(b.id).dependencies[0]).toMatchObject({ satisfied: true, archived: true });
+  expect(readFileSync(join(root, 'src/value.txt'), 'utf8')).toBe('prerequisite result\n');
+});
+
+test('a failed prerequisite merge leaves a scheduled dependent waiting', async () => {
+  await engine.shutdown();
+  engine = new Engine(store, false, agent.factory, undefined, {
+    workspaces: new GitWorkspaces(join(folder, 'workspaces')),
+    integrationChecks: [[process.execPath, '-e', 'process.exit(1)']], maxParallel: 2,
+  });
+  store.setCheckTriage(false);
+  const a = store.createTask(taskInput(root));
+  const b = store.createTask(taskInput(repository(folder, 'dependent'), { schedule: 'interval', intervalMinutes: 1, dependsOnTaskIds: [a.id] }));
+  const run = engine.start(a.id);
+  await until(() => agent.calls.length === 1);
+  writeFileSync(join(agent.calls[0]!.input.cwd, 'src/value.txt'), 'result with failing check\n');
+  agent.calls[0]!.resolve(outcome());
+  await until(() => store.getRun(run.id).integration?.status === 'failed');
+  engine.tick();
+  expect(store.getRun(run.id).status).toBe('completed');
+  expect(store.getTask(b.id)).toMatchObject({ status: 'ready', runCount: 0, dependencies: [{ satisfied: false }] });
+});
+
 test('same repository is serialized across subdirectories and symlinks while another repository can run', async () => {
   const alias = join(folder, 'alias'); symlinkSync(root, alias);
   const first = engine.start(store.createTask(taskInput(root)).id);

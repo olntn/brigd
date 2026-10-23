@@ -16,7 +16,7 @@ async function fixture(page: Page, status: IntegrationStatus, checks?: Integrati
     workspace: { id: 'workspace-fixture', repositoryId: '/project/.git', repositoryRoot: '/project', projectCwd: '/project', path: '/data/workspaces/run-fixture',
       cwd: '/data/workspaces/run-fixture', branch: 'brigd/run-fixture', baseCommit: 'b'.repeat(40), targetBranch: 'main', mode: 'worktree', prepared: true }, ...patch.run };
   const task: Task = { id: run.taskId, title: 'Изолированная задача', instruction: run.instruction, provider: 'codex', cwd: run.cwd, workerId: null, worker: null,
-    steps: [], tagIds: [], tags: [], schedule: 'manual', priority: 'normal', intervalMinutes: null, firstRunAt: null, paused: false, nextRunAt: null, archivedAt: null,
+    steps: [], dependsOnTaskIds: [], dependencies: [], tagIds: [], tags: [], schedule: 'manual', priority: 'normal', intervalMinutes: null, firstRunAt: null, paused: false, nextRunAt: null, archivedAt: null,
     createdAt: now, updatedAt: now, status: states[status], latestRun: run, runCount: 1 };
   const detail: TaskDetail = { task, runs: [run], comments: [], logs: [] };
   const info: AppInfo = { mode: 'mock', cwd: '/project', scheduler: 'running', startedAt: now, providers: [] };

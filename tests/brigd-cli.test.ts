@@ -71,6 +71,17 @@ test('agent can set a card priority; an unknown priority creates nothing', async
   expect((await invoke('create-task', { worker: 'Анна', title: 'Обычная', instruction: 'Проверка' })).value.priority).toBe('normal');
 });
 
+test('agent helper forwards dependsOn IDs through the task API without launching work', async () => {
+  worker('Анна');
+  const a = await invoke('create-task', { worker: 'Анна', title: 'A', instruction: 'Проверка' });
+  const b = await invoke('create-task', { worker: 'Анна', title: 'B', instruction: 'Проверка', dependsOn: [a.value.id] });
+  expect(b).toMatchObject({ code: 0, error: '', value: { dependsOnTaskIds: [a.value.id], schedule: 'manual', runCount: 0 } });
+  expect(store.getTask(b.value.id).dependencies[0]).toMatchObject({ taskId: a.value.id, satisfied: false });
+  const invalid = await invoke('create-task', { worker: 'Анна', title: 'Invalid', instruction: 'Проверка', dependsOn: [a.value.id, a.value.id] });
+  expect(invalid.code).toBe(1);
+  expect(store.listTasks()).toHaveLength(2);
+});
+
 test('unknown or archived employee and unsupported task fields do not create or launch work', async () => {
   const anna = worker('Анна');
   store.archiveWorker(anna.id);

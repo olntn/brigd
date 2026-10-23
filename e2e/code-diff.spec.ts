@@ -20,7 +20,7 @@ function fixtureDetail(runIds = [latestRunId, previousRunId], status: Run['statu
   }));
   const task: Task = {
     id: taskId, title: 'Просмотр изменений кода', instruction: 'Добавить отображение изменений кода.',
-    tagIds: [], tags: [], workerId: null, worker: null, steps: [], provider: 'codex',
+    dependsOnTaskIds: [], dependencies: [], tagIds: [], tags: [], workerId: null, worker: null, steps: [], provider: 'codex',
     cwd: '/workspace/project', schedule: 'manual', priority: 'normal', intervalMinutes: null, firstRunAt: null,
     paused: false, createdAt: timestamp - 60_000, updatedAt: timestamp + 5_000,
     archivedAt: null, nextRunAt: null, status: runs[0]?.status ?? 'ready',

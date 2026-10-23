@@ -52,6 +52,7 @@ const taskFields: Record<string, Schema> = {
   workerId: nullable(id),
   ultracode: { ...nullable(flag), description: 'true or false forces the provider\'s ultra agent mode for the card\'s new runs (every stage of a workflow); null follows each worker profile. Creation defaults to null.' },
   priority: { type: 'string', enum: [...TASK_PRIORITIES], description: 'critical, high, normal or low. The autopilot claims a higher-priority auto card first; within one priority it follows the queue order. Changing an auto card\'s priority moves it to the end of that priority. Creation defaults to normal.' },
+  dependsOnTaskIds: { ...ids(10), description: 'Full IDs of prerequisite tasks. Automatic starts wait for each latest run to complete successfully and its worktree result to be merged. Archived successful results count; manual starts may bypass waiting. Cycles and self references are rejected. Use [] to clear.' },
   tagIds: ids(100),
   attachmentIds: { ...ids(20), description: 'Previously staged upload IDs accepted by the task API.' },
   steps: { type: 'array', maxItems: 20, description: 'Empty for a single-worker task, or 2–20 ordered workflow stages; at most 64000 characters in total.',

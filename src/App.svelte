@@ -18,6 +18,7 @@
   import CliSetup from './lib/CliSetup.svelte';
   import { TASK_STATUS_LABELS } from './lib/status';
   import Tags from './lib/Tags.svelte';
+  import DependencyPicker from './lib/DependencyPicker.svelte';
   import TagPicker from './lib/TagPicker.svelte';
   import AttachmentComposer from './lib/AttachmentComposer.svelte';
   import AttachmentList from './lib/AttachmentList.svelte';
@@ -148,6 +149,7 @@
   let editorOpen = $state(false);
   let editingId = $state<string | null>(null);
   let formTitle = $state('');
+  let formDependsOn = $state<string[]>([]);
   let formTagIds = $state<string[]>([]);
   let formInstruction = $state('');
   let formProvider = $state<Provider>('codex');
@@ -197,6 +199,7 @@
   const attentionStatuses: TaskStatus[] = ['waiting_input', 'interrupted', 'failed', 'blocked', 'merge_conflict', 'merge_failed', 'merge_blocked', 'merge_interrupted'];
   // Board columns have no place for these statuses; the problem panel above the board shows them, most urgent first.
   const problemStatuses: TaskStatus[] = ['failed', 'blocked', 'merge_conflict', 'merge_failed', 'merge_blocked', 'interrupted', 'merge_interrupted', 'cancelled'];
+  const dependencyProblem = (task: Task) => task.dependencies?.some(dependency => dependency.archived && !dependency.satisfied);
   let activeTasks = $derived(tasks.filter(task => task.archivedAt === null));
   let archivedTasks = $derived(tasks.filter(task => task.archivedAt !== null).sort((a, b) => b.archivedAt! - a.archivedAt!));
   let archiveResults = $derived(archivedTasks.filter(task => {
@@ -207,10 +210,10 @@
     const query = search.trim().toLocaleLowerCase();
     return (provider === 'all' || taskProviders(task).includes(provider))
       && matchesTag(task, tagFilter)
-      && (scope === 'all' || (scope === 'scheduled' && task.schedule === 'interval') || (scope === 'attention' && attentionStatuses.includes(task.status)) || (scope === 'completed' && task.status === 'completed') || (scope === 'autopilot' && task.schedule === 'auto'))
+      && (scope === 'all' || (scope === 'scheduled' && task.schedule === 'interval') || (scope === 'attention' && (attentionStatuses.includes(task.status) || dependencyProblem(task))) || (scope === 'completed' && task.status === 'completed') || (scope === 'autopilot' && task.schedule === 'auto'))
       && (!query || `${task.title} ${task.instruction} ${task.cwd} ${task.worker?.name ?? ''} ${task.latestRun?.worker?.name ?? ''} ${(task.steps ?? []).map(step => `${step.title} ${workers.find(worker => worker.id === step.workerId)?.name ?? ''}`).join(' ')} ${(task.latestRun?.steps ?? []).map(step => `${step.title} ${step.worker.name}`).join(' ')}`.toLocaleLowerCase().includes(query));
   }));
-  let problemTasks = $derived(filtered.filter(task => problemStatuses.includes(task.status)).sort((a, b) => problemStatuses.indexOf(a.status) - problemStatuses.indexOf(b.status)));
+  let problemTasks = $derived(filtered.filter(task => problemStatuses.includes(task.status) || dependencyProblem(task)).sort((a, b) => problemStatuses.indexOf(a.status) - problemStatuses.indexOf(b.status)));
   let selectedTask = $derived(detail?.task ?? tasks.find(task => task.id === selectedId) ?? null);
   let currentRun = $derived(selectedTask?.latestRun ?? null);
   let completedTargets = $derived(followupTargets(detail?.runs ?? []));
@@ -554,10 +557,14 @@
     };
     window.addEventListener('storage', onThemeStorage);
     // Documentation links carry a hash; the other pages keep the plain URL.
-    const onHash = () => { if (location.hash.startsWith('#/docs') && page !== 'docs') page = 'docs'; };
+    const onHash = () => {
+      if (location.hash.startsWith('#/docs') && page !== 'docs') page = 'docs';
+      const taskLink = location.hash.match(/^#\/tasks\/([a-zA-Z0-9-]+)$/);
+      if (taskLink) void openTaskById(taskLink[1]!);
+    };
     window.addEventListener('hashchange', onHash);
     void loadInfo();
-    void refresh();
+    void refresh().then(onHash);
     // Cards embed their worker and tags; the drawer follows the same changes as the board.
     const board = ['tasks', 'workers', 'tags'] as const;
     const unsubscribe = [
@@ -662,6 +669,7 @@
     editingId = task?.id ?? null;
     formTitle = task?.title ?? '';
     formTagIds = [...(task?.tagIds ?? [])];
+    formDependsOn = [...(task?.dependsOnTaskIds ?? [])];
     void loadTags();
     formInstruction = task?.instruction ?? '';
     formProvider = task?.provider ?? defaultWorker?.provider ?? 'codex';
@@ -721,6 +729,7 @@
       ultracode: formUltracode,
       priority: formPriority,
       tagIds: formTagIds,
+      dependsOnTaskIds: formDependsOn,
     };
     const savedEditingId = editingId;
     const context = editorContext;
@@ -1111,8 +1120,17 @@
   <span class="priority-badge priority-{priority}" title={t('Приоритет: {priority}', { priority: t(TASK_PRIORITY_LABELS[priority]) })}><span class="sr-only">{t('Приоритет:') + ' '}</span>{t(TASK_PRIORITY_LABELS[priority])}</span>
 {/snippet}
 
+{#snippet dependencyLinks(task: Task)}
+  {#each (task.dependencies ?? []).filter(dependency => !dependency.satisfied) as dependency (dependency.taskId)}
+    <p class="dependency-note" class:dependency-problem={dependency.archived}>
+      <span>{t('Ждёт:')}</span> <a href={`#/tasks/${dependency.taskId}`} onclick={(event) => { event.preventDefault(); void openTaskById(dependency.taskId); }}>{dependency.title}</a>
+      {#if dependency.archived}<small>{t('Зависимость в архиве без успешного результата. Восстановите её или уберите зависимость.')}</small>{/if}
+    </p>
+  {/each}
+{/snippet}
+
 {#snippet taskCard(task: Task)}
-  <article class="task-card {task.status}" class:paused-card={task.paused}>
+  <article class="task-card {task.status}" class:dependency-problem={dependencyProblem(task)} class:paused-card={task.paused}>
     <button class="card-main" onclick={() => openTask(task)} aria-label={t('Открыть задачу: {title}', { title: task.title })}>
       <div class="card-top">{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}{#if visibleUltracode(task)}<span class="ultracode-badge" title={t('Режим ultracode')}>ultracode</span>{/if}{#if task.priority !== DEFAULT_TASK_PRIORITY}{@render priorityBadge(task.priority)}{/if}<span class="task-ref">{task.id.slice(0, 6).toUpperCase()}</span></div>
       <h3>{task.title}</h3>
@@ -1132,6 +1150,7 @@
       {#if task.latestRun?.error && ['failed', 'blocked'].includes(task.status)}<div class="card-error">{serverText(task.latestRun.error)}</div>{/if}
       {#if task.attachments?.length}<div class="card-attachment-count"><Icon name="folder" size={13} /><span>{t('Файлов: {count}', { count: task.attachments.length })}</span></div>{/if}
     </button>
+    {@render dependencyLinks(task)}
     <div class="card-footer">
       <span class="card-schedule" class:is-paused={task.paused}><Icon name={scheduleIcon(task)} size={12} />{scheduleLabel(task)}</span>
       <div class="card-actions">
@@ -1184,7 +1203,7 @@
         {:else}
           <div class="toolbar"><label class="search-box"><Icon name="search" size={16} /><input bind:value={archiveSearch} type="search" placeholder={t('Найти в архиве…')} aria-label={t('Поиск в архиве')} /></label><label class="provider-filter tag-filter"><Icon name="tag" size={15} /><select bind:value={archiveTagFilter} aria-label={t('Фильтр по тегу')} disabled={tagsLoading}><option value="all">{t('Все теги')}</option><option value="untagged">{t('Без тегов')}</option>{#each tags as tag (tag.id)}<option value={tag.id}>{tag.name}</option>{/each}</select><Icon name="down" size={13} /></label></div>
           {#if tagsError}<div class="connection-error" role="alert"><span>{tagsError}</span><button onclick={() => { void loadTags(); }}>{t('Повторить загрузку тегов')}</button></div>{/if}
-          <div class="task-list archive-list"><div class="list-heading"><span>{t('ЗАДАЧА')}</span><span>{t('АГЕНТ')}</span><span>{t('СТАТУС')}</span><span>{t('В АРХИВЕ С')}</span><span></span><span></span></div>{#each archiveResults as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name="archive" size={17} /></span><span><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}{@render priorityBadge(task.priority)}{/if}{shortPath(task.cwd)}</small>{@render taskTags(task)}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{dateTime(task.archivedAt!)}</span><div class="archive-row-actions"><button class="button secondary" disabled={pending.includes(task.id)} aria-label={t('Восстановить: {title}', { title: task.title })} onclick={() => act(task, 'restore')}><Icon name={pending.includes(task.id) ? 'refresh' : 'restore'} size={15} class={pending.includes(task.id) ? 'spin' : ''} />{t('Восстановить')}</button>{#if !taskIsOccupied(task)}<button class="button text-button danger-hover" disabled={pending.includes(task.id)} aria-label={t('Удалить: {title}', { title: task.title })} onclick={() => askDeleteTask(task)}><Icon name="trash" size={15} />{t('Удалить')}</button>{/if}</div><button class="icon-button" aria-label={t('Открыть: {title}', { title: task.title })} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="search" size={20} /><span>{t('В архиве ничего не найдено')}</span></div>{/each}</div>
+          <div class="task-list archive-list"><div class="list-heading"><span>{t('ЗАДАЧА')}</span><span>{t('АГЕНТ')}</span><span>{t('СТАТУС')}</span><span>{t('В АРХИВЕ С')}</span><span></span><span></span></div>{#each archiveResults as task (task.id)}<div class="task-row" class:dependency-problem={dependencyProblem(task)}><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name="archive" size={17} /></span><span><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}{@render priorityBadge(task.priority)}{/if}{shortPath(task.cwd)}</small>{@render taskTags(task)}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{dateTime(task.archivedAt!)}</span><div class="archive-row-actions"><button class="button secondary" disabled={pending.includes(task.id)} aria-label={t('Восстановить: {title}', { title: task.title })} onclick={() => act(task, 'restore')}><Icon name={pending.includes(task.id) ? 'refresh' : 'restore'} size={15} class={pending.includes(task.id) ? 'spin' : ''} />{t('Восстановить')}</button>{#if !taskIsOccupied(task)}<button class="button text-button danger-hover" disabled={pending.includes(task.id)} aria-label={t('Удалить: {title}', { title: task.title })} onclick={() => askDeleteTask(task)}><Icon name="trash" size={15} />{t('Удалить')}</button>{/if}</div><button class="icon-button" aria-label={t('Открыть: {title}', { title: task.title })} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="search" size={20} /><span>{t('В архиве ничего не найдено')}</span></div>{/each}</div>
         {/if}
       {:else if page === 'workers'}
         <Workers {workers} loading={workersLoading} error={workersError} retry={() => { void loadWorkers(); }} onchange={workerChanged} ondelete={workerDeleted} {notify} {models} {modelsLoading} {modelsError} retryModels={() => { void loadModels(); }} />
@@ -1226,7 +1245,7 @@
           {/if}
           <div class="board-grid" class:empty-board={activeTasks.length === 0}>
             {#each columnData as column}
-              {@const items = filtered.filter(task => task.status === column.status || (column.status === 'ready' && task.status === 'queued') || (column.status === 'running' && ['preparing', 'cancelling', 'awaiting_merge', 'integrating'].includes(task.status)))}
+              {@const items = filtered.filter(task => !dependencyProblem(task)).filter(task => task.status === column.status || (column.status === 'ready' && task.status === 'queued') || (column.status === 'running' && ['preparing', 'cancelling', 'awaiting_merge', 'integrating'].includes(task.status)))}
               <section class="board-column column-{column.status}" aria-label={t(column.title)}>
                 <div class="column-heading"><span class="column-icon"><Icon name={column.icon} size={15} /></span><h2>{t(column.title)}</h2><span class="column-count" aria-label={t('Задач: {count}', { count: items.length })}>{items.length}</span>{#if column.status === 'ready'}<button class="icon-button add-column" onclick={() => openEditor()} disabled={!info} aria-label={t('Добавить задачу')}><Icon name="plus" size={16} /></button>{/if}</div>
                 <div class="column-cards">{#each items as task (task.id)}{@render taskCard(task)}{:else}<div class="column-empty"><Icon name={column.icon} size={21} /><p>{t(column.empty)}</p>{#if column.status === 'ready'}<button onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={12} />{t('Добавить задачу')}</button>{/if}</div>{/each}</div>
@@ -1234,7 +1253,7 @@
             {/each}
           </div>
         {:else}
-          <div class="task-list"><div class="list-heading"><span>{t('ЗАДАЧА')}</span><span>{t('АГЕНТ')}</span><span>{t('СТАТУС')}</span><span>{t('ЗАПУСК')}</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : task.schedule === 'auto' ? 'moon' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}{@render priorityBadge(task.priority)}{/if}{shortPath(task.cwd)}</small>{@render taskTags(task)}{#if task.latestRun?.followup?.checkFailure}<small class="list-followup-label">{t('Возврат после упавшей проверки · {round} из {limit}', { round: task.latestRun.followup.checkFailure.round, limit: CHECK_HANDBACK_LIMIT })}</small>{:else if task.latestRun?.followup}<small class="list-followup-label">{t('Дополнительный запрос')}{#if followupStage(task.latestRun)} · {t('Этап {number}', { number: followupStage(task.latestRun)!.index + 1 })}{/if}</small>{/if}{#if passedOnRetry(task.latestRun?.integration?.triage)}<small class="list-flaky-label">{t('Проверка прошла со второй попытки')}</small>{/if}{#if workflowSteps(task).length}<small class="list-workflow-progress">{workflowProgress(task)}</small>{/if}{#if task.latestRun?.progress}<small class="list-progress" title={t('Статус выполнения: {text}', { text: task.latestRun.progress.text })}>{task.latestRun.progress.text}</small>{/if}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{scheduleLabel(task, true)}</span><button class="icon-button" aria-label={t('Открыть: {title}', { title: task.title })} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>{t('Новые задачи появятся здесь')}</span></div>{/each}</div>
+          <div class="task-list"><div class="list-heading"><span>{t('ЗАДАЧА')}</span><span>{t('АГЕНТ')}</span><span>{t('СТАТУС')}</span><span>{t('ЗАПУСК')}</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row" class:dependency-problem={dependencyProblem(task)}><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : task.schedule === 'auto' ? 'moon' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}{@render priorityBadge(task.priority)}{/if}{shortPath(task.cwd)}</small>{@render taskTags(task)}{#if task.latestRun?.followup?.checkFailure}<small class="list-followup-label">{t('Возврат после упавшей проверки · {round} из {limit}', { round: task.latestRun.followup.checkFailure.round, limit: CHECK_HANDBACK_LIMIT })}</small>{:else if task.latestRun?.followup}<small class="list-followup-label">{t('Дополнительный запрос')}{#if followupStage(task.latestRun)} · {t('Этап {number}', { number: followupStage(task.latestRun)!.index + 1 })}{/if}</small>{/if}{#if passedOnRetry(task.latestRun?.integration?.triage)}<small class="list-flaky-label">{t('Проверка прошла со второй попытки')}</small>{/if}{#if workflowSteps(task).length}<small class="list-workflow-progress">{workflowProgress(task)}</small>{/if}{#if task.latestRun?.progress}<small class="list-progress" title={t('Статус выполнения: {text}', { text: task.latestRun.progress.text })}>{task.latestRun.progress.text}</small>{/if}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{scheduleLabel(task, true)}</span><button class="icon-button" aria-label={t('Открыть: {title}', { title: task.title })} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>{t('Новые задачи появятся здесь')}</span></div>{/each}</div>
         {/if}
       {/if}
       {/if}
@@ -1289,6 +1308,8 @@
           <div class="assigned-task-tags" role="region" aria-label={t('Назначенные теги')} tabindex="0">{@render taskTags(selectedTask)}</div>
         {:else}<p class="task-tags-empty">{t('Теги не назначены')}</p>{/if}
       </section>
+      {@render dependencyLinks(selectedTask)}
+      {#if canStartManual(selectedTask) && selectedTask.dependencies?.some(dependency => !dependency.satisfied)}<p class="field-warning">{t('Ручной запуск начнётся без ожидания зависимостей.')}</p>{/if}
       <section class="instruction-section"><h3>{selectedTask.steps?.length ? t('ОБЩАЯ ЦЕЛЬ ЗАДАЧИ') : t('ЗАДАНИЕ ДЛЯ АГЕНТА')}</h3><p>{selectedTask.instruction}</p></section>
       {#if selectedTask.attachments?.some(file => file.source === 'user')}<section class="task-attachments" aria-label={t('Файлы задачи')}><h3>{t('Файлы задачи')}</h3><AttachmentList attachments={selectedTask.attachments.filter(file => file.source === 'user')} taskId={selectedTask.id} author={attachmentAuthor} /></section>{/if}
       {#if detail?.attachments?.some(file => file.source === 'agent' && !file.commentId)}<section class="task-attachments" aria-label={t('Файлы агента')}><h3>{t('Файлы агента')}</h3><AttachmentList attachments={detail.attachments.filter(file => file.source === 'agent' && !file.commentId)} taskId={selectedTask.id} author={attachmentAuthor} /></section>{/if}
@@ -1496,6 +1517,8 @@
         {#if formError}<div class="form-error" role="alert"><Icon name="alert" size={17} />{formError}</div>{/if}
         {#if editingId && selectedTask && taskIsOccupied(selectedTask)}<div class="form-note">{t('Изменения применятся к следующему запуску. Текущий запуск сохраняет план этапов, работников, настройки, инструкции и рабочую папку. Для повтора этапа используется сохранённый план.')}</div>{/if}
         <label class="form-field"><span>{t('Название задачи')} <span class="required">*</span></span><input bind:value={formTitle} name="title" placeholder={t('Например, проверить новые изменения')} required maxlength="140" disabled={submitting} /></label>
+        {#key editingId}<DependencyPicker {tasks} taskId={editingId} bind:selected={formDependsOn} disabled={submitting} />{/key}
+        {#if formDependsOn.length}<p class="field-warning">{t('Ручной запуск разрешён и может начаться до выполнения зависимостей.')}</p>{/if}
         <TagPicker {tags} bind:selected={formTagIds} disabled={submitting} loading={tagsLoading} error={tagsError} onreload={loadTags} />
         <label class="form-field"><span>{t('Приоритет')}</span><select name="priority" aria-label={t('Приоритет')} bind:value={formPriority} aria-describedby="task-priority-help" disabled={submitting}>{#each TASK_PRIORITIES as priority (priority)}<option value={priority}>{t(TASK_PRIORITY_LABELS[priority])}</option>{/each}</select><small id="task-priority-help">{t('Автопилот первой берёт задачу с более высоким приоритетом; при равном приоритете — по порядку очереди.')}</small></label>
         <div class="task-type-switch" role="group" aria-label={t('Тип задачи')}><button type="button" class:selected={!formComplex} aria-pressed={!formComplex} disabled={submitting} onclick={() => formComplex = false}>{t('Простая задача')}</button><button type="button" class:selected={formComplex} aria-pressed={formComplex} disabled={submitting} onclick={() => formComplex = true}>{t('Сложная задача')}</button></div>

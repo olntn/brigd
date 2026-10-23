@@ -86,7 +86,7 @@ function fixtureDetail(status: RunStatus = 'completed', session = true, followup
     summary: status === 'completed' ? 'Дополнение готово.' : null, error: ['failed', 'blocked', 'interrupted'].includes(status) ? 'Причина остановки дополнительного запроса.' : null,
   } : { ...original, status };
   const task: Task = {
-    tagIds: [], tags: [],
+    dependsOnTaskIds: [], dependencies: [], tagIds: [], tags: [],
     id: original.taskId, title: 'Дополнительные запросы в сохранённую сессию', instruction: original.instruction, workerId: worker.id, worker,
     provider: worker.provider, steps: [], cwd: original.cwd, schedule: 'manual', priority: 'normal', intervalMinutes: null, firstRunAt: null, paused: false,
     createdAt: timestamp, updatedAt: latest.updatedAt, archivedAt: null, nextRunAt: null, status, latestRun: latest, runCount: followup ? 2 : 1,

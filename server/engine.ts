@@ -178,7 +178,7 @@ export class Engine {
     if (candidates.length) this.emptyQueueKey = null;
     for (const task of candidates) {
       if (capacity < 1) return;
-      if (settling.includes(task.id)) continue;
+      if (settling.includes(task.id) || this.store.taskDependencies(task.dependsOnTaskIds).some(dependency => !dependency.satisfied)) continue;
       let location: RepositoryLocation;
       try { location = this.locate(task.cwd, now); }
       catch (error) {

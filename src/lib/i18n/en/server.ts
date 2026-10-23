@@ -5,6 +5,11 @@ import type { Dictionary, Pattern } from './types';
  * attachments and the engine. Messages that store.ts shares are in server-store.ts.
  */
 export const messages: Dictionary = {
+  "Зависимости: укажите массив до 10 уникальных ID задач": "Dependencies: specify an array of up to 10 unique task IDs",
+  "Задача не может зависеть от самой себя": "A task cannot depend on itself",
+  "Задача зависимости не найдена": "Dependency task not found",
+  "Зависимости задач образуют цикл": "Task dependencies form a cycle",
+
   'Лимит времени: введите целое число от 1 до 1440 минут или null': 'Time limit: enter an integer from 1 to 1440 minutes, or null',
   // Requests and routing.
   'Недопустимый Host': 'Host not allowed',

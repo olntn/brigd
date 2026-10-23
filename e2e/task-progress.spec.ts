@@ -14,7 +14,7 @@ function fixture(progress: RunProgress | null, status: Run['status'] = 'running'
     error: null, turn: 1, mock: true, progress,
   };
   const task: Task = {
-    tagIds: [], tags: [], id: taskId, title: 'Статус выполнения задачи', instruction: run.instruction, workerId: null, worker: null,
+    dependsOnTaskIds: [], dependencies: [], tagIds: [], tags: [], id: taskId, title: 'Статус выполнения задачи', instruction: run.instruction, workerId: null, worker: null,
     steps: [], provider: 'claude', cwd: run.cwd, schedule: 'manual', priority: 'normal', intervalMinutes: null, firstRunAt: null,
     paused: false, createdAt: timestamp, updatedAt: timestamp, archivedAt: null, nextRunAt: null, status, latestRun: run, runCount: 1,
   };
