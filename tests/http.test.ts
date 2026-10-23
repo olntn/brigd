@@ -487,6 +487,24 @@ describe('autopilot endpoint', () => {
     expect(await response.json()).toMatchObject({ enabled: false, stopReason: 'manual' });
     expect(store.getAutopilot().stoppedAt).not.toBeNull();
   });
+
+  test('moves a pool task before another one or to the end of the queue', async () => {
+    const [first, second, third] = [await createTask({ schedule: 'auto' }), await createTask({ schedule: 'auto' }), await createTask({ schedule: 'auto' })];
+    const manual = await createTask();
+    let response = await request(`/api/tasks/${third.id}/queue`, 'POST', { beforeTaskId: first.id });
+    expect(response.status).toBe(200);
+    expect((await response.json()).pool.map((task: { id: string }) => task.id)).toEqual([third.id, first.id, second.id]);
+    response = await request(`/api/tasks/${third.id}/queue`, 'POST', { beforeTaskId: null });
+    expect((await response.json()).pool.map((task: { id: string }) => task.id)).toEqual([first.id, second.id, third.id]);
+    for (const value of [{}, { beforeTaskId: 7 }, { beforeTaskId: 'bad id' }, { beforeTaskId: null, extra: true }, { beforeTaskId: third.id }]) {
+      expect((await request(`/api/tasks/${third.id}/queue`, 'POST', value)).status).toBe(400);
+    }
+    expect((await request(`/api/tasks/${manual.id}/queue`, 'POST', { beforeTaskId: null })).status).toBe(409);
+    expect((await request(`/api/tasks/${third.id}/queue`, 'POST', { beforeTaskId: manual.id })).status).toBe(409);
+    expect((await request('/api/tasks/missing-task/queue', 'POST', { beforeTaskId: null })).status).toBe(404);
+    expect((await request(`/api/tasks/${third.id}/queue`, 'POST', { beforeTaskId: first.id }, { origin: 'http://evil.test' })).status).toBe(403);
+    expect(store.autopilotPool(null).map(task => task.id)).toEqual([first.id, second.id, third.id]);
+  });
 });
 
 describe('CLI setup endpoints', () => {

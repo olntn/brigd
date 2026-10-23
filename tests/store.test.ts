@@ -518,9 +518,9 @@ describe('autopilot', () => {
     expect(store.stopAutopilot('until', BASE + 5 * MINUTE)).toMatchObject({ enabled: false, startedAt: BASE + 4 * MINUTE, stoppedAt: BASE + 5 * MINUTE, stopReason: 'until' });
   });
 
-  test('pool lists eligible auto tasks oldest first and leaves out paused, archived, manual, completed, occupied and attempted tasks', () => {
-    const later = store.createTask(auto({ title: 'later' }), BASE + 1);
+  test('pool lists eligible auto tasks in queue order and leaves out paused, archived, manual, completed, occupied and attempted tasks', () => {
     const earlier = store.createTask(auto({ title: 'earlier' }), BASE);
+    const later = store.createTask(auto({ title: 'later' }), BASE + 1);
     store.createTask(auto({ title: 'paused', paused: true }), BASE);
     store.createTask(input({ title: 'manual' }), BASE);
     store.archiveTask(store.createTask(auto({ title: 'archived' }), BASE).id, BASE);
@@ -537,6 +537,50 @@ describe('autopilot', () => {
     expect(store.autopilotPool(null).map(task => task.title)).toEqual(['earlier', 'later']);
     expect(store.autopilotOverview()).toMatchObject({ enabled: true, pool: [{ id: later.id }], attempts: [{ id: run.id, trigger: 'autopilot', status: 'failed' }] });
     expect(store.autopilotCandidates(BASE + 2)).toEqual([{ id: later.id, cwd: later.cwd }]);
+  });
+
+  test('the queue keeps the order tasks joined it, and a move changes the claim order without losing deferred tasks\' places', () => {
+    const [first, second, third] = ['first', 'second', 'third'].map((title, index) => store.createTask(auto({ title }), BASE + index));
+    const titles = () => store.autopilotPool(null).map(task => task.title);
+    expect(titles()).toEqual(['first', 'second', 'third']);
+    expect(store.moveAutopilotTask(third!.id, first!.id).pool.map(task => task.title)).toEqual(['third', 'first', 'second']);
+    expect(store.autopilotCandidates(null).map(task => task.id)).toEqual([third!.id, first!.id, second!.id]);
+    store.moveAutopilotTask(third!.id, null);
+    expect(titles()).toEqual(['first', 'second', 'third']);
+    // A deferred task keeps its place and resumes its turn when it returns.
+    store.updateTask(second!.id, { ...second!, paused: true }, BASE + 10);
+    store.moveAutopilotTask(third!.id, first!.id);
+    expect(titles()).toEqual(['third', 'first']);
+    store.updateTask(second!.id, { ...second!, paused: false }, BASE + 11);
+    expect(titles()).toEqual(['third', 'first', 'second']);
+    // New tasks and tasks switched back to the autopilot join the end; edits keep the place.
+    store.createTask(auto({ title: 'fourth' }), BASE - MINUTE);
+    store.updateTask(first!.id, input({ title: 'first' }), BASE + 12);
+    store.updateTask(first!.id, auto({ title: 'first' }), BASE + 13);
+    store.updateTask(third!.id, auto({ title: 'third', instruction: 'Edited instruction.' }), BASE + 14);
+    expect(titles()).toEqual(['third', 'second', 'fourth', 'first']);
+    // Only active auto tasks move, and only before another one.
+    const manual = store.createTask(input(), BASE);
+    expectAppError(() => store.moveAutopilotTask(manual.id, null), 409);
+    expectAppError(() => store.moveAutopilotTask(third!.id, manual.id), 409);
+    expectAppError(() => store.moveAutopilotTask('00000000-0000-4000-8000-000000000000', null), 404);
+    store.archiveTask(second!.id, BASE + 20);
+    expectAppError(() => store.moveAutopilotTask(second!.id, null), 409);
+    expectAppError(() => store.moveAutopilotTask(third!.id, second!.id), 409);
+    expect(titles()).toEqual(['third', 'fourth', 'first']);
+    store.restoreTask(second!.id, BASE + 21);
+    expect(titles()).toEqual(['third', 'fourth', 'first', 'second']);
+  });
+
+  test('auto tasks saved before the queue order join its end in creation order when the database opens', () => {
+    const [first, second, third] = ['first', 'second', 'third'].map((title, index) => store.createTask(auto({ title }), BASE + index));
+    store.moveAutopilotTask(third!.id, first!.id);
+    store.db.query('UPDATE tasks SET autopilot_position=NULL WHERE id IN (?,?)').run(second!.id, first!.id);
+    store.close();
+    store = new Store(join(folder, 'trackt.sqlite'));
+    expect(store.autopilotPool(null).map(task => task.title)).toEqual(['third', 'first', 'second']);
+    store.createTask(auto({ title: 'fourth' }), BASE);
+    expect(store.autopilotPool(null).map(task => task.title)).toEqual(['third', 'first', 'second', 'fourth']);
   });
 
   test('startAutopilot refuses while off, at the stop time and for tasks outside the pool; it records the trigger and a log', () => {

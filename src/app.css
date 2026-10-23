@@ -1069,13 +1069,21 @@ dialog::backdrop { background: var(--overlay); }
 .autopilot-task strong { display: block; font-weight: 550; overflow-wrap: anywhere; }
 .autopilot-task small { display: block; margin-top: 2px; font-size: .77rem; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
 button.autopilot-task:hover strong { color: var(--accent-text); }
+.autopilot-queue-row { grid-template-columns: 48px minmax(0, 1fr) auto auto; position: relative; cursor: grab; }
+.autopilot-queue-row.dragging { opacity: .45; }
+.autopilot-queue-row.drop-before::before, .autopilot-queue-row.drop-after::after { content: ''; position: absolute; left: 12px; right: 12px; height: 2px; background: var(--accent); border-radius: 2px; z-index: 1; }
+.autopilot-queue-row.drop-before::before { top: -1px; } .autopilot-queue-row.drop-after::after { bottom: -1px; }
+.autopilot-handle { display: flex; align-items: center; gap: 2px; margin-left: -6px; padding: 4px 6px; border-radius: var(--radius-sm); color: var(--muted); cursor: grab; }
+.autopilot-handle:hover { background: var(--soft); color: var(--accent-text); }
+.autopilot-handle:active { cursor: grabbing; }
+.autopilot-handle .autopilot-position { min-width: 1.5em; color: inherit; }
 .autopilot-subheading { margin: 22px 0 8px; font-size: .92rem; font-weight: 600; color: var(--secondary); }
 .autopilot-empty { min-height: 180px; }
 .autopilot-empty h3 { margin: 12px 0 6px; font-size: 1.05rem; }
 .autopilot-checklist { margin: 0; padding-left: 20px; font-size: .85rem; line-height: 1.7; color: var(--secondary); }
 .autopilot-checklist li { margin-bottom: 6px; overflow-wrap: anywhere; }
 .autopilot-checklist strong { color: var(--text); font-weight: 600; }
-@media (max-width: 640px) { .autopilot-row { grid-template-columns: 28px minmax(0, 1fr); } .autopilot-row > .status-badge, .autopilot-row > .button { grid-column: 2; justify-self: start; } }
+@media (max-width: 640px) { .autopilot-row { grid-template-columns: 28px minmax(0, 1fr); } .autopilot-queue-row { grid-template-columns: 48px minmax(0, 1fr); } .autopilot-row > .status-badge, .autopilot-row > .button { grid-column: 2; justify-self: start; } }
 .inline-link { padding: 0; font: inherit; color: var(--accent-text); text-decoration: underline; text-underline-offset: 2px; }
 .inline-link:hover { color: var(--accent); }
 .help-article { max-width: 64rem; }

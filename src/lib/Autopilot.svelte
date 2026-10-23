@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Icon from './Icon.svelte';
   import { AUTOPILOT_FAILURE_LIMIT, AUTOPILOT_STOP_REASONS, defaultAutopilotUntil } from './autopilot';
   import { TASK_STATUS_LABELS } from './status';
@@ -25,11 +25,17 @@
   let reading = false;
   let alive = true;
   let formInitialized = false;
+  let queueList = $state<HTMLOListElement>();
+  let dragId = $state<string | null>(null);
+  let dropTarget = $state<{ id: string; zone: 'before' | 'after' } | null>(null);
   let checksConfigured = $derived(!checksRequired || !!settings?.integrationChecks?.length);
   let deferred = $derived(tasks.filter(task => task.schedule === 'auto' && task.paused && task.archivedAt === null && !task.hasCompletedRun));
+  // Archived cards leave the report the same way they leave the board.
+  let attempts = $derived((overview?.attempts ?? []).filter(run => taskOf(run)?.archivedAt == null));
+  let archivedAttempts = $derived((overview?.attempts.length ?? 0) - attempts.length);
   let summary = $derived.by(() => {
     const counts = { done: 0, waiting: 0, failed: 0, merge: 0, active: 0 };
-    for (const run of overview?.attempts ?? []) {
+    for (const run of attempts) {
       const status = outcome(run);
       if (status === 'completed') counts.done++;
       else if (status === 'waiting_input') counts.waiting++;
@@ -80,7 +86,7 @@
   }
 
   async function load(force = false) {
-    if (reading || (pending && !force)) return;
+    if (reading || dragId || (pending && !force)) return;
     reading = true;
     const readSequence = ++sequence;
     try {
@@ -139,6 +145,61 @@
     } catch (failure) { if (alive) notify(message(failure), 'error'); }
     finally { if (alive) pending = null; }
   }
+
+  /** Places a pool task right before another one, or last with null; the autopilot claims the queue from the top. */
+  async function move(task: Task, beforeId: string | null, focus = false) {
+    if (pending || !overview) return;
+    const previous = overview;
+    const pool = previous.pool.filter(item => item.id !== task.id);
+    const index = beforeId === null ? pool.length : pool.findIndex(item => item.id === beforeId);
+    if (index < 0) return;
+    pool.splice(index, 0, task);
+    if (pool.every((item, position) => item.id === previous.pool[position]?.id)) return;
+    pending = task.id;
+    sequence++;
+    overview = { ...previous, pool };
+    if (focus) { await tick(); queueList?.querySelector<HTMLElement>(`[data-queue-handle="${CSS.escape(task.id)}"]`)?.focus(); }
+    try {
+      const result = await request<AutopilotOverview>(`/api/tasks/${encodeURIComponent(task.id)}/queue`, { method: 'POST', body: JSON.stringify({ beforeTaskId: beforeId }) });
+      if (!alive) return;
+      apply(result);
+    } catch (failure) {
+      if (!alive) return;
+      overview = previous;
+      notify(message(failure), 'error');
+    } finally { if (alive) pending = null; }
+  }
+  function handleKey(event: KeyboardEvent, task: Task, index: number) {
+    if (!overview || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
+    event.preventDefault();
+    if (event.key === 'ArrowUp' && index > 0) void move(task, overview.pool[index - 1]!.id, true);
+    if (event.key === 'ArrowDown' && index < overview.pool.length - 1) void move(task, overview.pool[index + 2]?.id ?? null, true);
+  }
+  function dragStart(event: DragEvent, id: string) {
+    if (pending) { event.preventDefault(); return; }
+    dragId = id;
+    event.dataTransfer?.setData('text/plain', id);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  }
+  function dragOver(event: DragEvent, id: string) {
+    if (!dragId) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    dropTarget = dragId === id ? null : { id, zone: event.clientY - rect.top < rect.height / 2 ? 'before' : 'after' };
+  }
+  function drop(event: DragEvent) {
+    event.preventDefault();
+    const task = overview?.pool.find(item => item.id === dragId), target = dropTarget;
+    dragId = null;
+    dropTarget = null;
+    if (!overview || !task || !target) return;
+    const rest = overview.pool.filter(item => item.id !== task.id);
+    const index = rest.findIndex(item => item.id === target.id);
+    if (index < 0) return;
+    void move(task, rest[index + (target.zone === 'after' ? 1 : 0)]?.id ?? null);
+  }
+  function dragEnd() { dragId = null; dropTarget = null; }
 </script>
 
 <section class="page-heading">
@@ -169,12 +230,12 @@
 
   <section class="autopilot-section" aria-label="Очередь автопилота">
     <h2>Очередь <span class="autopilot-count">{overview.pool.length}</span></h2>
-    <p class="autopilot-help">Задачи с режимом «Автопилот» в порядке создания. Задача занятого репозитория пропускается, пока он занят. Задача, которую автопилот уже брал в этой сессии, второй раз не запускается.</p>
+    <p class="autopilot-help">Задачи с режимом «Автопилот»: первой запускается верхняя. Перетащите задачу, чтобы изменить порядок, или нажимайте ↑ и ↓ на значке перемещения. Новые задачи встают в конец. Задача занятого репозитория пропускается, пока он занят. Задача, которую автопилот уже брал в этой сессии, второй раз не запускается.</p>
     {#if overview.pool.length}
-      <ol class="autopilot-list">
+      <ol class="autopilot-list" bind:this={queueList}>
         {#each overview.pool as task, index (task.id)}
-          <li class="autopilot-row" aria-busy={pending === task.id}>
-            <span class="autopilot-position">{index + 1}</span>
+          <li class="autopilot-row autopilot-queue-row" class:dragging={dragId === task.id} class:drop-before={dropTarget?.id === task.id && dropTarget.zone === 'before'} class:drop-after={dropTarget?.id === task.id && dropTarget.zone === 'after'} aria-busy={pending === task.id} draggable={!pending} ondragstart={(event) => dragStart(event, task.id)} ondragend={dragEnd} ondragover={(event) => dragOver(event, task.id)} ondrop={drop}>
+            <button type="button" class="autopilot-handle" data-queue-handle={task.id} aria-label={`Переместить: ${task.title}, место ${index + 1} из ${overview.pool.length}`} aria-keyshortcuts="ArrowUp ArrowDown" title="Перетащите или нажмите ↑ и ↓, чтобы изменить порядок" onkeydown={(event) => handleKey(event, task, index)}><Icon name="grip" size={15} /><span class="autopilot-position">{index + 1}</span></button>
             <button class="autopilot-task" onclick={() => onopen(task)} aria-label={'Открыть: ' + task.title}><strong>{task.title}</strong><small>{shortPath(task.cwd)}{#if task.worker}{' · '}{task.worker.name}{/if}</small></button>
             <span class="status-badge status-{task.status}"><span class="status-dot"></span>{TASK_STATUS_LABELS[task.status]}</span>
             <button class="button secondary" disabled={!!pending} onclick={() => setPaused(task, true)} aria-label={'Отложить: ' + task.title}><Icon name="pause" size={14} />Отложить</button>
@@ -204,10 +265,10 @@
     {#if overview.startedAt === null}
       <p class="autopilot-help">Автопилот ещё не включали. После первой сессии здесь будет список взятых задач и их результаты.</p>
     {:else}
-      <p class="autopilot-help">С {dateTime(overview.startedAt)}{#if overview.stoppedAt !== null} по {dateTime(overview.stoppedAt)}{/if}. Готово: {summary.done} · Ждут ответа: {summary.waiting} · Ошибки и блокировки: {summary.failed} · Проблемы слияния: {summary.merge} · В работе: {summary.active}.</p>
-      {#if overview.attempts.length}
+      <p class="autopilot-help">С {dateTime(overview.startedAt)}{#if overview.stoppedAt !== null} по {dateTime(overview.stoppedAt)}{/if}. Готово: {summary.done} · Ждут ответа: {summary.waiting} · Ошибки и блокировки: {summary.failed} · Проблемы слияния: {summary.merge} · В работе: {summary.active}.{#if archivedAttempts} Задачи из архива не показаны: {archivedAttempts}.{/if}</p>
+      {#if attempts.length}
         <ul class="autopilot-list">
-          {#each overview.attempts as run (run.id)}
+          {#each attempts as run (run.id)}
             {@const task = taskOf(run)}
             {@const status = outcome(run)}
             <li class="autopilot-row">
@@ -222,7 +283,7 @@
             </li>
           {/each}
         </ul>
-      {:else}
+      {:else if !archivedAttempts}
         <p class="autopilot-help">Автопилот пока не взял ни одной задачи в этой сессии.</p>
       {/if}
     {/if}

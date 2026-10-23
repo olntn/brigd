@@ -56,6 +56,16 @@ export function validateAutopilot(value: unknown, now = Date.now()): AutopilotIn
   if (v.enabled && until !== null && until > now + AUTOPILOT_MAX_WINDOW_MS) throw new AppError('Время остановки: не больше 31 дня вперёд');
   return { enabled: v.enabled, until: until as number | null };
 }
+/** A move within the autopilot queue: the card that should follow the moved one, or null for the end of the queue. */
+export function validateAutopilotMove(value: unknown, taskId: string): { beforeTaskId: string | null } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError('Ожидается JSON-объект');
+  const v = value as Record<string, unknown>;
+  if (Object.keys(v).some(key => key !== 'beforeTaskId') || !Object.hasOwn(v, 'beforeTaskId')) throw new AppError('Укажите только поле beforeTaskId');
+  const before = v.beforeTaskId;
+  if (before !== null && (typeof before !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(before))) throw new AppError('beforeTaskId: укажите ID задачи или null');
+  if (before === taskId) throw new AppError('Задачу нельзя поставить перед самой собой');
+  return { beforeTaskId: before };
+}
 
 /** CLI settings, private instructions and avatar shared by worker profiles and the integrator profile. */
 function executionProfile(v: Record<string, unknown>, instructionsLabel: string): Pick<WorkerInput, 'provider' | 'effort' | 'communicationStyle' | 'avatarUrl'> & { model: string | null } {

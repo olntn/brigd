@@ -28,6 +28,8 @@ type Row = Record<string, any>;
 const ATTACHMENT_COLUMNS = 'a.id,a.task_id,a.comment_id,a.run_id,a.step_index,a.attempt_id,a.source,a.name,a.mime,a.size,a.sha256,a.previewable,a.created_at';
 const OPEN = "'queued','preparing','running','cancelling','waiting_input','interrupted'";
 const OCCUPIED = `(status IN (${OPEN}) OR (steps_snapshot != '[]' AND status IN ('failed','blocked')))`;
+/** The autopilot queue order a person arranges by dragging; creation order breaks ties. */
+const AUTOPILOT_ORDER = 'autopilot_position IS NULL, autopilot_position, created_at, rowid';
 export interface RunFence { turn: number; currentStepIndex: number | null; attemptId: string | null; }
 export interface WorkspaceRecord { snapshot: WorkspaceSnapshot; taskId: string | null; taskTitle: string | null; runs: WorkspaceRun[]; }
 const WORKSPACE_RECORD_SQL = `SELECT w.id, r.id AS run_id, r.task_id, r.status, r.started_at, i.state AS integration_state,
@@ -313,11 +315,17 @@ export class Store {
         // NULL keeps the worker profile's setting, so existing cards and runs behave exactly as before.
         ['tasks', 'ultracode', 'INTEGER CHECK(ultracode IN (0,1))'],
         ['runs', 'ultracode', 'INTEGER CHECK(ultracode IN (0,1))'],
+        // The card's place in the autopilot queue; NULL while the card is not scheduled as auto.
+        ['tasks', 'autopilot_position', 'INTEGER'],
       ]) {
         if (!(this.db.query(`PRAGMA table_info(${table})`).all() as Row[]).some(row => row.name === column)) {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
         }
       }
+      // Auto cards that predate the queue order, or come from an older backup, join its end in creation order.
+      const unordered = this.db.query("SELECT id FROM tasks WHERE schedule='auto' AND autopilot_position IS NULL ORDER BY created_at, rowid").all() as Row[];
+      const start = this.nextAutopilotPosition();
+      unordered.forEach((row, index) => { this.db.query('UPDATE tasks SET autopilot_position=? WHERE id=?').run(start + index, row.id); });
       // Replace the legacy predicate atomically: queued work also occupies a task.
       this.db.exec(`DROP INDEX IF EXISTS one_open_run;
         CREATE UNIQUE INDEX one_open_run ON runs(task_id) WHERE status IN (${OPEN});
@@ -1097,13 +1105,34 @@ export class Store {
     this.db.query('UPDATE autopilot SET enabled=0,stopped_at=?,stop_reason=?,updated_at=? WHERE singleton=1 AND enabled=1').run(now, reason, now);
     return this.getAutopilot();
   }
-  /** Pool tasks in claim order: oldest first. With a session start, tasks the autopilot already attempted in that session are left out. */
+  /** Pool tasks in claim order: the queue's head first. With a session start, tasks the autopilot already attempted in that session are left out. */
   private autopilotRows(sessionStart: number | null, taskId?: string): Row[] {
     return (this.db.query(`SELECT * FROM tasks t WHERE schedule='auto' AND paused=0 AND archived_at IS NULL AND (? IS NULL OR id=?)
       AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.task_id=t.id AND r.status='completed')
       AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.task_id=t.id AND r.trigger='autopilot' AND r.started_at>=?)
-      ORDER BY created_at ASC, rowid ASC`).all(taskId ?? null, taskId ?? null, sessionStart ?? Number.MAX_SAFE_INTEGER) as Row[])
+      ORDER BY ${AUTOPILOT_ORDER}`).all(taskId ?? null, taskId ?? null, sessionStart ?? Number.MAX_SAFE_INTEGER) as Row[])
       .filter(row => !this.activeRun(row.id));
+  }
+  /** The end of the autopilot queue. Positions only order the queue, so gaps left by finished cards are harmless. */
+  private nextAutopilotPosition(): number {
+    return (this.db.query('SELECT COALESCE(MAX(autopilot_position), -1) + 1 AS n FROM tasks').get() as Row).n;
+  }
+  /**
+   * Places an auto card right before another one, or at the end of the queue with null.
+   * Deferred and already attempted cards keep their places too, so a card returned to the pool resumes its turn.
+   */
+  moveAutopilotTask(taskId: string, beforeTaskId: string | null): AutopilotOverview {
+    return this.db.transaction(() => {
+      const task = this.getTask(taskId);
+      this.assertNotArchived(task);
+      if (task.schedule !== 'auto') throw new AppError('Задача не стоит в очереди автопилота. Выберите для неё режим «Автопилот».', 409);
+      const queue = (this.db.query(`SELECT id FROM tasks WHERE schedule='auto' AND archived_at IS NULL AND id!=? ORDER BY ${AUTOPILOT_ORDER}`).all(taskId) as Row[]).map(row => row.id as string);
+      const index = beforeTaskId === null ? queue.length : queue.indexOf(beforeTaskId);
+      if (index < 0) throw new AppError('Задача, перед которой нужно поставить эту, больше не в очереди автопилота. Обновите страницу и повторите.', 409);
+      queue.splice(index, 0, taskId);
+      queue.forEach((id, position) => { this.db.query('UPDATE tasks SET autopilot_position=? WHERE id=? AND autopilot_position IS NOT ?').run(position, id, position); });
+      return this.autopilotOverview();
+    }).immediate();
   }
   autopilotPool(sessionStart: number | null): Task[] { return this.autopilotRows(sessionStart).map(row => this.mapTask(row)); }
   /** The scheduler tick needs only identity and folder. */
@@ -1470,13 +1499,13 @@ export class Store {
       return this.getTask(id);
     }).immediate();
   }
-  /** Occurrences that fell due while archived are skipped, never replayed on restore. */
+  /** Occurrences that fell due while archived are skipped, never replayed on restore; an auto card rejoins the end of the queue. */
   restoreTask(id: string, now = Date.now()): Task {
     return this.db.transaction(() => {
       const task = this.getTask(id);
       if (task.archivedAt === null) return task;
       const next = task.schedule === 'interval' && task.nextRunAt !== null && task.nextRunAt <= now ? nextOccurrence(task.nextRunAt, task.intervalMinutes!, now).next : task.nextRunAt;
-      this.db.query('UPDATE tasks SET archived_at=NULL,next_run_at=?,updated_at=? WHERE id=?').run(next, now, id);
+      this.db.query('UPDATE tasks SET archived_at=NULL,next_run_at=?,updated_at=?,autopilot_position=? WHERE id=?').run(next, now, task.schedule === 'auto' ? this.nextAutopilotPosition() : null, id);
       return this.getTask(id);
     }).immediate();
   }
@@ -1516,9 +1545,10 @@ export class Store {
       const worker = steps.length ? null : this.assignedWorker(input.workerId);
       const provider = steps.length ? this.getWorker(steps[0]!.workerId).provider : worker?.provider ?? input.provider;
       const ultracode = validatedTaskUltracode(input.ultracode);
-      this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template,doc_page_ids,ultracode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
+      this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template,doc_page_ids,ultracode,autopilot_position) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
         input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt,
-        input.schedule === 'interval' ? (input.firstRunAt ?? now) : null, +input.paused, now, now, worker?.id ?? null, JSON.stringify(steps), JSON.stringify(this.taskDocPageIds(input.docPageIds ?? [])), storedFlag(ultracode));
+        input.schedule === 'interval' ? (input.firstRunAt ?? now) : null, +input.paused, now, now, worker?.id ?? null, JSON.stringify(steps), JSON.stringify(this.taskDocPageIds(input.docPageIds ?? [])), storedFlag(ultracode),
+        input.schedule === 'auto' ? this.nextAutopilotPosition() : null);
       this.replaceTaskAttachments(id, input.attachmentIds, now);
       this.replaceTaskTags(id, input.tagIds === undefined ? [] : input.tagIds);
       return this.getTask(id);
@@ -1536,8 +1566,11 @@ export class Store {
       if (changedSchedule) next = input.schedule === 'interval' ? (input.firstRunAt ?? now) : null;
       const docPageIds = input.docPageIds === undefined ? task.docPageIds ?? [] : this.taskDocPageIds(input.docPageIds, task.docPageIds ?? []);
       const ultracode = validatedTaskUltracode(input.ultracode === undefined ? task.ultracode : input.ultracode);
-      this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=?,doc_page_ids=?,ultracode=? WHERE id=?`)
-        .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), JSON.stringify(docPageIds), storedFlag(ultracode), id);
+      // A card switched to the autopilot queues at the end; leaving it gives up its place.
+      const position = input.schedule !== 'auto' ? null : task.schedule === 'auto'
+        ? (this.db.query('SELECT autopilot_position FROM tasks WHERE id=?').get(id) as Row).autopilot_position : this.nextAutopilotPosition();
+      this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=?,doc_page_ids=?,ultracode=?,autopilot_position=? WHERE id=?`)
+        .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), JSON.stringify(docPageIds), storedFlag(ultracode), position, id);
       this.replaceTaskAttachments(id, input.attachmentIds, now);
       if (input.tagIds !== undefined) this.replaceTaskTags(id, input.tagIds);
       return this.getTask(id);
