@@ -1,7 +1,7 @@
 /** Human sizes in Russian: whole bytes below a kilobyte, then one decimal up the binary ladder. */
 export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} Б`;
-  const units = ['КБ', 'МБ', 'ГБ', 'ТБ'];
+  if (bytes < 1024) return `${bytes} Б`; // i18n-ignore: server text; the interface uses formatSize()
+  const units = ['КБ', 'МБ', 'ГБ', 'ТБ']; // i18n-ignore
   let value = bytes / 1024, unit = 0;
   while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
   return `${value.toLocaleString('ru-RU', { maximumFractionDigits: 1 })} ${units[unit]}`;

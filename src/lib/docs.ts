@@ -1,3 +1,4 @@
+import { tk } from './i18n/key';
 import type { DocBlock, DocBlockType, DocCalloutColor, DocPageSummary } from './types';
 
 export const DOC_TITLE_LIMIT = 140;
@@ -18,37 +19,39 @@ export const DOC_IMAGES_TOTAL_MAX_BYTES = 1024 * 1024 * 1024;
 export const DOC_IMAGE_ORPHAN_TTL_MS = 60 * 60 * 1000;
 export const DOC_MARKDOWN_LIMIT = 256 * 1024;
 export const DOC_SEARCH_LIMIT = 20;
-export const DOC_UNTITLED = 'Без названия';
+/** Shown for a page or heading without a title; translate it with t() where it is rendered. */
+export const DOC_UNTITLED = tk('Без названия');
 export const DOC_CALLOUT_COLORS: readonly DocCalloutColor[] = ['gray', 'blue', 'green', 'yellow', 'red'];
-export const DOC_CALLOUT_COLOR_LABELS: Record<DocCalloutColor, string> = { gray: 'Серый', blue: 'Синий', green: 'Зелёный', yellow: 'Жёлтый', red: 'Красный' };
+export const DOC_CALLOUT_COLOR_LABELS: Record<DocCalloutColor, string> = { gray: tk('Серый'), blue: tk('Синий'), green: tk('Зелёный'), yellow: tk('Жёлтый'), red: tk('Красный') };
 export const DOC_CALLOUT_ICONS = ['💡', '📌', '⚠️', '✅', '❗', '📝', '🔧', '🚀'];
 
 export interface DocBlockKind {
   type: DocBlockType;
+  /** Russian label and hint; translate them with t() where they are rendered. */
   label: string;
   hint: string;
-  /** Lowercase search terms for the block menu, Latin and Cyrillic. */
+  /** Lowercase search terms for the block menu, Latin and Cyrillic; they search in both languages. */
   keywords: string[];
   /** What to type at the start of a block to get this type, shown as a hint. */
   shortcut: string | null;
 }
 export const DOC_BLOCK_KINDS: readonly DocBlockKind[] = [
-  { type: 'paragraph', label: 'Текст', hint: 'Обычный абзац', keywords: ['text', 'paragraph', 'текст', 'абзац'], shortcut: null },
-  { type: 'heading1', label: 'Заголовок 1', hint: 'Крупный заголовок раздела', keywords: ['h1', 'heading', 'заголовок'], shortcut: '# ' },
-  { type: 'heading2', label: 'Заголовок 2', hint: 'Заголовок подраздела', keywords: ['h2', 'heading', 'заголовок'], shortcut: '## ' },
-  { type: 'heading3', label: 'Заголовок 3', hint: 'Небольшой заголовок', keywords: ['h3', 'heading', 'заголовок'], shortcut: '### ' },
-  { type: 'bulleted', label: 'Маркированный список', hint: 'Список с точками', keywords: ['list', 'bullet', 'список', 'маркированный'], shortcut: '- ' },
-  { type: 'numbered', label: 'Нумерованный список', hint: 'Список с номерами', keywords: ['list', 'numbered', 'ordered', 'список', 'нумерованный'], shortcut: '1. ' },
-  { type: 'todo', label: 'Чекбокс', hint: 'Пункт, который можно отметить', keywords: ['todo', 'task', 'check', 'чекбокс', 'галочка'], shortcut: '[] ' },
-  { type: 'toggle', label: 'Раскрывающийся блок', hint: 'Скрывает вложенные блоки', keywords: ['toggle', 'details', 'раскрывающийся', 'свернуть', 'спойлер'], shortcut: null },
-  { type: 'quote', label: 'Цитата', hint: 'Выделенный фрагмент', keywords: ['quote', 'цитата'], shortcut: '> ' },
-  { type: 'callout', label: 'Выноска', hint: 'Заметка с иконкой и фоном', keywords: ['callout', 'note', 'выноска', 'заметка', 'важно'], shortcut: null },
-  { type: 'code', label: 'Код', hint: 'Моноширинный блок без форматирования', keywords: ['code', 'код', 'pre'], shortcut: '```' },
-  { type: 'table', label: 'Таблица', hint: 'Строки и столбцы с текстом', keywords: ['table', 'таблица'], shortcut: null },
-  { type: 'image', label: 'Изображение', hint: 'PNG, JPEG, WebP или GIF из файла', keywords: ['image', 'picture', 'photo', 'изображение', 'картинка', 'фото'], shortcut: null },
-  { type: 'task', label: 'Задача', hint: 'Карточка задачи brigd со статусом', keywords: ['task', 'card', 'задача', 'карточка'], shortcut: null },
-  { type: 'toc', label: 'Оглавление', hint: 'Список заголовков этой страницы', keywords: ['toc', 'contents', 'оглавление', 'содержание'], shortcut: null },
-  { type: 'divider', label: 'Разделитель', hint: 'Горизонтальная линия', keywords: ['divider', 'hr', 'line', 'разделитель', 'линия'], shortcut: '---' },
+  { type: 'paragraph', label: tk('Текст'), hint: tk('Обычный абзац'), keywords: ['text', 'paragraph', 'текст', 'абзац'], shortcut: null }, // i18n-ignore
+  { type: 'heading1', label: tk('Заголовок 1'), hint: tk('Крупный заголовок раздела'), keywords: ['h1', 'heading', 'заголовок'], shortcut: '# ' }, // i18n-ignore
+  { type: 'heading2', label: tk('Заголовок 2'), hint: tk('Заголовок подраздела'), keywords: ['h2', 'heading', 'заголовок'], shortcut: '## ' }, // i18n-ignore
+  { type: 'heading3', label: tk('Заголовок 3'), hint: tk('Небольшой заголовок'), keywords: ['h3', 'heading', 'заголовок'], shortcut: '### ' }, // i18n-ignore
+  { type: 'bulleted', label: tk('Маркированный список'), hint: tk('Список с точками'), keywords: ['list', 'bullet', 'список', 'маркированный'], shortcut: '- ' }, // i18n-ignore
+  { type: 'numbered', label: tk('Нумерованный список'), hint: tk('Список с номерами'), keywords: ['list', 'numbered', 'ordered', 'список', 'нумерованный'], shortcut: '1. ' }, // i18n-ignore
+  { type: 'todo', label: tk('Чекбокс'), hint: tk('Пункт, который можно отметить'), keywords: ['todo', 'task', 'check', 'чекбокс', 'галочка'], shortcut: '[] ' }, // i18n-ignore
+  { type: 'toggle', label: tk('Раскрывающийся блок'), hint: tk('Скрывает вложенные блоки'), keywords: ['toggle', 'details', 'раскрывающийся', 'свернуть', 'спойлер'], shortcut: null }, // i18n-ignore
+  { type: 'quote', label: tk('Цитата'), hint: tk('Выделенный фрагмент'), keywords: ['quote', 'цитата'], shortcut: '> ' }, // i18n-ignore
+  { type: 'callout', label: tk('Выноска'), hint: tk('Заметка с иконкой и фоном'), keywords: ['callout', 'note', 'выноска', 'заметка', 'важно'], shortcut: null }, // i18n-ignore
+  { type: 'code', label: tk('Код'), hint: tk('Моноширинный блок без форматирования'), keywords: ['code', 'код', 'pre'], shortcut: '```' }, // i18n-ignore
+  { type: 'table', label: tk('Таблица'), hint: tk('Строки и столбцы с текстом'), keywords: ['table', 'таблица'], shortcut: null }, // i18n-ignore
+  { type: 'image', label: tk('Изображение'), hint: tk('PNG, JPEG, WebP или GIF из файла'), keywords: ['image', 'picture', 'photo', 'изображение', 'картинка', 'фото'], shortcut: null }, // i18n-ignore
+  { type: 'task', label: tk('Задача'), hint: tk('Карточка задачи brigd со статусом'), keywords: ['task', 'card', 'задача', 'карточка'], shortcut: null }, // i18n-ignore
+  { type: 'toc', label: tk('Оглавление'), hint: tk('Список заголовков этой страницы'), keywords: ['toc', 'contents', 'оглавление', 'содержание'], shortcut: null }, // i18n-ignore
+  { type: 'divider', label: tk('Разделитель'), hint: tk('Горизонтальная линия'), keywords: ['divider', 'hr', 'line', 'разделитель', 'линия'], shortcut: '---' }, // i18n-ignore
 ];
 const kinds = new Map(DOC_BLOCK_KINDS.map(kind => [kind.type, kind]));
 const LIST_TYPES = new Set<DocBlockType>(['bulleted', 'numbered', 'todo']);
@@ -60,7 +63,7 @@ export const isDocListType = (type: DocBlockType): boolean => LIST_TYPES.has(typ
 export const isDocTextType = (type: DocBlockType): boolean => TEXT_TYPES.has(type);
 export const isDocCalloutColor = (value: unknown): value is DocCalloutColor => typeof value === 'string' && (DOC_CALLOUT_COLORS as readonly string[]).includes(value);
 export const docBlockKind = (type: DocBlockType): DocBlockKind => kinds.get(type)!;
-export const docPageTitle = (page: { title: string }): string => page.title.trim() || DOC_UNTITLED;
+export const docPageTitle = (page: { title: string }, untitled: string = DOC_UNTITLED): string => page.title.trim() || untitled;
 
 function typeDefaults(block: DocBlock, source?: DocBlock) {
   switch (block.type) {
@@ -160,11 +163,11 @@ export function docSearchText(blocks: DocBlock[]): string {
 }
 
 export interface DocHeading { id: string; level: 1 | 2 | 3; text: string; }
-export function docHeadings(blocks: DocBlock[]): DocHeading[] {
+export function docHeadings(blocks: DocBlock[], untitled: string = DOC_UNTITLED): DocHeading[] {
   const headings: DocHeading[] = [];
   for (const block of blocks) {
     const level = block.type === 'heading1' ? 1 : block.type === 'heading2' ? 2 : block.type === 'heading3' ? 3 : null;
-    if (level) headings.push({ id: block.id, level, text: stripInlineMarkdown(block.text) || DOC_UNTITLED });
+    if (level) headings.push({ id: block.id, level, text: stripInlineMarkdown(block.text) || untitled });
   }
   return headings;
 }

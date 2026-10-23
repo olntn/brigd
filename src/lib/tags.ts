@@ -1,15 +1,17 @@
+import { tk } from './i18n/key';
+
 export const TAG_NAME_LIMIT = 50;
 export const TAG_COUNT_LIMIT = 100;
 export const DEFAULT_TAG_COLOR = '#7764cf';
 export const TAG_COLORS = [
-  { name: 'Фиолетовый', value: DEFAULT_TAG_COLOR },
-  { name: 'Синий', value: '#3b82f6' },
-  { name: 'Голубой', value: '#0891b2' },
-  { name: 'Зелёный', value: '#16a34a' },
-  { name: 'Жёлтый', value: '#eab308' },
-  { name: 'Оранжевый', value: '#ea580c' },
-  { name: 'Красный', value: '#dc2626' },
-  { name: 'Розовый', value: '#db2777' },
+  { name: tk('Фиолетовый'), value: DEFAULT_TAG_COLOR },
+  { name: tk('Синий'), value: '#3b82f6' },
+  { name: tk('Голубой'), value: '#0891b2' },
+  { name: tk('Зелёный'), value: '#16a34a' },
+  { name: tk('Жёлтый'), value: '#eab308' },
+  { name: tk('Оранжевый'), value: '#ea580c' },
+  { name: tk('Красный'), value: '#dc2626' },
+  { name: tk('Розовый'), value: '#db2777' },
 ] as const;
 
 /** Soften the chosen color while keeping white text readable on either theme. */

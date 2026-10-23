@@ -1,0 +1,304 @@
+import type { Dictionary } from './types';
+
+const dictionary: Dictionary = {
+  // Shared by the settings panels.
+  'Повторить загрузку настроек': 'Reload settings',
+  'Дождитесь ответа сервера, прежде чем закрывать настройки.': 'Wait for the server to respond before closing the settings.',
+  'Не удалось сохранить настройки. Попробуйте ещё раз.': 'Could not save the settings. Try again.',
+  'Не удалось выполнить действие. Попробуйте ещё раз.': 'Could not complete the action. Try again.',
+  'Настройки сохранены': 'Settings saved',
+  'Сохранить настройки': 'Save settings',
+  'Сохраняем настройки…': 'Saving settings…',
+  'Вручную': 'Manual',
+  'По расписанию': 'Scheduled',
+  'в архиве': 'archived',
+  'Добавить': 'Add',
+  'Закрыть': 'Close',
+  'Пример': 'Example',
+
+  // General settings.
+  'Параметры для новых задач и замена работников при исчерпании лимитов.': 'Defaults for new tasks and worker fallback when limits run out.',
+  'Загружаем общие настройки…': 'Loading general settings…',
+  'Общие настройки': 'General settings',
+  'Рабочая папка по умолчанию': 'Default working folder',
+  'Укажите рабочую папку по умолчанию.': 'Enter the default working folder.',
+  'Абсолютный путь к папке на компьютере, где запущен brigd. Подставляется при создании задачи; его можно изменить в форме.':
+    'Absolute path to a folder on the computer running brigd. It is filled in when a task is created and can be changed in the form.',
+  'Тип запуска по умолчанию': 'Default run type',
+  'Выбирается в поле «Когда запускать» у новых задач. Его можно изменить в форме задачи.':
+    'Preselected in the “When to run” field of new tasks. It can be changed in the task form.',
+  'Работник по умолчанию': 'Default worker',
+  'Не выбирать': 'None',
+  'В новой задаче работник не выбран: укажите его или провайдера в форме.': 'New tasks start without a worker: choose one or a provider in the form.',
+  'Работник не найден в списке. Выберите другого или оставьте поле пустым.': 'The worker is not in the list. Choose another one or leave the field empty.',
+  '{name} в архиве и не подставляется в новые задачи. Восстановите профиль или выберите другого.':
+    '{name} is archived and is not filled into new tasks. Restore the profile or choose another worker.',
+  '{name} подставляется в поле «Работник» у новых простых задач. Его можно изменить в форме задачи.':
+    '{name} is filled into the “Worker” field of new single-stage tasks. It can be changed in the task form.',
+  'Замена при исчерпании лимитов': 'Fallback when limits run out',
+  'Когда CLI сообщает, что лимиты использования закончились, новую сессию с тем же заданием начинает выбранный работник, обычно другого провайдера: например, Codex Sol 6.1 ↔ Claude Code Opus 5.5. Продолжения сохранённых сессий не передаются. В профиле работника можно задать свою замену вместо этой.':
+    'When a CLI reports that its usage limits are exhausted, the selected worker, usually from another provider, starts a new session with the same assignment: for example, Codex Sol 6.1 ↔ Claude Code Opus 5.5. Continuations of saved sessions are not handed over. A worker profile can set its own fallback instead of this one.',
+  'Если у Codex закончились лимиты': 'If Codex runs out of limits',
+  'Если у Claude Code закончились лимиты': 'If Claude Code runs out of limits',
+  'Не заменять': 'No fallback',
+  'Запуск останется с ошибкой, пока лимиты {provider} не восстановятся.': 'The run stays failed until the {provider} limits recover.',
+  '{name} в архиве: восстановите работника или выберите другого, иначе замена не сработает.':
+    '{name} is archived: restore the worker or choose another, otherwise the fallback will not work.',
+  '{name} тоже использует {provider}: лимиты аккаунта общие, выберите работника другого провайдера.':
+    '{name} also uses {provider}: account limits are shared, so choose a worker with another provider.',
+  '{name} ({workerProvider}) подхватит новую сессию вместо работника {provider}.': '{name} ({workerProvider}) will take over in a new session instead of the {provider} worker.',
+  'Сначала создайте работников в разделе «Работники»: замена выбирается из их профилей.':
+    'Create workers in the “Workers” section first: the fallback is chosen from their profiles.',
+
+  // Model catalog.
+  'Настройте список для профилей работников. У каждого провайдера свой набор моделей.': 'Set up the list for worker profiles. Each provider has its own set of models.',
+  'Изменения списка не меняют ID моделей в сохранённых профилях, текущих запусках и истории. Доступность модели зависит от вашего CLI и аккаунта.':
+    'Editing the list does not change model IDs in saved profiles, current runs or history. Model availability depends on your CLI and account.',
+  'Повторить загрузку моделей': 'Reload models',
+  'Закрыть сообщение': 'Dismiss message',
+  'Загружаем список моделей…': 'Loading models…',
+  'Удаляем модель…': 'Deleting the model…',
+  'Сохраняем модель…': 'Saving the model…',
+  'Редактировать модель': 'Edit model',
+  'Добавить модель': 'Add model',
+  'Название модели': 'Model name',
+  'Название в списке': 'Name shown in the list',
+  'ID модели': 'Model ID',
+  'Точный ID или алиас модели': 'Exact model ID or alias',
+  'До {limit} символов, без пробелов. ID передаётся в CLI без изменений.': 'Up to {limit} characters, no spaces. The ID is passed to the CLI as is.',
+  'Провайдер модели': 'Model provider',
+  'Сохранить модель': 'Save model',
+  'Укажите название модели: от 1 до {limit} символов, без управляющих символов.': 'Enter a model name: 1 to {limit} characters, no control characters.',
+  'Укажите ID модели. Значение CLI по умолчанию уже есть в выборе работника.': 'Enter a model ID. The CLI default is already available in the worker’s model choice.',
+  'Проверьте ID модели.': 'Check the model ID.',
+  'Модель сохранена': 'Model saved',
+  'Модель добавлена': 'Model added',
+  'Не удалось сохранить модель. Попробуйте ещё раз.': 'Could not save the model. Try again.',
+  'Модель удалена из списка. Профили работников и история сохранены.': 'Model removed from the list. Worker profiles and history are kept.',
+  'Не удалось удалить модель. Попробуйте ещё раз.': 'Could not delete the model. Try again.',
+  'Модели {provider}': '{provider} models',
+  'Добавить модель {provider}': 'Add {provider} model',
+  'Модель: {name}': 'Model: {name}',
+  'Изменить модель: {name}': 'Edit model: {name}',
+  'Изменить модель': 'Edit model',
+  'Удалить модель: {name}': 'Delete model: {name}',
+  'Удалить из списка': 'Remove from list',
+  'Удалить «{name}» из списка? Сохранённые профили и запуски продолжат использовать прежний ID.':
+    'Remove “{name}” from the list? Saved profiles and runs will keep using the previous ID.',
+  'Моделей пока нет. У работника остаются значение CLI по умолчанию и ручной ввод ID.':
+    'No models yet. Workers can still use the CLI default or enter an ID manually.',
+  'До {limit} моделей для каждого провайдера. Изменения сохраняются на сервере.': 'Up to {limit} models per provider. Changes are saved on the server.',
+
+  // Autopilot integration checks.
+  'Задайте команды, которые проверяют результат перед слиянием с целевой веткой.': 'Set the commands that check the result before it is merged into the target branch.',
+  'В рабочем режиме без BRIGD_INTEGRATION_CHECKS нельзя включить автопилот и запускать процессы, которым нужны эти проверки. Сохранённое здесь значение имеет приоритет над переменной окружения.':
+    'In production mode, without BRIGD_INTEGRATION_CHECKS you cannot turn on Autopilot or start processes that need these checks. A value saved here takes priority over the environment variable.',
+  'Загружаем настройки автопилота…': 'Loading Autopilot settings…',
+  'Сбрасываем настройку…': 'Resetting the setting…',
+  'Сохраняем проверки…': 'Saving the checks…',
+  'JSON-массив команд: каждая команда — массив программы и её аргументов. Команды выполняются по очереди в рабочей папке проекта. Перед проверками добавьте установку зависимостей: в отдельной папке слияния их ещё нет.':
+    'A JSON array of commands: each command is an array of the program and its arguments. Commands run one after another in the project working folder. Install dependencies before the checks: the separate merge folder does not have them yet.',
+  'Используется значение из настроек.': 'Using the value from the settings.',
+  'Используется переменная окружения BRIGD_INTEGRATION_CHECKS.': 'Using the BRIGD_INTEGRATION_CHECKS environment variable.',
+  'Проверки не настроены. В рабочем режиме зависимые процессы недоступны до сохранения команд.':
+    'Checks are not configured. In production mode, dependent processes are unavailable until commands are saved.',
+  'Сброс удаляет сохранённое значение и возвращает значение окружения, если оно задано.': 'Resetting removes the saved value and falls back to the environment value, if set.',
+  'Сбросить настройку': 'Reset setting',
+  'Сохранить проверки': 'Save checks',
+  'Настройка сброшена. Используется значение окружения, если оно задано.': 'Setting reset. The environment value is used, if set.',
+  'Проверки сохранены. Настройка применяется без перезапуска сервера.': 'Checks saved. The setting applies without restarting the server.',
+  'Проверьте формат команд.': 'Check the command format.',
+  'BRIGD_INTEGRATION_CHECKS: укажите 1–10 непустых команд массивами аргументов': 'BRIGD_INTEGRATION_CHECKS: specify 1–10 non-empty commands as argument arrays',
+  'BRIGD_INTEGRATION_CHECKS должен быть JSON-массивом массивов аргументов': 'BRIGD_INTEGRATION_CHECKS must be a JSON array of argument arrays',
+
+  // Permissions.
+  'Общий режим доступа для обоих CLI.': 'One access mode for both CLIs.',
+  'guide::Инструкция': 'Guide',
+  'Загружаем режим доступа…': 'Loading the access mode…',
+  'Полный доступ Codex и Claude Code': 'Full access for Codex and Claude Code',
+  'Команды и запись файлов без подтверждений и песочниц CLI, с правами пользователя сервиса.':
+    'Commands and file writes without CLI approvals or sandboxes, with the service user’s permissions.',
+  'Codex работает в песочнице рабочей папки. Claude Code использует правила разрешений; действия с запросом подтверждения блокируются.':
+    'Codex works in a working-folder sandbox. Claude Code uses permission rules; actions that ask for approval are blocked.',
+  'Права ОС, границы контейнера, вход в аккаунты, лимиты и политики провайдеров сохраняются.':
+    'OS permissions, container boundaries, account sign-ins, limits and provider policies still apply.',
+  'Сохраняем режим…': 'Saving the mode…',
+  'Применяется к новым запускам и продолжениям сессий. Уже запущенные процессы сохраняют прежний режим.':
+    'Applies to new runs and session continuations. Processes already running keep the previous mode.',
+  'Настройки ограниченного режима': 'Standard mode settings',
+  'Эти кнопки дополняют пользовательские файлы CLI. Для полного доступа они не нужны.': 'These buttons add to the CLI user files. They are not needed for full access.',
+  'Проверяем файлы CLI…': 'Checking the CLI files…',
+  'Настройка {provider}': '{provider} setup',
+  'Файл не прочитан': 'File not read',
+  'Разрешения включены': 'Permissions enabled',
+  'Разрешения не включены': 'Permissions not enabled',
+  'Без изменений': 'No changes',
+  'Файл обновлён': 'File updated',
+  'Файл обновлён, прежняя версия: {backup}': 'File updated, previous version: {backup}',
+  'Нет входа в Codex: выполните': 'Not signed in to Codex: run',
+  'в терминале.': 'in a terminal.',
+  'Настроить разрешения {provider}': 'Configure {provider} permissions',
+  'Инструкция по разрешениям': 'Permissions guide',
+  'guide::Закрыть инструкцию': 'Close guide',
+
+  // Permissions guide.
+  'Скопировать: {label}': 'Copy: {label}',
+  'Скопировано': 'Copied',
+  'Скопировать': 'Copy',
+  'Общий режим доступа': 'Shared access mode',
+  'В «Настройки → Разрешения» переключатель': 'In “Settings → Permissions”, the',
+  'по умолчанию включён. Оба CLI выполняют команды и записывают файлы без своих подтверждений и песочниц, с правами пользователя сервиса.':
+    'switch is on by default. Both CLIs run commands and write files without their own approvals and sandboxes, with the service user’s permissions.',
+  'Режим сохраняется в базе и применяется без перезапуска сервиса к новым процессам: обычным задачам, этапам, автопилоту, Интегратору и продолжениям сессий. Уже запущенные процессы сохраняют прежний режим. После изменения повторите заблокированный этап или отправьте обычной заблокированной задаче дополнительный запрос':
+    'The mode is stored in the database and applies without restarting the service to new processes: regular tasks, stages, Autopilot, the Integrator and session continuations. Processes already running keep the previous mode. After a change, retry the blocked stage or send a regular blocked task the follow-up request',
+  '«Продолжи задачу»': '“Continue the task”',
+  'При каждом запуске brigd передаёт CLI свои аргументы, и они имеют приоритет над вашими конфигами.':
+    'On every run brigd passes its own arguments to the CLI, and they take priority over your configs.',
+  'Режим и CLI': 'Mode and CLI',
+  'Аргументы brigd': 'brigd arguments',
+  'Что это значит': 'What it means',
+  'Полный доступ, Claude Code': 'Full access, Claude Code',
+  'отключает': 'turns off',
+  'Подтверждения инструментов и песочница Claude Code отключены': 'Claude Code tool approvals and sandbox are off',
+  'Полный доступ, Codex': 'Full access, Codex',
+  'Подтверждения инструментов и песочница Codex отключены': 'Codex tool approvals and sandbox are off',
+  'Ограниченный, Claude Code': 'Standard, Claude Code',
+  'только для собственных MCP-инструментов brigd': 'only for brigd’s own MCP tools',
+  'Правка файла или команда без allow-правила отклоняется; интерактивного подтверждения в brigd нет':
+    'A file edit or command without an allow rule is rejected; brigd has no interactive approval',
+  'Ограниченный, Codex': 'Standard, Codex',
+  'политика подтверждений': 'approval policy',
+  'сеть в песочнице включена': 'network access in the sandbox enabled',
+  'В рабочей папке разрешены правки и команды; запись вне папки или запрос эскалации блокируется':
+    'Edits and commands are allowed in the working folder; writes outside it or escalation requests are blocked',
+  'В полном доступе настройка файлов CLI не нужна. Выключите переключатель, чтобы вернуть ограничения; появится раздел':
+    'With full access, CLI file setup is not needed. Turn the switch off to restore the restrictions; this shows the section',
+  'с кнопками': 'with the buttons',
+  'Настроить разрешения…': 'Configure … permissions',
+  'Эти кнопки дополняют пользовательские конфиги и сохраняют прежние файлы в резервные копии. Состояние':
+    'These buttons add to the user configs and back up the previous files. The status',
+  'означает наличие нужных параметров в файле, а не полный доступ.': 'means the file has the required settings, not full access.',
+  'Далее описана настройка ограниченного режима. Ответ в карточке brigd принимает уточнения по задаче и не выдаёт системное разрешение CLI. Значение':
+    'The rest of this guide covers standard mode. An answer in a brigd card provides task clarifications and does not grant a CLI system permission. The',
+  'в настройках Claude Code не заменяет переключатель: аргументы запуска brigd сильнее.': 'value in the Claude Code settings does not replace the switch: brigd launch arguments take priority.',
+  'Следующие правила относятся к ограниченному режиму.': 'The following rules apply to standard mode.',
+  'Где хранятся правила': 'Where the rules are stored',
+  'Claude Code читает правила из нескольких файлов. Для запусков brigd важно, какие из них видны внутри рабочей папки запуска: новые запуски идут в отдельном Git worktree, который создаётся из коммита.':
+    'Claude Code reads rules from several files. For brigd runs, what matters is which of them are visible inside the run’s working folder: new runs use a separate Git worktree created from a commit.',
+  'Файл': 'File',
+  'Область': 'Scope',
+  'Виден в запусках brigd': 'Visible in brigd runs',
+  'Пользователь, все проекты': 'User, all projects',
+  'Да. Это домашняя папка того пользователя Linux, от которого запущен brigd и выполнен вход в CLI. В контейнере это том':
+    'Yes. This is the home folder of the Linux user that runs brigd and is signed in to the CLI. In the container it is the volume',
+  'в репозитории проекта': 'in the project repository',
+  'Проект, файл коммитится': 'Project, the file is committed',
+  'Да, если файл закоммичен': 'Yes, if the file is committed',
+  'Проект, файл не коммитится': 'Project, the file is not committed',
+  'Git не переносит файл в worktree; для запусков brigd используйте пользовательские настройки':
+    'Git does not copy the file into a worktree; use the user settings for brigd runs',
+  'Если brigd правит собственный репозиторий, используйте пользовательский файл: папка': 'If brigd edits its own repository, use the user file: the folder',
+  'в нём добавлена в': 'is listed in its',
+  'Какие правила нужны': 'Which rules are needed',
+  'Базовый набор для проекта на Bun. Кнопка «Настройки → Разрешения → Настроить разрешения Claude Code» добавляет эти allow-правила. Они покрывают только перечисленные команды: например,':
+    'A basic set for a Bun project. The “Settings → Permissions → Configure Claude Code permissions” button adds these allow rules. They cover only the listed commands: for example,',
+  'и инструмент': 'and the tool',
+  'потребуют отдельных правил. Составная Bash-команда может требовать правил для каждой операции: разрешённый':
+    'need separate rules. A compound Bash command may need rules for each operation: an allowed',
+  'не разрешает следующий': 'does not allow a following',
+  'или': 'or',
+  'Остальные ключи файла, например': 'Other keys in the file, such as',
+  'остаются как есть.': 'stay as they are.',
+  'Правила разрешений Claude Code': 'Claude Code permission rules',
+  'Edit и Write': 'Edit and Write',
+  'разрешают правки файлов. Чтобы ограничить область, укажите путь относительно корня проекта:':
+    'allow file edits. To narrow the scope, give a path relative to the project root:',
+  'разрешает команды, начинающиеся с': 'allows commands that start with',
+  'Перечисляйте только проверенные команды проекта.': 'List only the project commands you have verified.',
+  'нужен потому, что worktree запуска создаётся без': 'is needed because the run worktree is created without',
+  'Другие стеки.': 'Other stacks.',
+  'Замените команды, например': 'Replace the commands, for example with',
+  'deny и ask сильнее allow.': 'deny and ask override allow.',
+  'Запрет или запрос подтверждения остаётся в силе даже при наличии разрешающего правила. В':
+    'A denial or an approval request stays in force even when an allow rule exists. In',
+  'удобно добавить файлы с секретами и запрещённые команды;': 'you can list files with secrets and forbidden commands;',
+  'потребует интерактивного подтверждения.': 'requires interactive approval.',
+  'Правила читаются при каждом старте процесса CLI: текущие процессы продолжают работать по старым, новые запуски и продолжения сессий получают новые. В контейнере файл правится внутри него:':
+    'Rules are read every time a CLI process starts: running processes keep the old rules, new runs and session continuations get the new ones. In a container, edit the file inside it:',
+  'Команда для правки файла в контейнере': 'Command to edit the file in the container',
+  'Через интерфейс Claude Code': 'Through the Claude Code interface',
+  'Вместо редактирования файла откройте': 'Instead of editing the file, open',
+  'в папке проекта, введите': 'in the project folder, type',
+  'и добавьте те же правила. Для запусков brigd выбирайте пользовательскую область сохранения':
+    'and add the same rules. For brigd runs, choose the user scope',
+  'guide::Проверка': 'Checking the setup',
+  'Создайте в brigd ручную задачу для работника с Claude Code: «Добавь комментарий в начало файла README.md и запусти bun test».':
+    'Create a manual task in brigd for a Claude Code worker: “Add a comment at the top of README.md and run bun test”.',
+  'Дождитесь завершения. Статус': 'Wait for it to finish. The status',
+  'означает, что правил достаточно для этой задачи. Строка «Применяются штатные правила разрешений CLI» описывает режим запуска, но не гарантирует разрешение всех действий.':
+    'means the rules are enough for this task. The line “Native CLI permission rules apply” describes the run mode but does not guarantee that every action is allowed.',
+  'При статусе': 'If the status is',
+  'с текстом про native permission approval сначала откройте': 'with a message about native permission approval, first open',
+  'Настройки → Разрешения → Настроить разрешения Claude Code': 'Settings → Permissions → Configure Claude Code permissions',
+  'Кнопка добавляет базовые правила, но не снимает все возможные запреты.': 'The button adds the basic rules but does not lift every possible restriction.',
+  'Если базовые правила уже есть, откройте запись ошибки инструмента во вкладке': 'If the basic rules are already there, open the tool error entry on the tab',
+  'и скопируйте блок': 'and copy the block',
+  'guide::Ошибка': 'Error',
+  'В нём видны причина отказа и операции, которым требуется разрешение. Контекст также можно проверить в сохранённой Claude-сессии: папки запусков лежат в':
+    'It shows the reason for the denial and the operations that need permission. You can also check the context in the saved Claude session: run folders are in',
+  'рядом с базой, выполните в рабочей папке запуска': 'next to the database; in the run’s working folder, run',
+  'ID сессии': 'session ID',
+  'ID показан в истории запусков карточки.': 'the ID is shown in the card’s run history.',
+  'Если действие допустимо, добавьте узкое правило через': 'If the action is acceptable, add a narrow rule via',
+  'учитывая существующие': 'taking into account the existing',
+  '- и': ' and',
+  '-правила. Затем для обычной заблокированной задачи отправьте дополнительный запрос': ' rules. Then, for a regular blocked task, send the follow-up request',
+  'а для отдельного этапа повторите этот этап. Дополнительный запрос возобновляет работу после настройки правил и сам по себе не выдаёт разрешение CLI.':
+    'and for a single stage, retry that stage. The follow-up request resumes work after the rules are set up and does not grant a CLI permission by itself.',
+  'Не вводите в карточку brigd пароли и не пытайтесь «разрешить» действие комментарием: это не работает по замыслу.':
+    'Do not enter passwords in a brigd card or try to “allow” an action with a comment: by design, this does not work.',
+  'В ограниченном режиме brigd запускает': 'In standard mode brigd runs',
+  'с песочницей': 'with the sandbox',
+  'политикой подтверждений': 'the approval policy',
+  'и включённой сетью. В рабочей папке доступны правки файлов, тесты, локальные серверы и установка пакетов; метаданные':
+    'and network access enabled. File edits, tests, local servers and package installs work in the working folder; the',
+  'защищены песочницей. Настройки': 'metadata is protected by the sandbox. The settings',
+  'и': 'and',
+  'guide::из': 'from',
+  'на запуски brigd не влияют: аргументы командной строки сильнее. Кнопка «Настроить разрешения Codex» дописывает в файл те же параметры:':
+    'do not affect brigd runs: command-line arguments take priority. The “Configure Codex permissions” button appends the same settings to the file:',
+  'в таблице': 'in the table',
+  'Остальные ключи и комментарии сохраняются, прежний файл копируется в': 'Other keys and comments are kept; the previous file is copied to',
+  'В ограниченном режиме автоматически отклоняются запись вне рабочей папки и действия, для которых Codex запрашивает эскалацию. Для таких задач включите':
+    'In standard mode, writes outside the working folder and actions for which Codex requests escalation are rejected automatically. For such tasks, turn on',
+  'либо выполните действие вручную.': 'or perform the action manually.',
+  'Вход.': 'Sign-in.',
+  'в терминале того же пользователя Linux. В контейнере:': 'in a terminal as the same Linux user. In the container:',
+  'Codex требует Git-репозиторий; worktree brigd ему удовлетворяет.': 'Codex requires a Git repository; a brigd worktree satisfies it.',
+  'Доверие к папке': 'Folder trust',
+  'запрашивает только интерактивный': 'is requested only by the interactive',
+  'в brigd не спрашивает.': 'in brigd does not ask.',
+  'Пробная задача': 'The trial task',
+  'такая же, как для Claude Code: правка файла и запуск тестов.': 'is the same as for Claude Code: edit a file and run the tests.',
+  'Остальная подготовка к ночи': 'Other preparation for the night',
+  'Целевая ветка.': 'Target branch.',
+  'В папке проекта выполните': 'In the project folder, run',
+  'вывод должен быть пустым. Незавершённое закоммитьте или спрячьте в': 'the output must be empty. Commit unfinished work or put it away in',
+  'переключитесь на ветку, в которую должны попадать результаты. Перенос делается fast-forward и требует чистого состояния.':
+    'and switch to the branch that should receive the results. Results are applied by fast-forward and need a clean state.',
+  'Команды проверки.': 'Check commands.',
+  'В «Настройки → Автопилот» сохраните значение': 'In “Settings → Autopilot”, save the value of',
+  'JSON-массив команд с аргументами. Настройка одна на весь сервис и применяется без перезапуска. Без неё реальные запуски, продолжения и проверка слияния заблокированы. Сохранённое значение имеет приоритет над одноимённой переменной окружения, которую можно задать в':
+    'a JSON array of commands with arguments. There is one setting for the whole service, and it applies without a restart. Without it, real runs, continuations and merge checks are blocked. The saved value takes priority over the environment variable of the same name, which can be set in',
+  'рядом с brigd.': 'next to brigd.',
+  'Пример значения BRIGD_INTEGRATION_CHECKS': 'Example BRIGD_INTEGRATION_CHECKS value',
+  'Компьютер и сервер.': 'Computer and server.',
+  'Планировщик работает, пока запущен': 'The scheduler works while this is running:',
+  'Отключите сон компьютера; в WSL2 сон Windows останавливает и brigd. Терминал удобно держать в':
+    'Turn off computer sleep; in WSL2, Windows sleep stops brigd too. It is convenient to keep the terminal in',
+  'Автопилот.': 'Autopilot.',
+  'Включите его на вкладке «Автопилот» с временем остановки. Там же памятка «Перед тем как уйти» и итоги сессии.':
+    'Turn it on in the “Autopilot” tab with a stop time. The “Before you leave” checklist and the session summary are there too.',
+};
+
+export default dictionary;

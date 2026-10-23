@@ -1,3 +1,5 @@
+import { tk } from './i18n/key';
+
 export interface DiffLine {
   kind: 'context' | 'addition' | 'deletion' | 'hunk' | 'meta';
   text: string;
@@ -23,7 +25,7 @@ export function diffLines(patch: string): DiffLine[] {
     } else if (inHunk && line.startsWith(' ')) {
       rows.push({ kind: 'context', text: line.slice(1), oldLine: oldLine++, newLine: newLine++ });
     } else if (!/^(diff --git |index |--- |\+\+\+ )/.test(line)) {
-      rows.push({ kind: 'meta', text: line === '\\ No newline at end of file' ? 'Нет перевода строки в конце файла' : line, oldLine: null, newLine: null });
+      rows.push({ kind: 'meta', text: line === '\\ No newline at end of file' ? tk('Нет перевода строки в конце файла') : line, oldLine: null, newLine: null });
     }
   }
   return rows;

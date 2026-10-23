@@ -303,7 +303,7 @@ test('settings sections use side navigation that stacks on narrow screens', asyn
   const concurrencyPanel = dialog.getByRole('tabpanel', { name: 'Параллельность', exact: true });
   const storage = sections.getByRole('tab', { name: 'Хранилище', exact: true });
   const storagePanel = dialog.getByRole('tabpanel', { name: 'Хранилище', exact: true });
-  await expect(sections.getByRole('tab')).toHaveText(['Общие', 'Внешний вид', 'Модели', 'Разрешения', 'Автопилот', 'Параллельность', 'Хранилище', 'Бэкапы']);
+  await expect(sections.getByRole('tab')).toHaveText(['Общие', 'Язык', 'Внешний вид', 'Модели', 'Разрешения', 'Автопилот', 'Параллельность', 'Хранилище', 'Бэкапы']);
   await expect(general).toHaveAttribute('aria-selected', 'true');
   await expect(generalPanel.getByRole('heading', { name: 'Общие', exact: true })).toBeVisible();
   await expect(generalPanel.getByLabel('Рабочая папка по умолчанию', { exact: true })).toBeVisible();

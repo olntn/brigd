@@ -1,7 +1,8 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import Icon from './Icon.svelte';
-  import { docPageTitle, type DocHeading, type DocTreeNode } from './docs';
+  import { docPageTitle, DOC_UNTITLED, type DocHeading, type DocTreeNode } from './docs';
+  import { t } from './i18n';
   import type { DocPageMoveInput } from './types';
 
   let { nodes, selectedId, headings, disabled = false, onselect, oncreate, onmove, ondelete, onheading }: {
@@ -23,6 +24,7 @@
   let dropTarget = $state<{ id: string; zone: Zone } | null>(null);
   let tree = $state<HTMLElement>();
   let parents = $derived(parentMap(nodes));
+  const pageTitle = (page: { title: string }) => docPageTitle(page, t(DOC_UNTITLED));
 
   function readExpanded(): Set<string> {
     try {
@@ -158,27 +160,27 @@
   {@const entry = parents.get(id)}
   {@const open = expanded.has(id)}
   <li>
-    <div class="docs-tree-row" role="group" aria-label={docPageTitle(node.page)} class:selected class:dragging={dragId === id} class:drop-before={dropTarget?.id === id && dropTarget.zone === 'before'} class:drop-after={dropTarget?.id === id && dropTarget.zone === 'after'} class:drop-into={dropTarget?.id === id && dropTarget.zone === 'into'} style:--depth={node.depth} ondragover={(event) => dragOver(event, id)} ondrop={drop}>
+    <div class="docs-tree-row" role="group" aria-label={pageTitle(node.page)} class:selected class:dragging={dragId === id} class:drop-before={dropTarget?.id === id && dropTarget.zone === 'before'} class:drop-after={dropTarget?.id === id && dropTarget.zone === 'after'} class:drop-into={dropTarget?.id === id && dropTarget.zone === 'into'} style:--depth={node.depth} ondragover={(event) => dragOver(event, id)} ondrop={drop}>
       {#if node.children.length}
-        <button type="button" class="docs-tree-toggle" aria-expanded={open} aria-label={(open ? 'Свернуть: ' : 'Развернуть: ') + docPageTitle(node.page)} onclick={() => setExpanded(id, !open)}><Icon name={open ? 'down' : 'chevron'} size={14} /></button>
+        <button type="button" class="docs-tree-toggle" aria-expanded={open} aria-label={open ? t('Свернуть: {title}', { title: pageTitle(node.page) }) : t('Развернуть: {title}', { title: pageTitle(node.page) })} onclick={() => setExpanded(id, !open)}><Icon name={open ? 'down' : 'chevron'} size={14} /></button>
       {:else}<span class="docs-tree-toggle docs-tree-leaf" aria-hidden="true"><Icon name="file" size={13} /></span>{/if}
-      <button type="button" class="docs-tree-title" data-doc-title={id} aria-current={selected ? 'page' : undefined} draggable={!disabled} title="Перетащите, чтобы переместить" onclick={() => onselect(id)} onkeydown={(event) => titleKey(event, node)} ondragstart={(event) => dragStart(event, id)} ondragend={dragEnd}>{docPageTitle(node.page)}</button>
-      <button type="button" class="docs-tree-menu-button icon-button" data-doc-menu={id} aria-label={'Действия: ' + docPageTitle(node.page)} aria-haspopup="menu" aria-expanded={menuId === id} {disabled} onclick={() => openMenu(id)}><Icon name="dots" size={15} /></button>
+      <button type="button" class="docs-tree-title" data-doc-title={id} aria-current={selected ? 'page' : undefined} draggable={!disabled} title={t('Перетащите, чтобы переместить')} onclick={() => onselect(id)} onkeydown={(event) => titleKey(event, node)} ondragstart={(event) => dragStart(event, id)} ondragend={dragEnd}>{pageTitle(node.page)}</button>
+      <button type="button" class="docs-tree-menu-button icon-button" data-doc-menu={id} aria-label={t('Действия: {title}', { title: pageTitle(node.page) })} aria-haspopup="menu" aria-expanded={menuId === id} {disabled} onclick={() => openMenu(id)}><Icon name="dots" size={15} /></button>
       {#if menuId === id}
-        <div class="docs-menu" role="menu" tabindex="-1" aria-label={'Действия со страницей: ' + docPageTitle(node.page)} onkeydown={menuKey}>
-          <button type="button" role="menuitem" onclick={() => pick(() => oncreate(id))}><Icon name="plus" size={14} />Добавить подстраницу</button>
+        <div class="docs-menu" role="menu" tabindex="-1" aria-label={t('Действия со страницей: {title}', { title: pageTitle(node.page) })} onkeydown={menuKey}>
+          <button type="button" role="menuitem" onclick={() => pick(() => oncreate(id))}><Icon name="plus" size={14} />{t('Добавить подстраницу')}</button>
           <hr />
-          <button type="button" role="menuitem" disabled={!entry || entry.index === 0} onclick={() => pick(() => moveUp(id))}>Переместить выше</button>
-          <button type="button" role="menuitem" disabled={!entry || entry.index >= entry.siblings.length - 1} onclick={() => pick(() => moveDown(id))}>Переместить ниже</button>
-          <button type="button" role="menuitem" disabled={!entry || entry.index === 0} onclick={() => pick(() => nest(id))}>Вложить в предыдущую</button>
-          <button type="button" role="menuitem" disabled={!entry?.parent} onclick={() => pick(() => lift(id))}>Вынести на уровень выше</button>
+          <button type="button" role="menuitem" disabled={!entry || entry.index === 0} onclick={() => pick(() => moveUp(id))}>{t('Переместить выше')}</button>
+          <button type="button" role="menuitem" disabled={!entry || entry.index >= entry.siblings.length - 1} onclick={() => pick(() => moveDown(id))}>{t('Переместить ниже')}</button>
+          <button type="button" role="menuitem" disabled={!entry || entry.index === 0} onclick={() => pick(() => nest(id))}>{t('Вложить в предыдущую')}</button>
+          <button type="button" role="menuitem" disabled={!entry?.parent} onclick={() => pick(() => lift(id))}>{t('Вынести на уровень выше')}</button>
           <hr />
-          <button type="button" role="menuitem" class="danger" onclick={() => pick(() => ondelete(id))}><Icon name="trash" size={14} />В корзину</button>
+          <button type="button" role="menuitem" class="danger" onclick={() => pick(() => ondelete(id))}><Icon name="trash" size={14} />{t('В корзину')}</button>
         </div>
       {/if}
     </div>
     {#if selected && headings.length}
-      <ol class="docs-outline" aria-label="Заголовки страницы" style:--depth={node.depth}>
+      <ol class="docs-outline" aria-label={t('Заголовки страницы')} style:--depth={node.depth}>
         {#each headings as heading (heading.id)}<li><button type="button" style:--level={heading.level} onclick={() => onheading(heading.id)}>{heading.text}</button></li>{/each}
       </ol>
     {/if}
@@ -186,7 +188,7 @@
   </li>
 {/snippet}
 
-<nav bind:this={tree} class="docs-tree" aria-label="Страницы документации">
+<nav bind:this={tree} class="docs-tree" aria-label={t('Страницы документации')}>
   {#if nodes.length}<ul>{#each nodes as node (node.page.id)}{@render item(node)}{/each}</ul>
-  {:else}<p class="docs-tree-empty">Страниц пока нет.</p>{/if}
+  {:else}<p class="docs-tree-empty">{t('Страниц пока нет.')}</p>{/if}
 </nav>

@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import Icon from './Icon.svelte';
   import { INSTRUCTION_TITLE_LIMIT, INSTRUCTION_BODY_LIMIT, INSTRUCTION_COUNT_LIMIT, INSTRUCTION_ENABLED_TEXT_LIMIT, INSTRUCTION_ENABLED_BYTES_LIMIT } from './instructions';
+  import { formatNumber, serverText, t, tc } from './i18n';
   import type { Instruction, InstructionInput } from './types';
 
   let { notify }: { notify: (message: string, type?: 'success' | 'error') => void } = $props();
@@ -31,10 +32,10 @@
   let enabledBytes = $derived(new TextEncoder().encode(JSON.stringify(instructions.filter(item => item.enabled).map(({ id, title, body }) => ({ id, title, body })))).byteLength);
   let saving = $derived(pending === 'save');
   let removing = $derived(pending === 'delete');
-  const count = (value: number) => value.toLocaleString('ru-RU');
+  const count = (value: number) => formatNumber(value);
   const message = (failure: unknown) => failure instanceof TypeError
-    ? 'Нет связи с сервером. Проверьте подключение и повторите попытку.'
-    : failure instanceof Error ? failure.message : 'Не удалось сохранить изменения. Попробуйте ещё раз.';
+    ? t('Нет связи с сервером. Проверьте подключение и повторите попытку.')
+    : failure instanceof Error ? failure.message : t('Не удалось сохранить изменения. Попробуйте ещё раз.');
 
   async function request<T>(path: string, options?: RequestInit): Promise<T> {
     const response = await fetch(path, {
@@ -42,8 +43,8 @@
       headers: options?.method ? { 'Content-Type': 'application/json', ...options.headers } : options?.headers,
     });
     let result;
-    try { result = await response.json(); } catch { throw new Error('Сервер вернул неожиданный ответ. Попробуйте ещё раз.'); }
-    if (!response.ok) throw new Error(result.error || `Ошибка запроса (${response.status})`);
+    try { result = await response.json(); } catch { throw new Error(t('Сервер вернул неожиданный ответ. Попробуйте ещё раз.')); }
+    if (!response.ok) throw new Error(serverText(result.error ?? '') || t('Ошибка запроса ({status})', { status: response.status }));
     return result as T;
   }
 
@@ -54,7 +55,7 @@
     try {
       const result = await request<Instruction[]>('/api/instructions');
       if (!alive || readSequence !== sequence) return;
-      if (!Array.isArray(result)) throw new Error('Не удалось прочитать список инструкций. Попробуйте ещё раз.');
+      if (!Array.isArray(result)) throw new Error(t('Не удалось прочитать список инструкций. Попробуйте ещё раз.'));
       instructions = result;
       error = '';
     } catch (failure) {
@@ -118,9 +119,9 @@
     event.preventDefault();
     if (pending) return;
     formError = '';
-    if (!title.trim() || !body.trim()) { formError = 'Заполните название и текст инструкции.'; return; }
+    if (!title.trim() || !body.trim()) { formError = t('Заполните название и текст инструкции.'); return; }
     if (title.trim().length > INSTRUCTION_TITLE_LIMIT || body.trim().length > INSTRUCTION_BODY_LIMIT) {
-      formError = 'Сократите название или текст инструкции до указанного лимита.'; return;
+      formError = t('Сократите название или текст инструкции до указанного лимита.'); return;
     }
     const payload: InstructionInput = { title: title.trim(), body: body.trim(), enabled };
     pending = 'save';
@@ -132,7 +133,7 @@
       if (!alive) return;
       savedInstruction(saved);
       editorReturnId = saved.id;
-      notify(editingId ? 'Инструкция сохранена' : 'Инструкция создана');
+      notify(editingId ? t('Инструкция сохранена') : t('Инструкция создана'));
       pending = null;
       closeEditor();
     } catch (failure) {
@@ -153,7 +154,7 @@
       });
       if (!alive) return;
       savedInstruction(saved);
-      notify(saved.enabled ? 'Инструкция включена для новых запусков' : 'Инструкция выключена для новых запусков');
+      notify(saved.enabled ? t('Инструкция включена для новых запусков') : t('Инструкция выключена для новых запусков'));
     } catch (failure) { if (alive) notify(message(failure), 'error'); }
     finally {
       if (alive) {
@@ -196,7 +197,7 @@
       sequence++;
       instructions = instructions.filter(item => item.id !== id);
       error = '';
-      notify('Инструкция удалена. История запусков сохранена.');
+      notify(t('Инструкция удалена. История запусков сохранена.'));
       pending = null;
       closeDelete();
       await tick();
@@ -213,43 +214,43 @@
 </script>
 
 <section class="page-heading">
-  <div><h1 bind:this={heading} tabindex="-1">Инструкции</h1><p>Сохраните правила, которые важны в каждой задаче.</p></div>
-  <button bind:this={createButton} class="button primary create-button" disabled={!!pending || instructions.length >= INSTRUCTION_COUNT_LIMIT} onclick={() => openEditor()}><Icon name="plus" size={17} />Новая инструкция</button>
+  <div><h1 bind:this={heading} tabindex="-1">{t('Инструкции')}</h1><p>{t('Сохраните правила, которые важны в каждой задаче.')}</p></div>
+  <button bind:this={createButton} class="button primary create-button" disabled={!!pending || instructions.length >= INSTRUCTION_COUNT_LIMIT} onclick={() => openEditor()}><Icon name="plus" size={17} />{t('Новая инструкция')}</button>
 </section>
-<div class="workers-note instructions-note"><Icon name="list" size={18} /><p>Включённые инструкции применяются ко всем новым запускам любых задач: вручную и по расписанию, в Codex и Claude Code. Каждый запуск сохраняет свою копию. Изменение, выключение или удаление правила не меняет уже начатые запуски и их продолжения.</p></div>
-{#if error}<div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{error}</span><button onclick={() => { void load(); }}>Повторить</button></div>{/if}
+<div class="workers-note instructions-note"><Icon name="list" size={18} /><p>{t('Включённые инструкции применяются ко всем новым запускам любых задач: вручную и по расписанию, в Codex и Claude Code. Каждый запуск сохраняет свою копию. Изменение, выключение или удаление правила не меняет уже начатые запуски и их продолжения.')}</p></div>
+{#if error}<div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{error}</span><button onclick={() => { void load(); }}>{t('Повторить')}</button></div>{/if}
 {#if instructions.length}
-  <p class="instructions-capacity">Включено: {enabledCount} из {instructions.length}. Текст включённых: {count(enabledCharacters)} / {count(INSTRUCTION_ENABLED_TEXT_LIMIT)} символов; с учётом кодирования: {count(enabledBytes)} / {count(INSTRUCTION_ENABLED_BYTES_LIMIT)} байт. Сохранено: {instructions.length} / {INSTRUCTION_COUNT_LIMIT}.</p>
+  <p class="instructions-capacity">{t('Включено: {enabled} из {total}. Текст включённых: {characters} / {characterLimit} символов; с учётом кодирования: {bytes} / {byteLimit} байт. Сохранено: {total} / {limit}.', { enabled: enabledCount, total: instructions.length, characters: count(enabledCharacters), characterLimit: count(INSTRUCTION_ENABLED_TEXT_LIMIT), bytes: count(enabledBytes), byteLimit: count(INSTRUCTION_ENABLED_BYTES_LIMIT), limit: INSTRUCTION_COUNT_LIMIT })}</p>
 {/if}
-{#if instructions.length >= INSTRUCTION_COUNT_LIMIT}<p class="field-warning" role="status">Достигнут лимит: {INSTRUCTION_COUNT_LIMIT} инструкций. Удалите ненужную, чтобы создать новую.</p>{/if}
+{#if instructions.length >= INSTRUCTION_COUNT_LIMIT}<p class="field-warning" role="status">{t('Достигнут лимит: {limit} инструкций. Удалите ненужную, чтобы создать новую.', { limit: INSTRUCTION_COUNT_LIMIT })}</p>{/if}
 {#if loading}
-  <div class="detail-loading" role="status"><Icon name="refresh" class="spin" />Загружаем инструкции…</div>
+  <div class="detail-loading" role="status"><Icon name="refresh" class="spin" />{t('Загружаем инструкции…')}</div>
 {:else if instructions.length}
   <div class="instructions-grid">
     {#each instructions as item (item.id)}
-      <article class="instruction-card" class:instruction-disabled={!item.enabled} aria-label={'Инструкция: ' + item.title} aria-busy={pending === item.id}>
-        <div class="instruction-card-heading"><h2>{item.title}</h2><button type="button" role="switch" data-toggle-instruction={item.id} aria-checked={item.enabled} aria-label={'Включить инструкцию: ' + item.title} class="instruction-switch" disabled={!!pending} onclick={() => toggle(item)}><span class="switch-track" aria-hidden="true"><span></span></span><span>{pending === item.id ? 'Сохраняем…' : item.enabled ? 'Включена' : 'Выключена'}</span></button></div>
+      <article class="instruction-card" class:instruction-disabled={!item.enabled} aria-label={t('Инструкция: {title}', { title: item.title })} aria-busy={pending === item.id}>
+        <div class="instruction-card-heading"><h2>{item.title}</h2><button type="button" role="switch" data-toggle-instruction={item.id} aria-checked={item.enabled} aria-label={t('Включить инструкцию: {title}', { title: item.title })} class="instruction-switch" disabled={!!pending} onclick={() => toggle(item)}><span class="switch-track" aria-hidden="true"><span></span></span><span>{pending === item.id ? t('Сохраняем…') : item.enabled ? t('Включена') : t('Выключена')}</span></button></div>
         <p class="instruction-preview">{item.body}</p>
-        <div class="instruction-card-actions"><button class="button secondary" data-edit-instruction={item.id} disabled={!!pending} onclick={() => openEditor(item)} aria-label={'Изменить инструкцию: ' + item.title}><Icon name="edit" size={14} />Изменить</button><button class="button text-button danger-hover" disabled={!!pending} onclick={() => askDelete(item)} aria-label={'Удалить инструкцию: ' + item.title}><Icon name="close" size={14} />Удалить</button></div>
+        <div class="instruction-card-actions"><button class="button secondary" data-edit-instruction={item.id} disabled={!!pending} onclick={() => openEditor(item)} aria-label={t('Изменить инструкцию: {title}', { title: item.title })}><Icon name="edit" size={14} />{t('Изменить')}</button><button class="button text-button danger-hover" disabled={!!pending} onclick={() => askDelete(item)} aria-label={t('Удалить инструкцию: {title}', { title: item.title })}><Icon name="close" size={14} />{t('Удалить')}</button></div>
       </article>
     {/each}
   </div>
 {:else if !error}
-  <div class="no-results"><span class="empty-icon"><Icon name="list" size={27} /></span><h2>Ваши правила, в каждой задаче</h2><p>Например: отвечать по-русски, проверять тесты после правок или сначала объяснять риски.</p><button class="button primary" disabled={!!pending} onclick={() => openEditor()}><Icon name="plus" size={16} />Создать первую инструкцию</button></div>
+  <div class="no-results"><span class="empty-icon"><Icon name="list" size={27} /></span><h2>{t('Ваши правила, в каждой задаче')}</h2><p>{t('Например: отвечать по-русски, проверять тесты после правок или сначала объяснять риски.')}</p><button class="button primary" disabled={!!pending} onclick={() => openEditor()}><Icon name="plus" size={16} />{t('Создать первую инструкцию')}</button></div>
 {/if}
 
 <dialog bind:this={editor} class="editor-dialog instruction-editor" aria-labelledby="instruction-editor-title" oncancel={(event) => { event.preventDefault(); closeEditor(); }} onclick={(event) => backdropClick(event, editor, closeEditor)}>
   {#if editing}
     <form class="editor-form" onsubmit={save} aria-busy={saving}>
-      <header class="editor-header"><div><h2 id="instruction-editor-title">{editingId ? 'Редактировать инструкцию' : 'Новая инструкция'}</h2></div><button type="button" class="icon-button" aria-label="Закрыть инструкцию" disabled={saving} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
+      <header class="editor-header"><div><h2 id="instruction-editor-title">{editingId ? t('Редактировать инструкцию') : t('Новая инструкция')}</h2></div><button type="button" class="icon-button" aria-label={t('Закрыть инструкцию')} disabled={saving} onclick={closeEditor}><Icon name="close" size={21} /></button></header>
       <div class="editor-fields">
         {#if formError}<div class="form-error" role="alert"><Icon name="alert" size={17} /><span>{formError}</span></div>{/if}
-        <label class="form-field"><span>Название <span class="required">*</span></span><input name="instructionTitle" aria-label="Название инструкции" aria-describedby="instruction-title-count" bind:value={title} maxlength={INSTRUCTION_TITLE_LIMIT} placeholder="Например, проверка изменений" required disabled={saving} /><small id="instruction-title-count">{count(title.length)} / {count(INSTRUCTION_TITLE_LIMIT)} символов</small></label>
-        <label class="form-field"><span>Текст инструкции <span class="required">*</span></span><textarea name="instructionBody" aria-label="Текст инструкции" aria-describedby="instruction-body-count" bind:value={body} maxlength={INSTRUCTION_BODY_LIMIT} rows="8" placeholder="После правок запусти подходящие тесты. Если тесты не удалось выполнить, укажи причину." required disabled={saving}></textarea><small id="instruction-body-count">{count(body.length)} / {count(INSTRUCTION_BODY_LIMIT)} символов</small></label>
-        <label class="instruction-enabled-option"><input type="checkbox" bind:checked={enabled} disabled={saving} /><span>Включить для новых запусков</span></label>
-        <p class="form-note">Правило действует для всех задач и обоих агентов. Текущие запуски и их продолжения сохраняют прежние инструкции. Общий объём включённых правил ограничен {count(INSTRUCTION_ENABLED_BYTES_LIMIT)} байтами с учётом кодирования. Длинную инструкцию можно сохранить выключенной.</p>
+        <label class="form-field"><span>{tc('instruction', 'Название')} <span class="required">*</span></span><input name="instructionTitle" aria-label={t('Название инструкции')} aria-describedby="instruction-title-count" bind:value={title} maxlength={INSTRUCTION_TITLE_LIMIT} placeholder={t('Например, проверка изменений')} required disabled={saving} /><small id="instruction-title-count">{t('{count} / {limit} символов', { count: count(title.length), limit: count(INSTRUCTION_TITLE_LIMIT) })}</small></label>
+        <label class="form-field"><span>{t('Текст инструкции')} <span class="required">*</span></span><textarea name="instructionBody" aria-label={t('Текст инструкции')} aria-describedby="instruction-body-count" bind:value={body} maxlength={INSTRUCTION_BODY_LIMIT} rows="8" placeholder={t('После правок запусти подходящие тесты. Если тесты не удалось выполнить, укажи причину.')} required disabled={saving}></textarea><small id="instruction-body-count">{t('{count} / {limit} символов', { count: count(body.length), limit: count(INSTRUCTION_BODY_LIMIT) })}</small></label>
+        <label class="instruction-enabled-option"><input type="checkbox" bind:checked={enabled} disabled={saving} /><span>{t('Включить для новых запусков')}</span></label>
+        <p class="form-note">{t('Правило действует для всех задач и обоих агентов. Текущие запуски и их продолжения сохраняют прежние инструкции. Общий объём включённых правил ограничен {limit} байтами с учётом кодирования. Длинную инструкцию можно сохранить выключенной.', { limit: count(INSTRUCTION_ENABLED_BYTES_LIMIT) })}</p>
       </div>
-      <footer class="editor-footer"><button type="button" class="button secondary" disabled={saving} onclick={closeEditor}>Отмена</button><button type="submit" class="button primary" disabled={saving}>{#if saving}<Icon name="refresh" class="spin" size={16} />{:else}<Icon name={editingId ? 'check' : 'plus'} size={16} />{/if}{saving ? 'Сохраняем…' : editingId ? 'Сохранить инструкцию' : 'Создать инструкцию'}</button></footer>
+      <footer class="editor-footer"><button type="button" class="button secondary" disabled={saving} onclick={closeEditor}>{t('Отмена')}</button><button type="submit" class="button primary" disabled={saving}>{#if saving}<Icon name="refresh" class="spin" size={16} />{:else}<Icon name={editingId ? 'check' : 'plus'} size={16} />{/if}{saving ? t('Сохраняем…') : editingId ? t('Сохранить инструкцию') : t('Создать инструкцию')}</button></footer>
     </form>
   {/if}
 </dialog>
@@ -257,9 +258,9 @@
 <dialog bind:this={confirmation} class="editor-dialog instruction-delete-dialog" aria-labelledby="instruction-delete-title" aria-describedby="instruction-delete-description" oncancel={(event) => { event.preventDefault(); closeDelete(); }} onclick={(event) => backdropClick(event, confirmation, closeDelete)}>
   {#if deleting}
     <form class="editor-form" onsubmit={remove} aria-busy={removing}>
-      <header class="editor-header"><h2 id="instruction-delete-title">Удалить инструкцию?</h2><button type="button" class="icon-button" aria-label="Закрыть удаление" disabled={removing} onclick={closeDelete}><Icon name="close" size={21} /></button></header>
-      <div class="editor-fields">{#if deleteError}<div class="form-error" role="alert"><Icon name="alert" size={17} /><span>{deleteError}</span></div>{/if}<p id="instruction-delete-description">«{deleting.title}» больше не будет в списке. Отменить удаление нельзя; можно выключить правило, чтобы сохранить его. Копии в истории запусков останутся.</p></div>
-      <footer class="editor-footer"><button type="button" data-cancel-delete class="button secondary" disabled={removing} onclick={closeDelete}>Отмена</button><button type="submit" class="button danger" disabled={removing}>{#if removing}<Icon name="refresh" class="spin" size={16} />{/if}{removing ? 'Удаляем…' : 'Удалить инструкцию'}</button></footer>
+      <header class="editor-header"><h2 id="instruction-delete-title">{t('Удалить инструкцию?')}</h2><button type="button" class="icon-button" aria-label={t('Закрыть удаление')} disabled={removing} onclick={closeDelete}><Icon name="close" size={21} /></button></header>
+      <div class="editor-fields">{#if deleteError}<div class="form-error" role="alert"><Icon name="alert" size={17} /><span>{deleteError}</span></div>{/if}<p id="instruction-delete-description">{t('«{title}» больше не будет в списке. Отменить удаление нельзя; можно выключить правило, чтобы сохранить его. Копии в истории запусков останутся.', { title: deleting.title })}</p></div>
+      <footer class="editor-footer"><button type="button" data-cancel-delete class="button secondary" disabled={removing} onclick={closeDelete}>{t('Отмена')}</button><button type="submit" class="button danger" disabled={removing}>{#if removing}<Icon name="refresh" class="spin" size={16} />{/if}{removing ? t('Удаляем…') : t('Удалить инструкцию')}</button></footer>
     </form>
   {/if}
 </dialog>

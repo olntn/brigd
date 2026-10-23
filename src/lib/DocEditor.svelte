@@ -5,6 +5,7 @@
   import { TASK_STATUS_LABELS } from './status';
   import { createDocBlock, DOC_BLOCK_KINDS, DOC_BLOCK_LIMIT, DOC_BLOCK_TEXT_LIMIT, DOC_CALLOUT_COLOR_LABELS, DOC_CALLOUT_COLORS, DOC_CALLOUT_ICONS, DOC_INDENT_LIMIT, DOC_LANGUAGE_LIMIT, DOC_TABLE_CELL_LIMIT, DOC_TABLE_COLUMN_LIMIT, DOC_TABLE_ROW_LIMIT, DOC_TITLE_LIMIT, DOC_UNTITLED, docBlockKind, docHeadings, docHiddenBlockIds, docListNumbers, docRawOffset, docShortcut, isDocListType, isDocTextType, retypeDocBlock, type DocHeading, type DocShortcut } from './docs';
   import { docsFailureMessage, docsRequest, DocsRequestError } from './docs-client';
+  import { formatDate, serverText, t, tc, tk } from './i18n';
   import type { DocBlock, DocBlockType, DocImage, DocPage, DocPageSummary, Task, TaskDetail } from './types';
 
   let { pageId, autofocusTitle = false, trashed = false, notify, onchanged, onheadings, onopentask, ondelete, onrestore }: {
@@ -24,7 +25,7 @@
   type SaveState = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict';
   type Menu = { kind: 'slash' | 'block'; id: string; query: string; active: number };
   type Snapshot = { blocks: DocBlock[]; focused: string | null };
-  const STATUS: Record<SaveState, string> = { saved: 'Сохранено', dirty: 'Есть несохранённые изменения', saving: 'Сохраняем…', error: 'Не удалось сохранить', conflict: 'Страница изменена в другом окне' };
+  const STATUS: Record<SaveState, string> = { saved: tk('Сохранено'), dirty: tk('Есть несохранённые изменения'), saving: tk('Сохраняем…'), error: tk('Не удалось сохранить'), conflict: tk('Страница изменена в другом окне') };
   const SAVE_DELAY = 800;
   const UNDO_LIMIT = 50;
   let page = $state<DocPage | null>(null);
@@ -59,22 +60,23 @@
   let readonly = $derived(page?.deletedAt != null);
   let numbers = $derived(docListNumbers(blocks));
   let hidden = $derived(docHiddenBlockIds(blocks));
-  let headings = $derived(docHeadings(blocks));
+  let headings = $derived(docHeadings(blocks, t(DOC_UNTITLED)));
   let slashItems = $derived(menu?.kind === 'slash' ? DOC_BLOCK_KINDS.filter(kind => matches(kind.label, kind.keywords, menu!.query)) : []);
   let taskMatches = $derived(taskSearch && taskList ? taskList.filter(task => matchesTask(task, taskSearch!.query)).slice(0, 8) : []);
   const convertible = DOC_BLOCK_KINDS.filter(kind => isDocTextType(kind.type));
-  const dateTime = (value: number) => new Date(value).toLocaleString('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
+  const dateTime = (value: number) => formatDate(value, { dateStyle: 'medium', timeStyle: 'short' });
   const shortId = (id: string) => id.slice(0, 8).toUpperCase();
   const index = (id: string) => blocks.findIndex(block => block.id === id);
   const placeholders: Record<DocBlockType, string> = {
-    paragraph: 'Введите текст. Символ «/» открывает меню блоков', heading1: 'Заголовок 1', heading2: 'Заголовок 2', heading3: 'Заголовок 3',
-    bulleted: 'Пункт списка', numbered: 'Пункт списка', todo: 'Задача', quote: 'Цитата', code: 'Код', divider: '',
-    callout: 'Текст выноски', toggle: 'Название раскрывающегося блока', table: '', image: 'Подпись к изображению', toc: '', task: '',
+    paragraph: tk('Введите текст. Символ «/» открывает меню блоков'), heading1: tk('Заголовок 1'), heading2: tk('Заголовок 2'), heading3: tk('Заголовок 3'),
+    bulleted: tk('Пункт списка'), numbered: tk('Пункт списка'), todo: tk('Задача'), quote: tk('Цитата'), code: tk('Код'), divider: '',
+    callout: tk('Текст выноски'), toggle: tk('Название раскрывающегося блока'), table: '', image: tk('Подпись к изображению'), toc: '', task: '',
   };
 
+  /** Block names match in both interface languages; keywords cover Latin and Cyrillic too. */
   function matches(label: string, keywords: string[], query: string): boolean {
     const needle = query.trim().toLocaleLowerCase('ru-RU');
-    return !needle || label.toLocaleLowerCase('ru-RU').includes(needle) || keywords.some(keyword => keyword.startsWith(needle));
+    return !needle || [label, t(label)].some(name => name.toLocaleLowerCase('ru-RU').includes(needle)) || keywords.some(keyword => keyword.startsWith(needle));
   }
   function matchesTask(task: Task, query: string): boolean {
     const needle = query.trim().toLocaleLowerCase('ru-RU');
@@ -252,7 +254,7 @@
   };
 
   function insertAt(position: number, block: DocBlock, track = true): boolean {
-    if (blocks.length >= DOC_BLOCK_LIMIT) { notify(`На странице допустимо не больше ${DOC_BLOCK_LIMIT} блоков. Вынесите часть на подстраницу.`, 'error'); return false; }
+    if (blocks.length >= DOC_BLOCK_LIMIT) { notify(t('На странице допустимо не больше {limit} блоков. Вынесите часть на подстраницу.', { limit: DOC_BLOCK_LIMIT }), 'error'); return false; }
     if (track) remember();
     blocks.splice(position, 0, block);
     markDirty();
@@ -393,7 +395,7 @@
         return;
       }
       if (previous.type === 'code') { if (value === '') { removeAt(position); void focusBlock(previous.id, 'end'); } return; }
-      if (previous.text.length + value.length > DOC_BLOCK_TEXT_LIMIT) { notify(`Вместе блоки превысят ${DOC_BLOCK_TEXT_LIMIT} символов. Сократите текст перед объединением.`, 'error'); return; }
+      if (previous.text.length + value.length > DOC_BLOCK_TEXT_LIMIT) { notify(t('Вместе блоки превысят {limit} символов. Сократите текст перед объединением.', { limit: DOC_BLOCK_TEXT_LIMIT }), 'error'); return; }
       remember();
       const caret = previous.text.length;
       previous.text += value;
@@ -408,7 +410,7 @@
       if (next.type === 'divider') { event.preventDefault(); removeAt(index(next.id)); return; }
       if (!isDocTextType(next.type) || next.type === 'code' || block.type === 'code') return;
       event.preventDefault();
-      if (value.length + next.text.length > DOC_BLOCK_TEXT_LIMIT) { notify(`Вместе блоки превысят ${DOC_BLOCK_TEXT_LIMIT} символов. Сократите текст перед объединением.`, 'error'); return; }
+      if (value.length + next.text.length > DOC_BLOCK_TEXT_LIMIT) { notify(t('Вместе блоки превысят {limit} символов. Сократите текст перед объединением.', { limit: DOC_BLOCK_TEXT_LIMIT }), 'error'); return; }
       remember();
       block.text += next.text;
       blocks.splice(index(next.id), 1);
@@ -575,14 +577,14 @@
     }
   }
   function addRow(block: DocBlock): boolean {
-    if (block.rows!.length >= DOC_TABLE_ROW_LIMIT) { notify(`В таблице не больше ${DOC_TABLE_ROW_LIMIT} строк`, 'error'); return false; }
+    if (block.rows!.length >= DOC_TABLE_ROW_LIMIT) { notify(t('В таблице не больше {limit} строк', { limit: DOC_TABLE_ROW_LIMIT }), 'error'); return false; }
     remember();
     block.rows!.push(block.rows![0]!.map(() => ''));
     markDirty();
     return true;
   }
   function addColumn(block: DocBlock) {
-    if (block.rows![0]!.length >= DOC_TABLE_COLUMN_LIMIT) { notify(`В таблице не больше ${DOC_TABLE_COLUMN_LIMIT} столбцов`, 'error'); return; }
+    if (block.rows![0]!.length >= DOC_TABLE_COLUMN_LIMIT) { notify(t('В таблице не больше {limit} столбцов', { limit: DOC_TABLE_COLUMN_LIMIT }), 'error'); return; }
     remember();
     for (const row of block.rows!) row.push('');
     markDirty();
@@ -617,15 +619,15 @@
     try {
       const response = await fetch(`/api/docs/${encodeURIComponent(pageId)}/images?name=${encodeURIComponent(file.name)}`, { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file });
       let result: DocImage & { error?: string };
-      try { result = await response.json(); } catch { throw new Error('Сервер вернул неожиданный ответ. Попробуйте ещё раз.'); }
-      if (!response.ok) throw new Error(result.error || `Ошибка загрузки (${response.status})`);
+      try { result = await response.json(); } catch { throw new Error(t('Сервер вернул неожиданный ответ. Попробуйте ещё раз.')); }
+      if (!response.ok) throw new Error(result.error ? serverText(result.error) : t('Ошибка загрузки ({status})', { status: response.status }));
       if (!alive) return;
       const block = blocks.find(item => item.id === id);
       if (!block || block.type !== 'image') return;
       remember();
       block.imageId = result.id;
       markDirty();
-      notify('Изображение загружено');
+      notify(t('Изображение загружено'));
     } catch (failure) {
       if (alive) notify(docsFailureMessage(failure), 'error');
     } finally { if (alive) uploading = null; }
@@ -716,27 +718,27 @@
     dragEnd();
   }
   function dragEnd() { dragging = null; dropTarget = null; }
-  const viewPlaceholder = (position: number) => blocks.length === 1 && position === 0 && !readonly ? 'Нажмите сюда и начните писать. Символ «/» открывает меню блоков.' : '';
+  const viewPlaceholder = (position: number) => blocks.length === 1 && position === 0 && !readonly ? t('Нажмите сюда и начните писать. Символ «/» открывает меню блоков.') : '';
 </script>
 
 <svelte:window onpointerdown={outside} />
 
 {#if loading}
-  <div class="detail-loading" role="status"><Icon name="refresh" class="spin" />Загружаем страницу…</div>
+  <div class="detail-loading" role="status"><Icon name="refresh" class="spin" />{t('Загружаем страницу…')}</div>
 {:else if error}
-  <div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{error}</span><button onclick={() => { void load(); }}>Повторить</button></div>
+  <div class="connection-error" role="alert"><Icon name="alert" size={17} /><span>{error}</span><button onclick={() => { void load(); }}>{t('Повторить')}</button></div>
 {:else if page}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions (Undo shortcuts apply to the whole page, not to one control.) -->
-  <article bind:this={root} class="doc-page" aria-label={'Страница: ' + (title.trim() || DOC_UNTITLED)} onkeydown={rootKey}>
-    {#if readonly}<div class="field-warning doc-notice" role="status"><Icon name="alert" size={16} /><span>Страница в корзине. Восстановите её, чтобы редактировать.</span>{#if onrestore}<button type="button" onclick={onrestore}>Восстановить</button>{/if}{#if ondelete}<button type="button" onclick={() => ondelete?.(true)}>Удалить навсегда</button>{/if}</div>{/if}
+  <article bind:this={root} class="doc-page" aria-label={t('Страница: {title}', { title: title.trim() || t(DOC_UNTITLED) })} onkeydown={rootKey}>
+    {#if readonly}<div class="field-warning doc-notice" role="status"><Icon name="alert" size={16} /><span>{t('Страница в корзине. Восстановите её, чтобы редактировать.')}</span>{#if onrestore}<button type="button" onclick={onrestore}>{t('Восстановить')}</button>{/if}{#if ondelete}<button type="button" onclick={() => ondelete?.(true)}>{t('Удалить навсегда')}</button>{/if}</div>{/if}
     {#if saveState === 'conflict'}
-      <div class="connection-error doc-notice" role="alert"><Icon name="alert" size={17} /><span>{saveError}</span><button onclick={() => { void load(); }}>Загрузить новую версию</button></div>
+      <div class="connection-error doc-notice" role="alert"><Icon name="alert" size={17} /><span>{saveError}</span><button onclick={() => { void load(); }}>{t('Загрузить новую версию')}</button></div>
     {:else if saveState === 'error'}
-      <div class="connection-error doc-notice" role="alert"><Icon name="alert" size={17} /><span>{saveError}</span><button onclick={() => { void save(); }}>Повторить</button></div>
+      <div class="connection-error doc-notice" role="alert"><Icon name="alert" size={17} /><span>{saveError}</span><button onclick={() => { void save(); }}>{t('Повторить')}</button></div>
     {/if}
-    <textarea bind:this={titleField} class="doc-title" rows="1" aria-label="Название страницы" placeholder={DOC_UNTITLED} maxlength={DOC_TITLE_LIMIT} value={title} disabled={readonly} use:grow oninput={titleInput} onkeydown={titleKey}></textarea>
-    <div class="doc-meta"><span class="doc-status doc-status-{saveState}" role="status">{readonly ? 'Только чтение' : STATUS[saveState]}</span><span>Обновлено {dateTime(page.updatedAt)}</span>{#if !readonly && ondelete}<button type="button" class="doc-delete" onclick={() => ondelete?.(false)}><Icon name="trash" size={13} />Удалить страницу</button>{/if}</div>
-    <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" class="doc-file-input" aria-label="Файл изображения" tabindex="-1" onchange={uploadImage} />
+    <textarea bind:this={titleField} class="doc-title" rows="1" aria-label={t('Название страницы')} placeholder={t(DOC_UNTITLED)} maxlength={DOC_TITLE_LIMIT} value={title} disabled={readonly} use:grow oninput={titleInput} onkeydown={titleKey}></textarea>
+    <div class="doc-meta"><span class="doc-status doc-status-{saveState}" role="status">{readonly ? t('Только чтение') : t(STATUS[saveState])}</span><span>{t('Обновлено {time}', { time: dateTime(page.updatedAt) })}</span>{#if !readonly && ondelete}<button type="button" class="doc-delete" onclick={() => ondelete?.(false)}><Icon name="trash" size={13} />{t('Удалить страницу')}</button>{/if}</div>
+    <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" class="doc-file-input" aria-label={t('Файл изображения')} tabindex="-1" onchange={uploadImage} />
     <div class="doc-blocks">
       {#each blocks as block, position (block.id)}
         {@const kind = docBlockKind(block.type)}
@@ -745,23 +747,23 @@
         {#if !hidden.has(block.id)}
         <div id="doc-block-{block.id}" class="doc-block doc-{block.type}" class:checked={block.type === 'todo' && block.checked} class:editing class:dragging={dragging === block.id}
           class:drop-before={dropTarget?.id === block.id && !dropTarget.after} class:drop-after={dropTarget?.id === block.id && dropTarget.after}
-          style:--indent={block.indent ?? 0} role="group" aria-label={kind.label + ' ' + (position + 1)} ondragover={(event) => dragOver(event, block.id)} ondrop={drop}>
-          <button type="button" class="doc-block-handle" data-doc-handle={block.id} aria-label={'Действия с блоком ' + (position + 1) + ': ' + kind.label} aria-haspopup="menu" aria-expanded={menu?.kind === 'block' && menu.id === block.id} title="Перетащите или откройте меню" draggable="true" disabled={readonly} ondragstart={(event) => dragStart(event, block.id)} ondragend={dragEnd} onclick={() => { void openBlockMenu(block.id); }}><Icon name="grip" size={15} /></button>
+          style:--indent={block.indent ?? 0} role="group" aria-label={`${t(kind.label)} ${position + 1}`} ondragover={(event) => dragOver(event, block.id)} ondrop={drop}>
+          <button type="button" class="doc-block-handle" data-doc-handle={block.id} aria-label={t('Действия с блоком {number}: {type}', { number: position + 1, type: t(kind.label) })} aria-haspopup="menu" aria-expanded={menu?.kind === 'block' && menu.id === block.id} title={t('Перетащите или откройте меню')} draggable="true" disabled={readonly} ondragstart={(event) => dragStart(event, block.id)} ondragend={dragEnd} onclick={() => { void openBlockMenu(block.id); }}><Icon name="grip" size={15} /></button>
           <div class={'doc-block-body' + (block.type === 'callout' ? ` doc-callout-${block.color ?? 'gray'}` : '')}>
             {#if block.type === 'divider'}
               <!-- The separator is selected and removed from the keyboard like any other block. -->
               <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-              <div class="doc-divider-line doc-block-focus" role="separator" tabindex={readonly ? -1 : 0} aria-label="Разделитель" onkeydown={(event) => structuralKey(event, block)}><hr /></div>
+              <div class="doc-divider-line doc-block-focus" role="separator" tabindex={readonly ? -1 : 0} aria-label={t('Разделитель')} onkeydown={(event) => structuralKey(event, block)}><hr /></div>
             {:else if block.type === 'toc'}
               <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-              <nav class="doc-toc-frame doc-block-focus" tabindex={readonly ? -1 : 0} aria-label="Оглавление страницы" onkeydown={(event) => structuralKey(event, block)}>
-                <p class="doc-toc-heading">Оглавление</p>
+              <nav class="doc-toc-frame doc-block-focus" tabindex={readonly ? -1 : 0} aria-label={t('Оглавление страницы')} onkeydown={(event) => structuralKey(event, block)}>
+                <p class="doc-toc-heading">{t('Оглавление')}</p>
                 {#if headings.length}<ol>{#each headings as heading (heading.id)}<li style:--level={heading.level}><button type="button" onclick={() => scrollToHeading(heading.id)}>{heading.text}</button></li>{/each}</ol>
-                {:else}<p class="doc-toc-empty">Добавьте заголовки, и они появятся здесь.</p>{/if}
+                {:else}<p class="doc-toc-empty">{t('Добавьте заголовки, и они появятся здесь.')}</p>{/if}
               </nav>
             {:else if block.type === 'table'}
               <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-              <div class="doc-table-frame doc-block-focus" tabindex={readonly ? -1 : 0} role="group" aria-label="Таблица" onkeydown={(event) => structuralKey(event, block)}>
+              <div class="doc-table-frame doc-block-focus" tabindex={readonly ? -1 : 0} role="group" aria-label={t('Таблица')} onkeydown={(event) => structuralKey(event, block)}>
                 <div class="doc-table-scroll"><table>
                   <tbody>
                     {#each block.rows ?? [] as row, rowIndex}
@@ -770,10 +772,10 @@
                           {@const active = tableCell?.id === block.id && tableCell.row === rowIndex && tableCell.column === columnIndex}
                           <svelte:element this={block.header && rowIndex === 0 ? 'th' : 'td'} class:active>
                             {#if active && !readonly}
-                              <input class="doc-cell-input" aria-label={'Ячейка ' + (rowIndex + 1) + ':' + (columnIndex + 1)} maxlength={DOC_TABLE_CELL_LIMIT} {value} oninput={(event) => cellInput(event, block, rowIndex, columnIndex)} onkeydown={(event) => cellKey(event, block, rowIndex, columnIndex)} />
+                              <input class="doc-cell-input" aria-label={t('Ячейка {row}:{column}', { row: rowIndex + 1, column: columnIndex + 1 })} maxlength={DOC_TABLE_CELL_LIMIT} {value} oninput={(event) => cellInput(event, block, rowIndex, columnIndex)} onkeydown={(event) => cellKey(event, block, rowIndex, columnIndex)} />
                             {:else}
                               <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                              <div class="doc-cell-view" class:empty={!value} role="textbox" aria-label={'Ячейка ' + (rowIndex + 1) + ':' + (columnIndex + 1)} tabindex={readonly ? -1 : 0} onclick={() => editCell(block, rowIndex, columnIndex)} onkeydown={(event) => { if (event.key === 'Enter' || event.key === 'F2') { event.preventDefault(); editCell(block, rowIndex, columnIndex); } }}>{@html renderInlineMarkdown(value)}</div>
+                              <div class="doc-cell-view" class:empty={!value} role="textbox" aria-label={t('Ячейка {row}:{column}', { row: rowIndex + 1, column: columnIndex + 1 })} tabindex={readonly ? -1 : 0} onclick={() => editCell(block, rowIndex, columnIndex)} onkeydown={(event) => { if (event.key === 'Enter' || event.key === 'F2') { event.preventDefault(); editCell(block, rowIndex, columnIndex); } }}>{@html renderInlineMarkdown(value)}</div>
                             {/if}
                           </svelte:element>
                         {/each}
@@ -783,11 +785,11 @@
                 </table></div>
                 {#if !readonly}
                   <div class="doc-table-tools">
-                    <button type="button" onclick={() => addRow(block)}><Icon name="plus" size={13} />Строка</button>
-                    <button type="button" onclick={() => addColumn(block)}><Icon name="plus" size={13} />Столбец</button>
-                    <button type="button" disabled={(block.rows?.length ?? 0) <= 1} onclick={() => removeRow(block)}>Убрать строку</button>
-                    <button type="button" disabled={(block.rows?.[0]?.length ?? 0) <= 1} onclick={() => removeColumn(block)}>Убрать столбец</button>
-                    <label><input type="checkbox" checked={block.header ?? true} onchange={(event) => { block.header = event.currentTarget.checked; markDirty(); }} />Первая строка — заголовок</label>
+                    <button type="button" onclick={() => addRow(block)}><Icon name="plus" size={13} />{t('Строка')}</button>
+                    <button type="button" onclick={() => addColumn(block)}><Icon name="plus" size={13} />{t('Столбец')}</button>
+                    <button type="button" disabled={(block.rows?.length ?? 0) <= 1} onclick={() => removeRow(block)}>{t('Убрать строку')}</button>
+                    <button type="button" disabled={(block.rows?.[0]?.length ?? 0) <= 1} onclick={() => removeColumn(block)}>{t('Убрать столбец')}</button>
+                    <label><input type="checkbox" checked={block.header ?? true} onchange={(event) => { block.header = event.currentTarget.checked; markDirty(); }} />{t('Первая строка — заголовок')}</label>
                   </div>
                 {/if}
               </div>
@@ -795,40 +797,40 @@
               <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
               <figure class="doc-figure doc-block-focus" tabindex={readonly ? -1 : 0} onkeydown={(event) => structuralKey(event, block)}>
                 {#if block.imageId}
-                  <img src="/api/docs/{encodeURIComponent(pageId)}/images/{block.imageId}" alt={block.text || 'Изображение'} loading="lazy" />
-                  {#if !readonly}<button type="button" class="doc-image-replace" onclick={() => replaceImage(block)}><Icon name="refresh" size={13} />Заменить</button>{/if}
+                  <img src="/api/docs/{encodeURIComponent(pageId)}/images/{block.imageId}" alt={block.text || t('Изображение')} loading="lazy" />
+                  {#if !readonly}<button type="button" class="doc-image-replace" onclick={() => replaceImage(block)}><Icon name="refresh" size={13} />{t('Заменить')}</button>{/if}
                 {:else}
                   <div class="doc-image-empty">
-                    <button type="button" class="button secondary doc-image-upload" disabled={readonly || uploading === block.id} onclick={() => pickImage(block)}>{#if uploading === block.id}<Icon name="refresh" class="spin" size={15} />Загружаем…{:else}<Icon name="paperclip" size={15} />Выбрать изображение{/if}</button>
-                    <small>PNG, JPEG, WebP или GIF до 10 МиБ</small>
+                    <button type="button" class="button secondary doc-image-upload" disabled={readonly || uploading === block.id} onclick={() => pickImage(block)}>{#if uploading === block.id}<Icon name="refresh" class="spin" size={15} />{tc('upload', 'Загружаем…')}{:else}<Icon name="paperclip" size={15} />{t('Выбрать изображение')}{/if}</button>
+                    <small>{t('PNG, JPEG, WebP или GIF до 10 МиБ')}</small>
                   </div>
                 {/if}
                 <figcaption>
                   {#if editing}
-                    <textarea class="doc-block-text" rows="1" aria-label="Подпись к изображению" placeholder={placeholders.image} maxlength={DOC_BLOCK_TEXT_LIMIT} value={block.text} use:field={block.id} oninput={(event) => input(event, block)} onkeydown={(event) => keydown(event, block)} onblur={() => blur(block.id)}></textarea>
+                    <textarea class="doc-block-text" rows="1" aria-label={t('Подпись к изображению')} placeholder={t(placeholders.image)} maxlength={DOC_BLOCK_TEXT_LIMIT} value={block.text} use:field={block.id} oninput={(event) => input(event, block)} onkeydown={(event) => keydown(event, block)} onblur={() => blur(block.id)}></textarea>
                   {:else}
-                    <div class="doc-block-view" class:empty={!block.text} role="textbox" aria-label="Подпись к изображению" tabindex={readonly ? -1 : 0} data-placeholder={readonly ? '' : placeholders.image} onclick={(event) => viewClick(event, block)} onkeydown={(event) => viewKey(event, block)}>{@html renderInlineMarkdown(block.text)}</div>
+                    <div class="doc-block-view" class:empty={!block.text} role="textbox" aria-label={t('Подпись к изображению')} tabindex={readonly ? -1 : 0} data-placeholder={readonly ? '' : t(placeholders.image)} onclick={(event) => viewClick(event, block)} onkeydown={(event) => viewKey(event, block)}>{@html renderInlineMarkdown(block.text)}</div>
                   {/if}
                 </figcaption>
               </figure>
             {:else if block.type === 'task'}
               <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-              <div class="doc-task-frame doc-block-focus" tabindex={readonly ? -1 : 0} role="group" aria-label="Задача" onkeydown={(event) => structuralKey(event, block)}>
+              <div class="doc-task-frame doc-block-focus" tabindex={readonly ? -1 : 0} role="group" aria-label={t('Задача')} onkeydown={(event) => structuralKey(event, block)}>
                 {#if block.taskId && !(taskSearch?.id === block.id)}
                   <div class="doc-task-card">
                     <span class="doc-task-id">{shortId(block.taskId)}</span>
-                    <span class="doc-task-title">{card === undefined ? 'Загружаем задачу…' : card === null ? 'Задача недоступна' : card.title}</span>
-                    {#if card}<span class="status-badge status-{card.status}"><span class="status-dot"></span>{TASK_STATUS_LABELS[card.status]}</span>{/if}
-                    {#if card && onopentask}<button type="button" class="button secondary" onclick={() => onopentask?.(block.taskId!)}><Icon name="external" size={14} />Открыть</button>{/if}
-                    {#if !readonly}<button type="button" class="button text-button" onclick={() => clearTask(block)}>Заменить</button>{/if}
+                    <span class="doc-task-title">{card === undefined ? t('Загружаем задачу…') : card === null ? t('Задача недоступна') : card.title}</span>
+                    {#if card}<span class="status-badge status-{card.status}"><span class="status-dot"></span>{t(TASK_STATUS_LABELS[card.status])}</span>{/if}
+                    {#if card && onopentask}<button type="button" class="button secondary" onclick={() => onopentask?.(block.taskId!)}><Icon name="external" size={14} />{t('Открыть')}</button>{/if}
+                    {#if !readonly}<button type="button" class="button text-button" onclick={() => clearTask(block)}>{t('Заменить')}</button>{/if}
                   </div>
                 {:else}
                   <div class="doc-task-picker">
-                    <input class="doc-task-search" aria-label="Поиск задачи" placeholder="Название или короткий ID задачи…" disabled={readonly} value={taskSearch?.id === block.id ? taskSearch.query : ''} onfocus={() => { if (taskSearch?.id !== block.id) openTaskSearch(block); }} oninput={(event) => { taskSearch = { id: block.id, query: event.currentTarget.value }; }} onkeydown={(event) => taskSearchKey(event, block)} />
+                    <input class="doc-task-search" aria-label={t('Поиск задачи')} placeholder={t('Название или короткий ID задачи…')} disabled={readonly} value={taskSearch?.id === block.id ? taskSearch.query : ''} onfocus={() => { if (taskSearch?.id !== block.id) openTaskSearch(block); }} oninput={(event) => { taskSearch = { id: block.id, query: event.currentTarget.value }; }} onkeydown={(event) => taskSearchKey(event, block)} />
                     {#if taskSearch?.id === block.id}
-                      <ul class="doc-task-results" role="listbox" aria-label="Задачи">
-                        {#each taskMatches as task (task.id)}<li><button type="button" role="option" aria-selected="false" onclick={() => chooseTask(block, task)}><span class="doc-task-id">{shortId(task.id)}</span><span>{task.title}</span><span class="status-badge status-{task.status}"><span class="status-dot"></span>{TASK_STATUS_LABELS[task.status]}</span></button></li>
-                        {:else}<li class="doc-task-empty">{taskList ? 'Задачи не найдены' : 'Загружаем задачи…'}</li>{/each}
+                      <ul class="doc-task-results" role="listbox" aria-label={t('Задачи')}>
+                        {#each taskMatches as task (task.id)}<li><button type="button" role="option" aria-selected="false" onclick={() => chooseTask(block, task)}><span class="doc-task-id">{shortId(task.id)}</span><span>{task.title}</span><span class="status-badge status-{task.status}"><span class="status-dot"></span>{t(TASK_STATUS_LABELS[task.status])}</span></button></li>
+                        {:else}<li class="doc-task-empty">{taskList ? t('Задачи не найдены') : t('Загружаем задачи…')}</li>{/each}
                       </ul>
                     {/if}
                   </div>
@@ -837,47 +839,47 @@
             {:else}
               {#if block.type === 'bulleted'}<span class="doc-block-marker" aria-hidden="true">•</span>
               {:else if block.type === 'numbered'}<span class="doc-block-marker" aria-hidden="true">{numbers.get(block.id) ?? 1}.</span>
-              {:else if block.type === 'todo'}<input type="checkbox" class="doc-todo-box" aria-label="Отметить пункт" checked={block.checked ?? false} disabled={readonly} onchange={(event) => { block.checked = event.currentTarget.checked; markDirty(); }} />
-              {:else if block.type === 'toggle'}<button type="button" class="doc-toggle-arrow" aria-expanded={!block.collapsed} aria-label={block.collapsed ? 'Развернуть блок' : 'Свернуть блок'} disabled={readonly} onclick={() => toggleCollapse(block)}><Icon name={block.collapsed ? 'chevron' : 'down'} size={14} /></button>
-              {:else if block.type === 'callout'}<button type="button" class="doc-callout-icon" aria-label="Сменить иконку выноски" title="Сменить иконку" disabled={readonly} onclick={() => cycleIcon(block)}>{block.icon}</button>{/if}
+              {:else if block.type === 'todo'}<input type="checkbox" class="doc-todo-box" aria-label={t('Отметить пункт')} checked={block.checked ?? false} disabled={readonly} onchange={(event) => { block.checked = event.currentTarget.checked; markDirty(); }} />
+              {:else if block.type === 'toggle'}<button type="button" class="doc-toggle-arrow" aria-expanded={!block.collapsed} aria-label={block.collapsed ? t('Развернуть блок') : t('Свернуть блок')} disabled={readonly} onclick={() => toggleCollapse(block)}><Icon name={block.collapsed ? 'chevron' : 'down'} size={14} /></button>
+              {:else if block.type === 'callout'}<button type="button" class="doc-callout-icon" aria-label={t('Сменить иконку выноски')} title={t('Сменить иконку')} disabled={readonly} onclick={() => cycleIcon(block)}>{block.icon}</button>{/if}
               <div class="doc-block-content">
                 {#if editing}
-                  <textarea class="doc-block-text" rows="1" aria-label={kind.label} placeholder={placeholders[block.type]} maxlength={DOC_BLOCK_TEXT_LIMIT} value={block.text} spellcheck={block.type !== 'code'} use:field={block.id} oninput={(event) => input(event, block)} onkeydown={(event) => keydown(event, block)} onblur={() => blur(block.id)}></textarea>
+                  <textarea class="doc-block-text" rows="1" aria-label={t(kind.label)} placeholder={t(placeholders[block.type])} maxlength={DOC_BLOCK_TEXT_LIMIT} value={block.text} spellcheck={block.type !== 'code'} use:field={block.id} oninput={(event) => input(event, block)} onkeydown={(event) => keydown(event, block)} onblur={() => blur(block.id)}></textarea>
                 {:else if block.type === 'code'}
-                  <div class="doc-block-view doc-code-view" class:empty={!block.text} role="textbox" aria-label={kind.label} tabindex={readonly ? -1 : 0} data-placeholder={placeholders.code} onclick={(event) => viewClick(event, block)} onkeydown={(event) => viewKey(event, block)}>{block.text}</div>
+                  <div class="doc-block-view doc-code-view" class:empty={!block.text} role="textbox" aria-label={t(kind.label)} tabindex={readonly ? -1 : 0} data-placeholder={t(placeholders.code)} onclick={(event) => viewClick(event, block)} onkeydown={(event) => viewKey(event, block)}>{block.text}</div>
                 {:else}
-                  <div class="doc-block-view" class:empty={!block.text} role="textbox" aria-label={kind.label} tabindex={readonly ? -1 : 0} data-placeholder={block.type === 'paragraph' ? viewPlaceholder(position) : readonly ? '' : placeholders[block.type]} onclick={(event) => viewClick(event, block)} onkeydown={(event) => viewKey(event, block)}>{@html renderInlineMarkdown(block.text)}</div>
+                  <div class="doc-block-view" class:empty={!block.text} role="textbox" aria-label={t(kind.label)} tabindex={readonly ? -1 : 0} data-placeholder={block.type === 'paragraph' ? viewPlaceholder(position) : readonly ? '' : t(placeholders[block.type])} onclick={(event) => viewClick(event, block)} onkeydown={(event) => viewKey(event, block)}>{@html renderInlineMarkdown(block.text)}</div>
                 {/if}
-                {#if block.type === 'code'}<input class="doc-code-language" aria-label="Язык кода" placeholder="язык" maxlength={DOC_LANGUAGE_LIMIT} value={block.language ?? ''} disabled={readonly} oninput={(event) => languageInput(event, block)} />{/if}
-                {#if block.type === 'callout' && !readonly}<select class="doc-callout-color" aria-label="Цвет выноски" value={block.color ?? 'gray'} onchange={(event) => { block.color = event.currentTarget.value as DocBlock['color']; markDirty(); }}>{#each DOC_CALLOUT_COLORS as color (color)}<option value={color}>{DOC_CALLOUT_COLOR_LABELS[color]}</option>{/each}</select>{/if}
+                {#if block.type === 'code'}<input class="doc-code-language" aria-label={t('Язык кода')} placeholder={t('язык')} maxlength={DOC_LANGUAGE_LIMIT} value={block.language ?? ''} disabled={readonly} oninput={(event) => languageInput(event, block)} />{/if}
+                {#if block.type === 'callout' && !readonly}<select class="doc-callout-color" aria-label={t('Цвет выноски')} value={block.color ?? 'gray'} onchange={(event) => { block.color = event.currentTarget.value as DocBlock['color']; markDirty(); }}>{#each DOC_CALLOUT_COLORS as color (color)}<option value={color}>{t(DOC_CALLOUT_COLOR_LABELS[color])}</option>{/each}</select>{/if}
               </div>
             {/if}
           </div>
           {#if menu?.kind === 'slash' && menu.id === block.id}
-            <div class="doc-block-menu" role="listbox" aria-label="Тип блока">
+            <div class="doc-block-menu" role="listbox" aria-label={t('Тип блока')}>
               {#each slashItems as item, option (item.type)}
-                <button type="button" role="option" aria-selected={option === menu.active} class:active={option === menu.active} tabindex="-1" onmousedown={(event) => event.preventDefault()} onclick={() => applyKind(position, item.type)}><span class="doc-menu-label">{item.label}<small>{item.hint}</small></span>{#if item.shortcut}<kbd>{item.shortcut.trim()}</kbd>{/if}</button>
-              {:else}<p class="doc-menu-empty">Ничего не найдено. Esc закрывает меню.</p>{/each}
+                <button type="button" role="option" aria-selected={option === menu.active} class:active={option === menu.active} tabindex="-1" onmousedown={(event) => event.preventDefault()} onclick={() => applyKind(position, item.type)}><span class="doc-menu-label">{t(item.label)}<small>{t(item.hint)}</small></span>{#if item.shortcut}<kbd>{item.shortcut.trim()}</kbd>{/if}</button>
+              {:else}<p class="doc-menu-empty">{t('Ничего не найдено. Esc закрывает меню.')}</p>{/each}
             </div>
           {:else if menu?.kind === 'block' && menu.id === block.id}
-            <div class="doc-block-menu" role="menu" tabindex="-1" aria-label={'Действия с блоком ' + (position + 1)} onkeydown={menuKey}>
+            <div class="doc-block-menu" role="menu" tabindex="-1" aria-label={t('Действия с блоком {number}', { number: position + 1 })} onkeydown={menuKey}>
               {#if isDocTextType(block.type)}
-                <p class="doc-menu-heading">Превратить в</p>
-                {#each convertible as item (item.type)}<button type="button" role="menuitem" class:current={item.type === block.type} onclick={() => applyKind(position, item.type)}>{item.label}{#if item.type === block.type}<Icon name="check" size={14} />{/if}</button>{/each}
+                <p class="doc-menu-heading">{t('Превратить в')}</p>
+                {#each convertible as item (item.type)}<button type="button" role="menuitem" class:current={item.type === block.type} onclick={() => applyKind(position, item.type)}>{t(item.label)}{#if item.type === block.type}<Icon name="check" size={14} />{/if}</button>{/each}
                 <hr />
               {/if}
-              <button type="button" role="menuitem" disabled={position === 0} onclick={() => { closeMenu(true); moveBlock(position, position - 1); }}>Переместить выше</button>
-              <button type="button" role="menuitem" disabled={position === blocks.length - 1} onclick={() => { closeMenu(true); moveBlock(position, position + 1); }}>Переместить ниже</button>
-              <button type="button" role="menuitem" disabled={(block.indent ?? 0) >= DOC_INDENT_LIMIT} onclick={() => { closeMenu(true); setIndent(block, (block.indent ?? 0) + 1); }}>Вложить глубже</button>
-              <button type="button" role="menuitem" disabled={!(block.indent ?? 0)} onclick={() => { closeMenu(true); setIndent(block, (block.indent ?? 0) - 1); }}>Вынести на уровень выше</button>
+              <button type="button" role="menuitem" disabled={position === 0} onclick={() => { closeMenu(true); moveBlock(position, position - 1); }}>{t('Переместить выше')}</button>
+              <button type="button" role="menuitem" disabled={position === blocks.length - 1} onclick={() => { closeMenu(true); moveBlock(position, position + 1); }}>{t('Переместить ниже')}</button>
+              <button type="button" role="menuitem" disabled={(block.indent ?? 0) >= DOC_INDENT_LIMIT} onclick={() => { closeMenu(true); setIndent(block, (block.indent ?? 0) + 1); }}>{t('Вложить глубже')}</button>
+              <button type="button" role="menuitem" disabled={!(block.indent ?? 0)} onclick={() => { closeMenu(true); setIndent(block, (block.indent ?? 0) - 1); }}>{t('Вынести на уровень выше')}</button>
               <hr />
-              <button type="button" role="menuitem" class="danger" onclick={() => { closeMenu(false); removeAt(position); const target = blocks[Math.min(position, blocks.length - 1)]; if (target && isDocTextType(target.type)) void focusBlock(target.id, 'end'); }}><Icon name="trash" size={14} />Удалить блок</button>
+              <button type="button" role="menuitem" class="danger" onclick={() => { closeMenu(false); removeAt(position); const target = blocks[Math.min(position, blocks.length - 1)]; if (target && isDocTextType(target.type)) void focusBlock(target.id, 'end'); }}><Icon name="trash" size={14} />{t('Удалить блок')}</button>
             </div>
           {/if}
         </div>
         {/if}
       {/each}
     </div>
-    {#if !readonly}<button type="button" class="doc-add-block" onclick={appendBlock}><Icon name="plus" size={14} />Добавить блок</button>{/if}
+    {#if !readonly}<button type="button" class="doc-add-block" onclick={appendBlock}><Icon name="plus" size={14} />{t('Добавить блок')}</button>{/if}
   </article>
 {/if}

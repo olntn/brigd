@@ -1,3 +1,4 @@
+import { tk } from './i18n/key';
 import type { Effort, IntegratorProfileInput, ModelCatalogEntry, Provider, Run, WorkerSnapshot } from './types';
 
 export const MODEL_ID_LIMIT = 128;
@@ -7,8 +8,8 @@ export const WORKER_DESCRIPTION_LIMIT = 1_000;
 /** The only built-in worker. It is never stored in the catalog and cannot be assigned or archived; its single profile is edited separately. */
 export const INTEGRATOR_WORKER_ID = 'brigd-integrator';
 export const INTEGRATOR_WORKER = {
-  id: INTEGRATOR_WORKER_ID, name: 'Интегратор',
-  description: 'Встроенный работник brigd. Разрешает конфликты слияния в worktree задачи, когда результат не объединяется с целевой веткой автоматически.',
+  id: INTEGRATOR_WORKER_ID, name: tk('Интегратор'),
+  description: tk('Встроенный работник brigd. Разрешает конфликты слияния в worktree задачи, когда результат не объединяется с целевой веткой автоматически.'),
 } as const;
 export const isBuiltinWorker = (id: string | null | undefined): boolean => id === INTEGRATOR_WORKER_ID;
 /** The single saved integrator profile decides each reconcile run: its own CLI settings in custom mode,
@@ -29,7 +30,7 @@ export function runUltracode(run: Pick<Run, 'ultracode' | 'worker'>): boolean | 
 export function normalizeWorkerDescription(value: unknown): string {
   if (value === undefined || value === null) return '';
   if (typeof value !== 'string' || value.length > WORKER_DESCRIPTION_LIMIT || value.includes('\0')) {
-    throw new Error(`Описание: не больше ${WORKER_DESCRIPTION_LIMIT} символов, без нулевого символа`);
+    throw new Error(`Описание: не больше ${WORKER_DESCRIPTION_LIMIT} символов, без нулевого символа`); // i18n-ignore: English in i18n/en/workers.ts
   }
   return value.trim();
 }
@@ -55,17 +56,17 @@ export const modelPresets: Record<Provider, readonly { id: string; label: string
 /** A single bounded argv value. Permit native aliases, dated IDs, and cloud-provider IDs. */
 export function normalizeModel(value: unknown): string | null {
   if (value === undefined || value === null) return null;
-  if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/.test(value)) throw new Error('ID модели должен быть текстом без управляющих символов.');
+  if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/.test(value)) throw new Error(tk('ID модели должен быть текстом без управляющих символов.'));
   const model = value.replace(/^ +| +$/g, '');
   if (!model) return null;
   if (model.length > MODEL_ID_LIMIT || !/^[A-Za-z0-9][A-Za-z0-9._:/+@\[\]-]*$/.test(model)) {
-    throw new Error(`ID модели: до ${MODEL_ID_LIMIT} символов, без пробелов; начните с буквы или цифры. Допустимы буквы, цифры и . _ : / + @ [ ] -`);
+    throw new Error(`ID модели: до ${MODEL_ID_LIMIT} символов, без пробелов; начните с буквы или цифры. Допустимы буквы, цифры и . _ : / + @ [ ] -`); // i18n-ignore: English in i18n/en/workers.ts
   }
   return model;
 }
 
 export function modelLabel(model?: string | null, catalog?: readonly ModelCatalogEntry[], provider?: Provider): string {
-  if (!model) return 'По умолчанию CLI';
+  if (!model) return tk('По умолчанию CLI');
   if (catalog) return catalog.find(option => option.modelId === model && (!provider || option.provider === provider))?.label ?? model;
   return [...modelPresets.codex, ...modelPresets.claude].find(option => option.id === model)?.label ?? model;
 }
@@ -77,12 +78,12 @@ export const effortOptions: Record<Provider, readonly Effort[]> = {
 };
 
 export const effortLabels: Record<Effort, string> = {
-  default: 'По умолчанию CLI',
-  low: 'Низкий',
-  medium: 'Средний',
-  high: 'Высокий',
-  xhigh: 'Очень высокий',
-  max: 'Максимальный',
+  default: tk('По умолчанию CLI'),
+  low: tk('Низкий'),
+  medium: tk('Средний'),
+  high: tk('Высокий'),
+  xhigh: tk('Очень высокий'),
+  max: tk('Максимальный'),
 };
 
 export function effortLabel(effort: Effort): string { return effortLabels[effort]; }
