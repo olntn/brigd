@@ -236,6 +236,7 @@ export const patterns: Pattern[] = [
   [/^Название модели: от 1 до (\d+) символов$/, 'Model name: 1 to $1 characters'],
   [/^tagIds: укажите массив не больше чем из (\d+) идентификаторов тегов$/, 'tagIds: specify an array of at most $1 tag IDs'],
   [/^Вложения: выберите не больше (\d+) файлов$/, 'Attachments: choose at most $1 files'],
+  [/^Статус выполнения: одна строка до (\d+) символов$/, 'Progress status: one line of up to $1 characters'],
 
   // Documentation pages.
   [/^Допустимы только поля: (.+)$/, 'Only these fields are allowed: $1'],

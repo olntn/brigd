@@ -228,6 +228,11 @@ export interface RunReconcile {
   /** 1 for the first resolution of a result; grows when a resolved result conflicts again. */
   depth: number;
 }
+/** The stage of work the agent reported for its current turn, e.g. «Написание кода». Display-only. */
+export interface RunProgress {
+  text: string;
+  updatedAt: number;
+}
 export interface Run {
   integration?: Integration | null;
   workspace?: WorkspaceSnapshot | null;
@@ -243,6 +248,8 @@ export interface Run {
   ultracode?: boolean | null;
   /** The turn a replacement worker started after the previous one's usage limits ran out; null when nobody was replaced. */
   fallbackTurn?: number | null;
+  /** Set by the agent through set_progress during the current turn; null when the run is not running or a new turn has started. */
+  progress?: RunProgress | null;
   id: string;
   taskId: string;
   provider: Provider;

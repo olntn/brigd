@@ -928,6 +928,10 @@
     return `${target.worker ? localWorker(target.worker).name : providerName(target.provider)}${target.stageIndex != null ? ` · ${t('Этап {number}: {title}', { number: target.stageIndex + 1, title: target.stageTitle ?? '' })}` : ''} · ${dateTime(target.startedAt)} · ${target.isFollowup ? t('Доп. запрос') : target.isReconcile ? t('Конфликт') : t('Запуск')} ${target.sourceRunId.slice(0, 6)}${target.sessionId ? '' : ` · ${t('Сессия не сохранена')}`}`;
   }
 
+  function clockTime(timestamp: number): string {
+    return formatDate(timestamp, { hour: '2-digit', minute: '2-digit' });
+  }
+
   function dateTime(timestamp: number | null, short = false): string {
     if (!timestamp) return '—';
     return formatDate(timestamp, { day: 'numeric', month: 'short', ...(short ? {} : { hour: '2-digit', minute: '2-digit' }) });
@@ -1078,6 +1082,7 @@
       {#if workflowSteps(task).length}<div class="card-workflow-progress"><Icon name="list" size={14} /><span>{workflowProgress(task)}</span></div>{/if}
       {#if task.latestRun?.followup}<div class="card-followup-label"><Icon name="message" size={14} /><span>{t('Дополнительный запрос')}{#if followupStage(task.latestRun)} · {t('Этап {number}', { number: followupStage(task.latestRun)!.index + 1 })}{/if}</span></div>
       {:else if task.latestRun?.reconcile}<div class="card-followup-label"><Icon name="refresh" size={14} /><span>{t('Разрешение конфликта слияния')}</span></div>{/if}
+      {#if task.latestRun?.progress}<div class="card-progress" title={t('Статус выполнения: {text}', { text: task.latestRun.progress.text })}><Icon name="refresh" size={13} class="spin" /><span>{task.latestRun.progress.text}</span></div>{/if}
       {#if task.status === 'cancelling'}<div class="card-cancelling"><Icon name="refresh" size={13} class="spin" />{t('Останавливается')}</div>{/if}
       {#if task.status === 'waiting_input'}<div class="card-signal"><Icon name="message" size={13} /> {t('Агент ждёт вашего ответа')}</div>{/if}
       {#if task.status === 'queued'}<div class="card-signal"><Icon name="clock" size={13} /> {t('Ожидает свободного места для запуска')}</div>{/if}
@@ -1188,7 +1193,7 @@
             {/each}
           </div>
         {:else}
-          <div class="task-list"><div class="list-heading"><span>{t('ЗАДАЧА')}</span><span>{t('АГЕНТ')}</span><span>{t('СТАТУС')}</span><span>{t('ЗАПУСК')}</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : task.schedule === 'auto' ? 'moon' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}{@render priorityBadge(task.priority)}{/if}{shortPath(task.cwd)}</small>{@render taskTags(task)}{#if task.latestRun?.followup}<small class="list-followup-label">{t('Дополнительный запрос')}{#if followupStage(task.latestRun)} · {t('Этап {number}', { number: followupStage(task.latestRun)!.index + 1 })}{/if}</small>{/if}{#if workflowSteps(task).length}<small class="list-workflow-progress">{workflowProgress(task)}</small>{/if}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{scheduleLabel(task, true)}</span><button class="icon-button" aria-label={t('Открыть: {title}', { title: task.title })} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>{t('Новые задачи появятся здесь')}</span></div>{/each}</div>
+          <div class="task-list"><div class="list-heading"><span>{t('ЗАДАЧА')}</span><span>{t('АГЕНТ')}</span><span>{t('СТАТУС')}</span><span>{t('ЗАПУСК')}</span><span></span></div>{#each filtered as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name={task.schedule === 'interval' ? 'clock' : task.schedule === 'auto' ? 'moon' : 'terminal'} size={17} /></span><span><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}{@render priorityBadge(task.priority)}{/if}{shortPath(task.cwd)}</small>{@render taskTags(task)}{#if task.latestRun?.followup}<small class="list-followup-label">{t('Дополнительный запрос')}{#if followupStage(task.latestRun)} · {t('Этап {number}', { number: followupStage(task.latestRun)!.index + 1 })}{/if}</small>{/if}{#if workflowSteps(task).length}<small class="list-workflow-progress">{workflowProgress(task)}</small>{/if}{#if task.latestRun?.progress}<small class="list-progress" title={t('Статус выполнения: {text}', { text: task.latestRun.progress.text })}>{task.latestRun.progress.text}</small>{/if}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{scheduleLabel(task, true)}</span><button class="icon-button" aria-label={t('Открыть: {title}', { title: task.title })} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="inbox" size={24} /><span>{t('Новые задачи появятся здесь')}</span></div>{/each}</div>
         {/if}
       {/if}
       {/if}
@@ -1208,6 +1213,7 @@
       <section class="task-information" aria-label={t('Информация о задаче')}>
       <div class="drawer-heading">
         <h2 id="detail-title">{selectedTask.title}</h2><p class="detail-created">{t('Создано {time}', { time: dateTime(selectedTask.createdAt) })}</p>
+        {#if currentRun?.progress}<p class="detail-progress" role="status"><Icon name="refresh" size={14} class="spin" /><span><strong>{t('Статус выполнения:')}</strong> {currentRun.progress.text}{' · '}<time datetime={new Date(currentRun.progress.updatedAt).toISOString()}>{t('с {time}', { time: clockTime(currentRun.progress.updatedAt) })}</time></span></p>{/if}
         {#if selectedTask.nextRunAt && !selectedTask.paused && selectedTask.archivedAt === null}<p class="detail-next-run"><Icon name="clock" size={14} /><span>{t('Следующий запуск {time}', { time: dateTime(selectedTask.nextRunAt) })}</span></p>{/if}
         <div class="detail-actions">
           {#if selectedTask.archivedAt !== null}

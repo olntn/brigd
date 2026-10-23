@@ -72,6 +72,29 @@ describe('authoritative current-task MCP broker', () => {
     expect((await call(broker, 'add_comment', { ...c, idempotency_key: 'report-1' })).isError).toBe(true);
     expect((await call(broker, 'add_comment', { ...c, run_id: 'someone-else' })).isError).toBe(true);
   });
+  test('set_progress shows one display-only stage per turn and logs each change', async () => {
+    const { task, run, broker } = setup();
+    expect(store.getTask(task.id).latestRun!.progress).toBeNull();
+    expect(parse(await call(broker, 'set_progress', { status: '  Сбор информации\n о проекте ' })).progress).toBe('Сбор информации о проекте');
+    expect(store.getTask(task.id)).toMatchObject({ status: 'running', latestRun: { progress: { text: 'Сбор информации о проекте' } } });
+    parse(await call(broker, 'set_progress', { status: 'Сбор информации о проекте' }));
+    parse(await call(broker, 'set_progress', { status: 'Написание\u202E кода' }));
+    expect(store.getRun(run.id).progress!.text).toBe('Написание кода');
+    expect(store.detail(task.id).logs!.filter(log => log.kind === 'progress').map(log => log.summary)).toEqual(['Статус выполнения: Сбор информации о проекте', 'Статус выполнения: Написание кода']);
+    expect(store.detail(task.id).comments.some(comment => comment.body.includes('кода'))).toBe(false);
+    for (const args of [{}, { status: '' }, { status: ' \n\t ' }, { status: 'x'.repeat(121) }, { status: 42 }, { status: 'Тесты', task_id: task.id }]) {
+      expect((await call(broker, 'set_progress', args)).isError).toBe(true);
+    }
+    expect(store.getRun(run.id).progress!.text).toBe('Написание кода');
+    store.setSession(run.id, 'session-1');
+    store.finish(run.id, 'waiting_input', 'Need detail', null);
+    expect(store.getRun(run.id).progress).toBeNull();
+    // The next turn starts without the earlier stage, and the old capability cannot report one for it.
+    store.resume(run.id, 'Answer');
+    expect(store.getRun(run.id)).toMatchObject({ status: 'running', progress: null });
+    expect((await call(broker, 'set_progress', { status: 'Поздний статус' })).isError).toBe(true);
+    expect(store.getRun(run.id).progress).toBeNull();
+  });
   test('original materialization creates separate app-named copies and removes unchanged copies on revocation', async () => {
     const a = await stage(Buffer.from('original'), 'text/plain', 'USER-TEXT.txt'); const { broker } = setup([a.id]);
     const result = parse(await call(broker, 'read_attachment', { attachment_id: a.id, materialize: true }));

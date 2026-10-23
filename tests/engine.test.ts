@@ -155,6 +155,34 @@ describe('agent lifecycle orchestration', () => {
     ]);
   });
 
+  test('each workflow stage reports its own progress status; a late report cannot cross the run fence', async () => {
+    const worker = store.createWorker({ name: 'Reviewer', provider: 'codex', avatarUrl: null, effort: 'default', communicationStyle: '' });
+    const task = store.createTask(input(folder, { steps: [
+      { workerId: worker.id, title: 'First', instruction: 'Review first.' },
+      { workerId: worker.id, title: 'Second', instruction: 'Review second.' },
+    ] }));
+    const run = engine.start(task.id);
+    expect(store.getTask(task.id).latestRun!.progress).toBeNull();
+    agent.calls[0]!.callbacks.onProgress!('Сбор информации о проекте');
+    expect(store.getTask(task.id).latestRun!.progress).toMatchObject({ text: 'Сбор информации о проекте' });
+    agent.calls[0]!.callbacks.onProgress!('Bad\u0000'.repeat(40));
+    expect(store.getRun(run.id).progress!.text).toBe('Сбор информации о проекте');
+    agent.calls[0]!.resolve(outcome());
+    await flush();
+    expect(store.getRun(run.id)).toMatchObject({ status: 'running', currentStepIndex: 1, progress: null });
+    agent.calls[0]!.callbacks.onProgress!('Поздний статус первого этапа');
+    expect(store.getRun(run.id).progress).toBeNull();
+    agent.calls[1]!.callbacks.onProgress!('Написание кода');
+    expect(store.getRun(run.id).progress!.text).toBe('Написание кода');
+    agent.calls[1]!.resolve(outcome('completed', 'second-step-session'));
+    await flush();
+    expect(store.getRun(run.id)).toMatchObject({ status: 'completed', progress: null });
+    expect(store.detail(task.id).logs!.filter(log => log.kind === 'progress').map(log => ({ summary: log.summary, stepIndex: log.stepIndex }))).toEqual([
+      { summary: 'Статус выполнения: Сбор информации о проекте', stepIndex: 0 },
+      { summary: 'Статус выполнения: Написание кода', stepIndex: 1 },
+    ]);
+  });
+
   test('action logs persist separately from agent answers and late logs cannot cross a run fence', async () => {
     const task = store.createTask(input(folder));
     const run = engine.start(task.id);

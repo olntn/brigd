@@ -12,7 +12,7 @@
     logs: ActivityLog[]; runs: Run[]; taskId: string; author: (file: Attachment) => string;
   } = $props();
 
-  const icons: Record<string, string> = { command: 'terminal', file: 'folder', tool: 'code', search: 'search', lifecycle: 'play', system: 'history' };
+  const icons: Record<string, string> = { command: 'terminal', file: 'folder', tool: 'code', search: 'search', lifecycle: 'play', system: 'history', progress: 'spark' };
   const dateTime = (time: number) => formatDate(time, {
     day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit',
   });

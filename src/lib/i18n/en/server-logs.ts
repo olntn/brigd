@@ -57,6 +57,7 @@ export const messages: Dictionary = {
   // Turn results and failures (engine.ts).
   'Работник завершил выполнение': 'Worker finished',
   'Работник ожидает ответа пользователя': 'Worker is waiting for the user’s answer',
+  'Работник обновил статус выполнения задачи.': 'The worker updated the task’s progress status.',
   'Выполнение заблокировано': 'Execution blocked',
   'Результат сохранён. Начинается следующий этап.': 'Result saved. The next stage is starting.',
   'Ответ работника сохранён в комментариях.': 'The worker’s answer was saved in the comments.',
@@ -295,6 +296,7 @@ export const patterns: Pattern[] = [
 
   // Turn results (engine.ts) and merge results (store.ts).
   [/^Статус: ([\w-]+)\.$/, 'Status: $1.'],
+  [/^Статус выполнения: (.+)$/s, 'Progress: $1'],
   [/^Ход сессии: (\d+)\.$/, 'Session turn: $1.'],
   [/^Этап: (\d+) из (\d+)\.$/, 'Stage: $1 of $2.'],
   [/^Вопросов пользователю: (\d+)\.$/, 'Questions for the user: $1.'],
