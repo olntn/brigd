@@ -12,12 +12,12 @@ function task(id: string, overrides: Partial<Card> = {}): Card {
 }
 
 describe('task analytics', () => {
-  test('covers every task state exactly once, including integration failures', () => {
+  test('covers every task state exactly once, including manual transfer and integration failures', () => {
     expect(Object.keys(ANALYTICS_STATUS_GROUP).sort()).toEqual(Object.keys(TASK_STATUS_LABELS).sort());
     const tasks = Object.keys(TASK_STATUS_LABELS).map(status => task(status, { status: status as TaskStatus }));
     const result = buildTaskAnalytics(tasks, defaults, now);
     expect(result.total).toBe(tasks.length);
-    expect(result.groups).toEqual({ ready: 1, active: 6, attention: 8, completed: 1, cancelled: 1 });
+    expect(result.groups).toEqual({ ready: 1, active: 6, attention: 9, completed: 1, cancelled: 1 });
     expect(ANALYTICS_GROUPS.reduce((sum, group) => sum + result.groups[group], 0)).toBe(result.total);
     expect(result.completionRate).toBe(1 / tasks.length);
   });

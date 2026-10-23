@@ -2,7 +2,7 @@ import type { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, DefaultSchedule, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CheckTriage, CheckTriageCounts, CheckTriageOutcome, CliAccessMode, Comment, ConcurrencySettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunCheckFailure, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskDependency, TaskInput, TaskLog, TaskLogInput, TaskStepInput, TokenUsage, TurnUsage, UsageTotals, Worker, WorkerInput, WorkerSnapshot, WorkerUsageOverview, WorkspaceSnapshot } from '../src/lib/types';
+import type { Attachment, DefaultSchedule, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CheckTriage, CheckTriageCounts, CheckTriageOutcome, CliAccessMode, Comment, ConcurrencySettings, ResultTransferSettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunCheckFailure, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskDependency, TaskInput, TaskLog, TaskLogInput, TaskStepInput, TokenUsage, TurnUsage, UsageTotals, Worker, WorkerInput, WorkerSnapshot, WorkerUsageOverview, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
 import type { IntegrationRecord, WorkspaceRun } from './workspace-storage';
 import { clock } from './clock';
@@ -547,6 +547,12 @@ export class Store {
     this.db.exec(`CREATE TABLE IF NOT EXISTS cli_access_settings (
       singleton INTEGER PRIMARY KEY CHECK(singleton=1), mode TEXT CHECK(mode IN ('standard','full'))
     ); INSERT OR IGNORE INTO cli_access_settings (singleton,mode) VALUES (1,NULL)`);
+    // Result policy is read at completion; manual waiting is checked on each repository claim.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS result_transfer_settings (
+      singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+      mode TEXT NOT NULL DEFAULT 'automatic' CHECK(mode IN ('automatic','manual')),
+      manual_wait TEXT NOT NULL DEFAULT 'continue' CHECK(manual_wait IN ('continue','wait'))
+    ); INSERT OR IGNORE INTO result_transfer_settings (singleton) VALUES (1)`);
     // Saved process limits; NULL follows BRIGD_MAX_PARALLEL / BRIGD_MAX_PER_REPOSITORY.
     this.db.exec(`CREATE TABLE IF NOT EXISTS concurrency_settings (
       singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -845,6 +851,28 @@ export class Store {
     if (!Object.values(counts).some(Boolean)) return;
     this.db.query(`UPDATE check_triage_settings SET flaky=flaky+?,target_failed=target_failed+?,returned=returned+?,exhausted=exhausted+?,
       not_returned=not_returned+?,stopped=stopped+? WHERE singleton=1`).run(counts.flaky, counts.targetFailed, counts.returned, counts.exhausted, counts.notReturned, counts.stopped);
+  }
+  getResultTransferSettings(): ResultTransferSettings {
+    return this.db.query('SELECT mode,manual_wait AS manualWait FROM result_transfer_settings WHERE singleton=1').get() as ResultTransferSettings;
+  }
+  setResultTransferSettings(value: Record<string, unknown>): ResultTransferSettings {
+    const keys = Object.keys(value);
+    if (!keys.length || keys.some(key => !['mode', 'manualWait'].includes(key)) ||
+        Object.hasOwn(value, 'mode') && !['automatic', 'manual'].includes(value.mode as string) ||
+        Object.hasOwn(value, 'manualWait') && !['continue', 'wait'].includes(value.manualWait as string)) {
+      throw new AppError('Укажите mode: automatic или manual и manualWait: continue или wait.');
+    }
+    return this.db.transaction(() => {
+      const next = { ...this.getResultTransferSettings(), ...value } as ResultTransferSettings;
+      this.db.query('UPDATE result_transfer_settings SET mode=?,manual_wait=? WHERE singleton=1').run(next.mode, next.manualWait);
+      return this.getResultTransferSettings();
+    }).immediate();
+  }
+  manualTransferWaitReason(repositoryId: string): string | null {
+    const settings = this.getResultTransferSettings();
+    if (settings.mode !== 'manual' || settings.manualWait !== 'wait') return null;
+    return this.db.query("SELECT id FROM integrations WHERE repository_id=? AND state='awaiting_manual' LIMIT 1").get(repositoryId)
+      ? 'Репозиторий ждёт ручного переноса результата. Нажмите «Проверить и перенести» или «Не переносить».' : null;
   }
   getConcurrencyLimits(): ConcurrencySettings['saved'] {
     const row = this.db.query('SELECT max_parallel,max_per_repository FROM concurrency_settings WHERE singleton=1').get() as { max_parallel: number | null; max_per_repository: number | null };
@@ -1505,7 +1533,7 @@ export class Store {
   }
   /** Runnable queued requests reserve a slot; automatic requests waiting on prerequisites do not. */
   autopilotCapacity(maximum: number): number {
-    const queued = this.pendingExecutions().length;
+    const queued = this.pendingExecutions().filter(request => !this.executionManualWaitReason(request.runId)).length;
     return Math.max(0, maximum - this.occupiedSlots() - queued);
   }
   saveAvatar(data: Uint8Array, mime: string, now = clock()): string {
@@ -1819,13 +1847,14 @@ export class Store {
     const latestRun = latest ? this.mapRun(latest) : null;
     const dependsOnTaskIds: string[] = JSON.parse(row.depends_on_task_ids);
     const integrationStatuses: Partial<Record<Integration['status'], Task['status']>> = {
-      queued: 'awaiting_merge', checking: 'integrating', merging: 'integrating', cancelling: 'integrating',
+      awaiting_manual: 'awaiting_manual_transfer', queued: 'awaiting_merge', checking: 'integrating', merging: 'integrating', cancelling: 'integrating',
       conflict: 'merge_conflict', failed: 'merge_failed', blocked: 'merge_blocked', interrupted: 'merge_interrupted', cancelled: 'merge_blocked',
     };
     return { dependsOnTaskIds, dependencies: this.taskDependencies(dependsOnTaskIds), tagIds: tags.map(tag => tag.id), tags, hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd, ultracode: readFlag(row.ultracode), timeLimitMinutes: validateTimeLimitMinutes(row.time_limit_minutes),
       priority: row.priority ?? DEFAULT_TASK_PRIORITY, schedule: row.schedule, intervalMinutes: row.interval_minutes, firstRunAt: row.first_run_at,
       ...(row.schedule === 'daily' ? storedDailyRule(row) : { timeOfDay: null, weekdays: null, timeZone: null }),
       nextRunAt: row.next_run_at, paused: !!row.paused, createdAt: row.created_at, updatedAt: row.updated_at, archivedAt: row.archived_at ?? null,
+      ...(latest?.status === 'queued' ? { launchWaitReason: this.executionManualWaitReason(latest.id) } : {}),
       status: latestRun?.integration ? integrationStatuses[latestRun.integration.status] ?? latestRun.status : latest?.status ?? 'ready', latestRun,
       runCount: (this.db.query('SELECT count(*) AS n FROM runs WHERE task_id = ?').get(row.id) as Row).n };
   }
@@ -2403,7 +2432,7 @@ export class Store {
           this.taskDependencies(this.savedDependencyIds(run.taskId) ?? []).some(dependency => !dependency.satisfied)) return null;
       // Demo runs share the folder too, but never write to it, so they follow the per-repository limit like worktrees.
       const direct = !run.mock && (run.workspace?.mode === 'direct' || !run.workspace && !!run.sessionId);
-      if (this.repositoryBusy(request.location.repositoryId, perRepository, direct) || this.occupiedSlots() >= maximum) return null;
+      if (this.repositoryBusy(request.location.repositoryId, perRepository, direct, run.trigger === 'reconcile' || !!run.followup?.checkFailure) || this.occupiedSlots() >= maximum) return null;
       const result = this.db.query("UPDATE execution_requests SET state='preparing' WHERE run_id=? AND turn=? AND state='queued'").run(run.id, run.turn);
       if (!result.changes) return null;
       this.executionStatus(run, 'preparing');
@@ -2411,14 +2440,20 @@ export class Store {
     }).immediate();
   }
   /** Shared by the queue and the autopilot: an uncertain, integrating, exclusively held or full repository takes no new work. */
-  private repositoryBusy(repositoryId: string, perRepository: number, exclusive: boolean): boolean {
+  private repositoryBusy(repositoryId: string, perRepository: number, exclusive: boolean, continuingTransfer = false): boolean {
     const uncertain = this.db.query("SELECT seq FROM execution_requests WHERE repository_id=? AND state IN ('interrupted','held')").get(repositoryId);
     const occupied = (this.db.query("SELECT COUNT(*) AS n FROM execution_requests WHERE repository_id=? AND state IN ('preparing','running')").get(repositoryId) as { n: number }).n;
     const shared = this.db.query(`SELECT r.id FROM execution_requests e JOIN runs r ON r.id=e.run_id
       LEFT JOIN workspaces w ON w.id=r.workspace_id WHERE e.repository_id=? AND e.state IN ('preparing','running') AND r.mock=0
       AND (json_extract(w.snapshot,'$.mode')='direct' OR (r.workspace_id IS NULL AND r.session_id IS NOT NULL))`).get(repositoryId);
     const integration = this.db.query("SELECT seq FROM integrations WHERE repository_id=? AND state IN ('queued','checking','merging','cancelling','interrupted')").get(repositoryId);
-    return !!uncertain || !!integration || !!shared || exclusive && occupied > 0 || occupied >= perRepository;
+    return !!uncertain || !!integration || !!shared || !continuingTransfer && !!this.manualTransferWaitReason(repositoryId) || exclusive && occupied > 0 || occupied >= perRepository;
+  }
+  private executionManualWaitReason(runId: string): string | null {
+    const run = this.getRun(runId);
+    if (run.trigger === 'reconcile' || run.followup?.checkFailure) return null;
+    const row = this.db.query("SELECT repository_id FROM execution_requests WHERE run_id=? AND state='queued'").get(runId) as Row | null;
+    return row ? this.manualTransferWaitReason(row.repository_id) : null;
   }
   private executionStatus(run: Run, status: RunStatus, now = clock()) {
     this.db.query('UPDATE runs SET status=?,updated_at=? WHERE id=?').run(status, now, run.id);
@@ -2489,11 +2524,34 @@ export class Store {
         const next = { ...prior, status: 'queued' as const, rechecks: 0, error: null, checks: [], triage: null, updatedAt: clock() };
         this.writeIntegration(next); return next;
       }
-      const job: Integration = { id: crypto.randomUUID(), runId, repositoryId: run.workspace.repositoryId, status: 'queued', attempt: 0,
-        sourceCommit: null, targetCommit: null, resultCommit: null, candidatePath: null, checks: [], error: null, updatedAt: clock() };
-      this.db.query('INSERT INTO integrations (id,run_id,repository_id,state,attempt,snapshot) VALUES (?,?,?,?,?,?)')
-        .run(job.id, runId, job.repositoryId, job.status, job.attempt, JSON.stringify(job));
-      return job;
+      return this.createIntegration(run, 'queued');
+    }).immediate();
+  }
+  private createIntegration(run: Run, status: Integration['status'], sourceCommit: string | null = null, error: string | null = null): Integration {
+    const job: Integration = { id: crypto.randomUUID(), runId: run.id, repositoryId: run.workspace!.repositoryId, status, attempt: 0,
+      sourceCommit, targetCommit: null, resultCommit: null, candidatePath: null, checks: [], error, updatedAt: clock() };
+    this.db.query('INSERT INTO integrations (id,run_id,repository_id,state,attempt,snapshot) VALUES (?,?,?,?,?,?)')
+      .run(job.id, job.runId, job.repositoryId, job.status, job.attempt, JSON.stringify(job));
+    return job;
+  }
+  awaitManualIntegration(runId: string, sourceCommit: string | null, error: string | null = null): Integration | null {
+    return this.db.transaction(() => {
+      const run = this.getRun(runId);
+      if (run.status !== 'completed' || run.workspace?.mode !== 'worktree') return null;
+      this.assertNotArchived(this.getTask(run.taskId));
+      return this.integrationForRun(runId) ?? this.createIntegration(run, error ? 'blocked' : 'awaiting_manual', sourceCommit, error);
+    }).immediate();
+  }
+  skipManualIntegration(runId: string): Integration {
+    return this.db.transaction(() => {
+      const run = this.getRun(runId);
+      this.assertNotArchived(this.getTask(run.taskId));
+      const job = this.integrationForRun(runId);
+      if (!job || !['awaiting_manual', 'skipped'].includes(job.status)) throw new AppError('Этот результат не ожидает ручного переноса.', 409);
+      if (job.status === 'skipped') return job;
+      const next: Integration = { ...job, status: 'skipped', updatedAt: clock() };
+      this.writeIntegration(next);
+      return next;
     }).immediate();
   }
   private writeIntegration(job: Integration) {

@@ -1,6 +1,26 @@
 import type { Dictionary } from './types';
 
 const dictionary: Dictionary = {
+  "После постановки результата в очередь он проверяется, не дожидаясь остальных агентов: они продолжают работу в своих worktree. Новые задачи репозитория ждут окончания проверки. Ручное ожидание настраивается в разделе «Автопилот».": "Once queued, a result is checked while the other agents continue in their worktrees. New repository tasks wait for checks to finish. Manual waiting is configured under Autopilot.",
+  "Включите перед уходом: задачи из очереди будут запускаться в пределах лимитов из настроек «Параллельность». Перенос результатов определяется настройками в разделе «Автопилот».": "Switch it on before leaving: queued tasks will start within the Parallelism limits. Result transfer follows the settings under Autopilot.",
+
+  "Ожидает ручного переноса": "Awaiting manual transfer",
+  "Перенос отложен": "Transfer deferred",
+  "Проверить и перенести": "Check and transfer",
+  "Не переносить": "Do not transfer",
+  "Результат сохранён в ветке запуска. Проверка и перенос начнутся по кнопке; «Не переносить» освобождает репозиторий и сохраняет ветку.": "The result is saved on the run branch. Use the button to check and transfer it; “Do not transfer” releases the repository and preserves the branch.",
+  "Перенос результата": "Result transfer",
+  "Режим применяется, когда результат готов. Уже начатый перенос продолжается автоматически; ожидающие результаты переносятся только по кнопке.": "The mode applies when a result is ready. A transfer already started continues automatically; waiting results transfer only when requested.",
+  "Пока результат ждёт ручного переноса": "While a result awaits manual transfer",
+  "Не задерживать новые запуски": "Do not delay new runs",
+  "Ждать переноса": "Wait for transfer",
+  "Без ожидания новые агенты стартуют от текущей целевой ветки без неперенесённых результатов. Во время проверки и слияния новые запуски репозитория всегда ждут.": "Without waiting, new agents start from the current target branch without untransferred results. New repository runs always wait during checks and merging.",
+  "Настройки переноса сохранены.": "Transfer settings saved.",
+  "Ждут ручного переноса: {count}.": "Awaiting manual transfer: {count}.",
+  "Укажите mode: automatic или manual и manualWait: continue или wait.": "Specify mode: automatic or manual and manualWait: continue or wait.",
+  "Этот результат не ожидает ручного переноса.": "This result is not awaiting manual transfer.",
+  "Репозиторий ждёт ручного переноса результата. Нажмите «Проверить и перенести» или «Не переносить».": "The repository is waiting for manual result transfer. Choose “Check and transfer” or “Do not transfer”.",
+
   "Уведомления": "Notifications",
   "Выбор сохраняется в этом браузере. Уведомления работают, пока открыта хотя бы одна вкладка brigd.": "Preferences are saved in this browser. Notifications work while at least one brigd tab is open.",
   "Уведомления в браузере": "Browser notifications",

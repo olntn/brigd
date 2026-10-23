@@ -9,16 +9,18 @@
     busy?: boolean;
     launchBlocked?: boolean;
     historical?: boolean;
-    onaction?: (action: 'integrate' | 'cancel-integration' | 'reconcile', acknowledgement: boolean) => void;
+    onaction?: (action: 'integrate' | 'skip-integration' | 'cancel-integration' | 'reconcile', acknowledgement: boolean) => void;
   } = $props();
   let acknowledged = $state(false);
   let acknowledgementKey = $state('');
   const labels: Record<IntegrationStatus, string> = {
+    awaiting_manual: tk('Ожидает ручного переноса'), skipped: tk('Перенос отложен'),
     queued: tk('Ожидает слияния'), checking: tk('Проверка объединённого кода'), merging: tk('Перенос проверенного результата'),
     cancelling: tk('Остановка проверки'), merged: tk('Изменения перенесены'), conflict: tk('Конфликт слияния'),
     failed: tk('Проверка не прошла'), blocked: tk('Перенос заблокирован'), interrupted: tk('Слияние прервано'), cancelled: tk('Слияние отменено'),
   };
   const active = $derived(['queued', 'checking', 'merging', 'cancelling'].includes(integration.status));
+  const manual = $derived(['awaiting_manual', 'skipped'].includes(integration.status));
   const interrupted = $derived(integration.status === 'interrupted');
   /** The candidate folder exists only while its attempt is unfinished or kept for inspection; merged, rechecked and cancelled attempts drop it. */
   const candidateKept = $derived(['checking', 'merging', 'cancelling', 'interrupted', 'conflict', 'failed', 'blocked'].includes(integration.status));
@@ -95,6 +97,7 @@
       <p class="integration-note">{t('Решения принимаются по кодам возврата, без модели. Повторы и проверка целевой ветки вместе длятся не дольше {minutes} мин.', { minutes: Math.round(triage.limitMs / 60_000) || 1 })}</p>
     </section>
   {/if}
+  {#if manual}<p class="integration-note">{t('Результат сохранён в ветке запуска. Проверка и перенос начнутся по кнопке; «Не переносить» освобождает репозиторий и сохраняет ветку.')}</p>{#if integration.sourceCommit}<p>{t('Коммит результата:')} <code>{integration.sourceCommit.slice(0, 12)}</code></p>{/if}{/if}
   {#if integration.resultCommit}<p>{t('Коммит результата:')} <code>{integration.resultCommit.slice(0, 12)}</code></p>{/if}
   {#if integration.candidatePath && candidateKept}<details><summary>{t('Рабочая папка объединённого кода')}</summary><code class="integration-path">{integration.candidatePath}</code><p class="integration-note">{t('Папка остаётся до следующей попытки или очистки хранилища.')}</p></details>
   {:else if integration.status === 'merged'}<p class="integration-note">{t('После переноса brigd очищает ненужные рабочие папки и ветку запуска. Папки с подмодулями, используемые worktree и ветки с новыми коммитами сохраняются. История задачи остаётся.')}</p>
@@ -103,7 +106,10 @@
     {#if interrupted}<p>{t('После перезапуска процесс проверки мог остаться запущенным. Остановите его перед повтором или отменой.')}</p><label class="interruption-confirm"><input type="checkbox" bind:checked={acknowledged} disabled={busy} /><span>{t('Я проверил(а), что предыдущие процессы проверки и слияния остановлены')}</span></label>{/if}
     <div class="integration-actions">
       {#if integration.status === 'conflict'}<button class="button primary" disabled={busy || launchBlocked} title={t('Встроенный Интегратор объединит целевую ветку с результатом в worktree задачи, разрешит конфликты и повторит проверку.')} onclick={() => onaction?.('reconcile', acknowledged)}>{t('Поручить интегратору')}</button>{/if}
-      {#if !active}<button class="button {integration.status === 'conflict' ? 'secondary' : 'primary'}" disabled={busy || launchBlocked || (interrupted && !acknowledged)} onclick={() => onaction?.('integrate', acknowledged)}>{t('Повторить проверку и слияние')}</button>{/if}
+      {#if !active}
+        <button class="button {integration.status === 'conflict' ? 'secondary' : 'primary'}" disabled={busy || launchBlocked || (interrupted && !acknowledged)} onclick={() => onaction?.('integrate', acknowledged)}>{manual ? t('Проверить и перенести') : t('Повторить проверку и слияние')}</button>
+        {#if integration.status === 'awaiting_manual'}<button class="button secondary" disabled={busy} onclick={() => onaction?.('skip-integration', false)}>{t('Не переносить')}</button>{/if}
+      {/if}
       {#if active || interrupted}<button class="button secondary" disabled={busy || integration.status === 'cancelling' || (interrupted && !acknowledged)} onclick={() => onaction?.('cancel-integration', acknowledged)}>{integration.status === 'cancelling' ? t('Останавливаем…') : t('Отменить слияние')}</button>{/if}
     </div>
   {/if}

@@ -8,7 +8,7 @@ export const ANALYTICS_GROUPS: readonly AnalyticsGroup[] = ['ready', 'active', '
 /** Each card belongs to exactly one group, including integration and interrupted states. */
 export const ANALYTICS_STATUS_GROUP: Record<TaskStatus, AnalyticsGroup> = {
   ready: 'ready', queued: 'active', preparing: 'active', running: 'active', cancelling: 'active',
-  awaiting_merge: 'active', integrating: 'active', completed: 'completed', cancelled: 'cancelled',
+  awaiting_manual_transfer: 'attention', awaiting_merge: 'active', integrating: 'active', completed: 'completed', cancelled: 'cancelled',
   waiting_input: 'attention', blocked: 'attention', failed: 'attention', interrupted: 'attention',
   merge_conflict: 'attention', merge_failed: 'attention', merge_blocked: 'attention', merge_interrupted: 'attention',
 };

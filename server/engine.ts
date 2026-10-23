@@ -1,4 +1,4 @@
-import type { AutopilotInput, AutopilotOverview, AutopilotSettings, CheckTriageSettings, CliAccessMode, CliAccessSettings, ConcurrencyLimits, ConcurrencySettings, FollowupInput, Integration, Run, StorageCleanupResult, StorageOverview, TokenUsage } from '../src/lib/types';
+import type { AutopilotInput, AutopilotOverview, AutopilotSettings, CheckTriageSettings, CliAccessMode, CliAccessSettings, ConcurrencyLimits, ConcurrencySettings, ResultTransferSettings, FollowupInput, Integration, Run, StorageCleanupResult, StorageOverview, TokenUsage } from '../src/lib/types';
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
 import { DEFAULT_CONCURRENCY, isConcurrencyLimit } from '../src/lib/concurrency';
 import { CHECK_HANDBACK_LIMIT, CHECK_TRIAGE_TIME_LIMIT_MS, DEFAULT_CHECK_TRIAGE } from '../src/lib/check-triage';
@@ -11,7 +11,7 @@ import { createTaskBridge } from './task-mcp';
 import type { TaskAppAccess } from './task-mcp-app';
 import { dirname, join, resolve } from 'node:path';
 import { DirectWorkspaces, GitWorkspaces, WorkspaceError, type RepositoryLocation, type WorkspaceProvider } from './workspaces';
-import { GitIntegrator, type Integrator } from './integration';
+import { GitIntegrator, saveRunResult, type Integrator } from './integration';
 import { RunCodeDiffs } from './code-diff';
 import { UNAVAILABLE_STORAGE, WorkspaceStorage, type CleanupOptions } from './workspace-storage';
 import { clock } from './clock';
@@ -28,7 +28,7 @@ export interface EngineOptions { workspaces?: WorkspaceProvider; integrator?: In
   checkTriage?: boolean;
   /** Reruns and the target check of one merge attempt together; CHECK_TRIAGE_TIME_LIMIT_MS by default. */
   checkTriageTimeLimitMs?: number; }
-interface Launch { taskId: string; handle: AgentHandle | null; fence: RunFence; cancelRequested: boolean; bridge?: ReturnType<typeof createTaskBridge>; settled?: Promise<void>; }
+interface Launch { taskId: string; handle: AgentHandle | null; fence: RunFence; cancelRequested: boolean; saveAbort?: AbortController; bridge?: ReturnType<typeof createTaskBridge>; settled?: Promise<void>; }
 export class Engine {
   readonly codeDiffs: RunCodeDiffs;
   /** Worktree and candidate folders under the workspaces root; null when no Git worktrees are created. */
@@ -84,6 +84,28 @@ export class Engine {
     // A raised limit starts waiting work right away; the autopilot claims on its next tick.
     this.drain();
     return this.getConcurrencySettings();
+  }
+  getResultTransferSettings(): ResultTransferSettings { return this.store.getResultTransferSettings(); }
+  setResultTransferSettings(input: Record<string, unknown>): ResultTransferSettings {
+    if (this.closing) throw new AppError('Сервис останавливается', 503);
+    const settings = this.store.setResultTransferSettings(input);
+    this.drain();
+    return settings;
+  }
+  skipIntegration(runId: string): Integration {
+    if (this.closing) throw new AppError('Сервис останавливается', 503);
+    const job = this.store.skipManualIntegration(runId);
+    this.drain();
+    return job;
+  }
+  autopilotOverview(): AutopilotOverview {
+    const overview = this.store.autopilotOverview();
+    const settings = this.getResultTransferSettings();
+    if (settings.mode !== 'manual' || settings.manualWait !== 'wait') return overview;
+    return { ...overview, pool: overview.pool.map(task => {
+      try { return { ...task, launchWaitReason: this.store.manualTransferWaitReason(this.locate(task.cwd, clock()).repositoryId) }; }
+      catch { return task; }
+    }) };
   }
   private integrationChecks(): string[][] | undefined {
     return this.store.getIntegrationChecks() ?? this.environmentChecks;
@@ -212,7 +234,7 @@ export class Engine {
     const state = this.store.setAutopilot(input, now);
     // Claim right away instead of waiting for the next second's tick.
     if (state.enabled) this.tick(now);
-    return this.store.autopilotOverview();
+    return this.autopilotOverview();
   }
   private assertTaskSettled(taskId: string) {
     if ([...this.handles.values()].some(launch => launch.taskId === taskId)) throw new AppError('Предыдущий CLI-процесс этой задачи ещё завершается', 409);
@@ -287,6 +309,7 @@ export class Engine {
     if (launch) {
       launch.cancelRequested = true;
       launch.bridge?.close();
+      launch.saveAbort?.abort(new Error('Run cancelled'));
       launch.handle?.cancel();
     }
     this.drain();
@@ -539,12 +562,24 @@ export class Engine {
       release();
       return;
     }
-    return handle.result.then(({ envelope: rawEnvelope, sessionId: rawSessionId, usage }) => {
+    return handle.result.then(async ({ envelope: rawEnvelope, sessionId: rawSessionId, usage }) => {
       recordUsage(usage);
       launch.bridge?.close();
       if (!isCurrent()) return;
       const envelope = validateEnvelope(rawEnvelope);
       const sessionId = validateSessionId(rawSessionId);
+      // Sample policy when the worker's final result is ready. Reconciliation and check hand-backs
+      // belong to an already requested transfer and always continue through the ordinary queue.
+      const manual = envelope.status === 'completed' && run.workspace?.mode === 'worktree' &&
+        (run.currentStepIndex === null || run.currentStepIndex === run.steps.length - 1) &&
+        run.trigger !== 'reconcile' && !run.followup?.checkFailure && this.store.getResultTransferSettings().mode === 'manual';
+      let sourceCommit: string | null = null, saveError: string | null = null;
+      if (manual) {
+        launch.saveAbort = new AbortController();
+        try { sourceCommit = await saveRunResult(run, launch.saveAbort.signal, this.store.taskTitle(run.taskId)); }
+        catch (error) { saveError = error instanceof Error ? error.message : 'Не удалось создать коммит результата. Проверьте Git-конфигурацию, hooks и нативные разрешения.'; }
+        finally { launch.saveAbort = undefined; }
+      }
       this.store.db.transaction(() => {
         if (!isCurrent()) return;
         this.store.setSession(run.id, sessionId, fence);
@@ -561,7 +596,10 @@ export class Engine {
         this.store.recordAgentSummary(run.taskId, run.id, status === 'completed' ? 'result' : 'agent', envelope.summary, commentCursor, clock(), run.currentStepIndex);
         for (const question of envelope.questions) this.store.comment(run.taskId, run.id, 'question', question, clock(), run.currentStepIndex);
         if (result.status === 'running' && result.turn !== run.turn) this.enqueue(result);
-        else if (result.status === 'completed') this.store.queueIntegration(result.id);
+        else if (result.status === 'completed') {
+          if (manual) this.store.awaitManualIntegration(result.id, sourceCommit, saveError);
+          else this.store.queueIntegration(result.id);
+        }
       }).immediate();
       // The old process has settled. Its later finally must never remove or
       // complete cancellation of a newer step/attempt occupying this same run.
@@ -623,7 +661,7 @@ export class Engine {
     // Persist uncertainty before terminating. No automatic replay after restart.
     this.store.reconcile();
     const launches = [...this.handles.values()];
-    for (const launch of launches) { launch.cancelRequested = true; launch.bridge?.close(); launch.handle?.cancel(); }
+    for (const launch of launches) { launch.cancelRequested = true; launch.bridge?.close(); launch.saveAbort?.abort(new Error('Service stopped')); launch.handle?.cancel(); }
     const integrations = [...this.integrationHandles.values()];
     for (const integration of integrations) integration.abort.abort(new Error('Service stopped'));
     await Promise.allSettled([...launches.map(launch => launch.settled ?? launch.handle?.result ?? Promise.resolve()), ...integrations.map(integration => integration.settled), this.cleaning ?? Promise.resolve()]);

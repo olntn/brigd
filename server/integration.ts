@@ -164,6 +164,36 @@ function checkedOutTarget(cwd: string, ref: string): string | null {
   if (matches.length > 1) throw new IntegrationError('blocked', 'Целевая ветка открыта в нескольких worktree. Устраните неоднозначность перед слиянием.');
   return matches[0] ?? null;
 }
+/** Save the same result commit for automatic integration and manual Git review. Never moves the target. */
+export async function saveRunResult(run: Run, signal: AbortSignal, taskTitle: string | null): Promise<string> {
+  const workspace = run.workspace!;
+  await new GitWorkspaces(dirname(workspace.path)).prepare(workspace);
+  signal.throwIfAborted();
+  // Snapshot only this worktree. Task artifact directories never enter a commit.
+  // A merge left in progress by the integrator or by hand becomes a merge
+  // commit once no conflict markers remain; `git add` alone would hide them.
+  const merging = mergeInProgress(['git', '-C', workspace.path], workspace.path);
+  const unresolved = unresolvedConflicts(workspace.path, unmergedPaths(['git', '-C', workspace.path], workspace.path));
+  if (unresolved.length) {
+    throw new IntegrationError('conflict', `В исходном worktree остались маркеры конфликта: ${listed(unresolved)}. Разрешите конфликт вручную и повторите проверку либо поручите его интегратору.`, { conflicts: unresolved.slice(0, CONFLICT_LIST_LIMIT) });
+  }
+  if (await git(workspace.path, ['add', '-A', '--', '.', ...ARTIFACT_PATHSPECS], signal)) throw new IntegrationError('blocked', 'Не удалось сохранить изменения worktree в индексе Git.');
+  const staged = readGit(workspace.path, ['diff', '--cached', '--name-only', '-z']).split('\0');
+  if (staged.some(artifact)) throw new IntegrationError('blocked', 'В индекс попали служебные вложения задачи. Уберите их из индекса перед слиянием.');
+  if (staged.some(Boolean) || merging) {
+    const identity = readGit(workspace.path, ['var', 'GIT_AUTHOR_IDENT'], true);
+    const options = identity ? [] : ['-c', 'user.name=brigd', '-c', 'user.email=brigd@localhost'];
+    const title = taskTitle;
+    const message = commitMessage(run, merging ? targetMergeSubject(run, workspace.targetBranch!, title) : resultSubject(run, title));
+    if (await git(workspace.path, [...options, 'commit', ...(merging ? ['--author', INTEGRATOR_AUTHOR] : []), ...message], signal)) throw new IntegrationError('blocked', 'Не удалось создать коммит результата. Проверьте Git-конфигурацию, hooks и нативные разрешения.');
+  }
+  if (!sourceClean(workspace.path)) throw new IntegrationError('blocked', 'В worktree остались несохранённые изменения. Завершите их перед слиянием.');
+  const sourceCommit = readGit(workspace.path, ['rev-parse', '--verify', 'HEAD^{commit}']);
+  if (readGit(workspace.path, ['diff', '--name-only', '-z', workspace.baseCommit!, sourceCommit]).split('\0').some(artifact)) {
+    throw new IntegrationError('blocked', 'Коммиты результата содержат служебные вложения задачи. Удалите их из изменений перед слиянием.');
+  }
+  return sourceCommit;
+}
 export class GitIntegrator implements Integrator {
   /** `taskTitle` reads the card's current title for commit subjects; without it they carry the run ID. */
   constructor(private readonly configuredChecks?: string[][] | (() => string[][] | undefined), private readonly triageOptions: TriageOptions = {},
@@ -172,33 +202,9 @@ export class GitIntegrator implements Integrator {
     const workspace = run.workspace!;
     const checkLimitMinutes = this.triageOptions.checkTimeLimitMinutes?.() ?? null;
     try {
-      await new GitWorkspaces(dirname(workspace.path)).prepare(workspace);
-      signal.throwIfAborted();
       if (!workspace.targetBranch) throw new IntegrationError('blocked', 'Запуск создан из detached HEAD. Для слияния нужна именованная целевая ветка.');
       const targetRef = `refs/heads/${workspace.targetBranch}`;
-      // Snapshot only this worktree. Task artifact directories never enter a commit.
-      // A merge left in progress by the integrator or by hand becomes a merge
-      // commit once no conflict markers remain; `git add` alone would hide them.
-      const merging = mergeInProgress(['git', '-C', workspace.path], workspace.path);
-      const unresolved = unresolvedConflicts(workspace.path, unmergedPaths(['git', '-C', workspace.path], workspace.path));
-      if (unresolved.length) {
-        throw new IntegrationError('conflict', `В исходном worktree остались маркеры конфликта: ${listed(unresolved)}. Разрешите конфликт вручную и повторите проверку либо поручите его интегратору.`, { conflicts: unresolved.slice(0, CONFLICT_LIST_LIMIT) });
-      }
-      if (await git(workspace.path, ['add', '-A', '--', '.', ...ARTIFACT_PATHSPECS], signal)) throw new IntegrationError('blocked', 'Не удалось сохранить изменения worktree в индексе Git.');
-      const staged = readGit(workspace.path, ['diff', '--cached', '--name-only', '-z']).split('\0');
-      if (staged.some(artifact)) throw new IntegrationError('blocked', 'В индекс попали служебные вложения задачи. Уберите их из индекса перед слиянием.');
-      if (staged.some(Boolean) || merging) {
-        const identity = readGit(workspace.path, ['var', 'GIT_AUTHOR_IDENT'], true);
-        const options = identity ? [] : ['-c', 'user.name=brigd', '-c', 'user.email=brigd@localhost'];
-        const title = this.taskTitle(run);
-        const message = commitMessage(run, merging ? targetMergeSubject(run, workspace.targetBranch, title) : resultSubject(run, title));
-        if (await git(workspace.path, [...options, 'commit', ...(merging ? ['--author', INTEGRATOR_AUTHOR] : []), ...message], signal)) throw new IntegrationError('blocked', 'Не удалось создать коммит результата. Проверьте Git-конфигурацию, hooks и нативные разрешения.');
-      }
-      if (!sourceClean(workspace.path)) throw new IntegrationError('blocked', 'В worktree остались несохранённые изменения. Завершите их перед слиянием.');
-      const sourceCommit = readGit(workspace.path, ['rev-parse', '--verify', 'HEAD^{commit}']);
-      if (readGit(workspace.path, ['diff', '--name-only', '-z', workspace.baseCommit!, sourceCommit]).split('\0').some(artifact)) {
-        throw new IntegrationError('blocked', 'Коммиты результата содержат служебные вложения задачи. Удалите их из изменений перед слиянием.');
-      }
+      const sourceCommit = await saveRunResult(run, signal, this.taskTitle(run));
       const targetCommit = readGit(workspace.path, ['rev-parse', '--verify', `${targetRef}^{commit}`]);
       update({ sourceCommit, targetCommit });
       if (await git(workspace.path, ['merge-base', '--is-ancestor', sourceCommit, targetCommit], signal) === 0) {

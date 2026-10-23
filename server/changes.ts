@@ -15,6 +15,8 @@ export const TABLE_SCOPES: Readonly<Record<string, readonly ChangeScope[]>> = {
   workers: ['workers'], integrator_profile: ['workers'],
   tags: ['tags'],
   general_settings: ['settings'], autopilot_settings: ['settings'], check_triage_settings: ['settings'],
+  // Policy changes also update repository waiting reasons on cards and in the autopilot.
+  result_transfer_settings: ['settings', 'tasks'],
   cli_access_settings: ['settings'], concurrency_settings: ['settings'], model_catalog: ['settings'],
   // Content-addressed uploads, idempotency records, cached diffs and the process lease.
   avatars: [], attachment_publications: [], task_tool_operations: [], mcp_tool_operations: [],
