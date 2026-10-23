@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { AppError, nextOccurrence, Store } from '../server/store';
-import type { RunStatus, TaskInput } from '../src/lib/types';
+import type { RunStatus, TaskInput, TaskPriority } from '../src/lib/types';
 
 const MINUTE = 60_000;
 const BASE = 1_700_000_000_000;
@@ -581,6 +581,48 @@ describe('autopilot', () => {
     expect(store.autopilotPool(null).map(task => task.title)).toEqual(['third', 'first', 'second']);
     store.createTask(auto({ title: 'fourth' }), BASE);
     expect(store.autopilotPool(null).map(task => task.title)).toEqual(['third', 'first', 'second', 'fourth']);
+  });
+
+  test('priority defaults to normal, survives edits that omit it and reopening, and cards saved before it become normal', () => {
+    const plain = store.createTask(input(), BASE);
+    expect(plain.priority).toBe('normal');
+    const urgent = store.createTask(input({ priority: 'critical' }), BASE + 1);
+    expect(store.updateTask(urgent.id, input({ title: 'Edited' }), BASE + 2).priority).toBe('critical');
+    expect(store.updateTask(plain.id, input({ priority: 'low' }), BASE + 3).priority).toBe('low');
+    expectAppError(() => store.createTask(input({ priority: 'urgent' as TaskPriority }), BASE), 400);
+    expectAppError(() => store.updateTask(plain.id, input({ priority: null as unknown as TaskPriority }), BASE + 4), 400);
+    store.close();
+    store = new Store(join(folder, 'trackt.sqlite'));
+    expect([store.getTask(plain.id).priority, store.getTask(urgent.id).priority]).toEqual(['low', 'critical']);
+    store.db.exec('ALTER TABLE tasks DROP COLUMN priority');
+    store.close();
+    store = new Store(join(folder, 'trackt.sqlite'));
+    expect(store.listTasks().map(task => task.priority)).toEqual(['normal', 'normal']);
+  });
+
+  test('a higher priority is claimed first; moves stay within one priority and a changed priority joins the end of the new one', () => {
+    const create = (title: string, priority: TaskPriority, at: number) => store.createTask(auto({ title, priority }), at);
+    const raised = create('raised', 'low', BASE);
+    const first = create('first', 'normal', BASE + 1);
+    const high = create('high', 'high', BASE + 2);
+    const second = create('second', 'normal', BASE + 3);
+    const critical = create('critical', 'critical', BASE + 4);
+    const titles = () => store.autopilotPool(null).map(task => task.title);
+    expect(titles()).toEqual(['critical', 'high', 'first', 'second', 'raised']);
+    expect(store.autopilotCandidates(null).map(task => task.id)).toEqual([critical.id, high.id, first.id, second.id, raised.id]);
+    expect(store.moveAutopilotTask(second.id, first.id).pool.map(task => task.title)).toEqual(['critical', 'high', 'second', 'first', 'raised']);
+    // null places a task last among its own priority, not after less urgent tasks.
+    store.moveAutopilotTask(second.id, null);
+    expect(titles()).toEqual(['critical', 'high', 'first', 'second', 'raised']);
+    expectAppError(() => store.moveAutopilotTask(raised.id, critical.id), 409);
+    expectAppError(() => store.moveAutopilotTask(critical.id, high.id), 409);
+    expect(titles()).toEqual(['critical', 'high', 'first', 'second', 'raised']);
+    store.updateTask(raised.id, auto({ title: 'raised', priority: 'high' }), BASE + 10);
+    expect(titles()).toEqual(['critical', 'high', 'raised', 'first', 'second']);
+    store.updateTask(critical.id, auto({ title: 'critical', priority: 'normal' }), BASE + 11);
+    expect(titles()).toEqual(['high', 'raised', 'first', 'second', 'critical']);
+    store.updateTask(first.id, auto({ title: 'first', instruction: 'Edited instruction.' }), BASE + 12);
+    expect(titles()).toEqual(['high', 'raised', 'first', 'second', 'critical']);
   });
 
   test('startAutopilot refuses while off, at the stop time and for tasks outside the pool; it records the trigger and a log', () => {

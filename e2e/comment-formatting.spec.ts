@@ -19,7 +19,7 @@ function fixtureDetail(messages: Message[]): TaskDetail {
   const task: Task = {
     id: taskId, title: 'Форматирование комментариев', instruction: run.instruction,
     tagIds: [], tags: [], workerId: null, worker: null, steps: [], provider: 'codex', cwd: run.cwd,
-    schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false,
+    schedule: 'manual', priority: 'normal', intervalMinutes: null, firstRunAt: null, paused: false,
     createdAt: timestamp, updatedAt: timestamp + 5_000, archivedAt: null, nextRunAt: null,
     status: run.status, latestRun: run, runCount: 1,
   };

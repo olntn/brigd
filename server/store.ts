@@ -7,6 +7,7 @@ import type { RepositoryLocation } from './workspaces';
 import type { IntegrationRecord, WorkspaceRun } from './workspace-storage';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { AUTOPILOT_FAILURE_LIMIT } from '../src/lib/autopilot';
+import { DEFAULT_TASK_PRIORITY, isTaskPriority, TASK_PRIORITIES, TASK_PRIORITY_LABELS } from '../src/lib/priority';
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
 import { CONCURRENCY_LIMIT_MAX, validateConcurrencyLimit } from '../src/lib/concurrency';
 import { DEFAULT_TAG_COLOR, TAG_COUNT_LIMIT } from '../src/lib/tags';
@@ -31,8 +32,10 @@ const OPEN = "'queued','preparing','running','cancelling','waiting_input','inter
 const OCCUPIED = `(status IN (${OPEN}) OR (steps_snapshot != '[]' AND status IN ('failed','blocked')))`;
 /** A conflict handed to the built-in integrator, over the runs table `r`. */
 const INTEGRATOR_WORK = "(r.trigger='reconcile')";
-/** The autopilot queue order a person arranges by dragging; creation order breaks ties. */
-const AUTOPILOT_ORDER = 'autopilot_position IS NULL, autopilot_position, created_at, rowid';
+/** The most urgent priority sorts first. */
+const PRIORITY_RANK = `CASE priority ${TASK_PRIORITIES.map((priority, rank) => `WHEN '${priority}' THEN ${rank}`).join(' ')} END`;
+/** Higher priority first; within one priority, the queue order a person arranges by dragging; creation order breaks ties. */
+const AUTOPILOT_ORDER = `${PRIORITY_RANK}, autopilot_position IS NULL, autopilot_position, created_at, rowid`;
 export interface RunFence { turn: number; currentStepIndex: number | null; attemptId: string | null; }
 export interface WorkspaceRecord { snapshot: WorkspaceSnapshot; taskId: string | null; taskTitle: string | null; runs: WorkspaceRun[]; }
 const WORKSPACE_RECORD_SQL = `SELECT w.id, r.id AS run_id, r.task_id, r.status, r.started_at, i.state AS integration_state,
@@ -78,6 +81,10 @@ function validatedTaskUltracode(value: unknown): boolean | null {
   return value;
 }
 const storedFlag = (value: boolean | null | undefined): number | null => value == null ? null : +value;
+function validatedTaskPriority(value: unknown): Task['priority'] {
+  if (!isTaskPriority(value)) throw new AppError(`Приоритет: укажите ${TASK_PRIORITIES.join(', ')}`);
+  return value;
+}
 const readFlag = (value: unknown): boolean | null => value == null ? null : !!value;
 function validatedDefaultCwd(value: unknown): string {
   if (typeof value !== 'string' || !value.trim() || value.length > 4_096 || value.includes('\0')) {
@@ -318,6 +325,8 @@ export class Store {
         ['runs', 'ultracode', 'INTEGER CHECK(ultracode IN (0,1))'],
         // The card's place in the autopilot queue; NULL while the card is not scheduled as auto.
         ['tasks', 'autopilot_position', 'INTEGER'],
+        // Existing cards become normal; the autopilot claims more urgent cards first.
+        ['tasks', 'priority', `TEXT NOT NULL DEFAULT '${DEFAULT_TASK_PRIORITY}' CHECK(priority IN (${TASK_PRIORITIES.map(priority => `'${priority}'`).join(',')}))`],
       ]) {
         if (!(this.db.query(`PRAGMA table_info(${table})`).all() as Row[]).some(row => row.name === column)) {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
@@ -1145,7 +1154,7 @@ export class Store {
     return (this.db.query('SELECT COALESCE(MAX(autopilot_position), -1) + 1 AS n FROM tasks').get() as Row).n;
   }
   /**
-   * Places an auto card right before another one, or at the end of the queue with null.
+   * Places an auto card right before another one of the same priority, or at the end of its priority with null.
    * Deferred and already attempted cards keep their places too, so a card returned to the pool resumes its turn.
    */
   moveAutopilotTask(taskId: string, beforeTaskId: string | null): AutopilotOverview {
@@ -1153,9 +1162,14 @@ export class Store {
       const task = this.getTask(taskId);
       this.assertNotArchived(task);
       if (task.schedule !== 'auto') throw new AppError('Задача не стоит в очереди автопилота. Выберите для неё режим «Автопилот».', 409);
-      const queue = (this.db.query(`SELECT id FROM tasks WHERE schedule='auto' AND archived_at IS NULL AND id!=? ORDER BY ${AUTOPILOT_ORDER}`).all(taskId) as Row[]).map(row => row.id as string);
+      const rows = this.db.query(`SELECT id,priority FROM tasks WHERE schedule='auto' AND archived_at IS NULL AND id!=? ORDER BY ${AUTOPILOT_ORDER}`).all(taskId) as Row[];
+      const queue = rows.map(row => row.id as string);
+      // Positions are numbered across the whole queue, so the end of the queue is the end of the card's own priority.
       const index = beforeTaskId === null ? queue.length : queue.indexOf(beforeTaskId);
       if (index < 0) throw new AppError('Задача, перед которой нужно поставить эту, больше не в очереди автопилота. Обновите страницу и повторите.', 409);
+      if (beforeTaskId !== null && rows[index]!.priority !== task.priority) {
+        throw new AppError(`Задачу можно переставить только среди задач с тем же приоритетом («${TASK_PRIORITY_LABELS[task.priority]}»). Чтобы она шла раньше или позже, измените её приоритет.`, 409);
+      }
       queue.splice(index, 0, taskId);
       queue.forEach((id, position) => { this.db.query('UPDATE tasks SET autopilot_position=? WHERE id=? AND autopilot_position IS NOT ?').run(position, id, position); });
       return this.autopilotOverview();
@@ -1482,7 +1496,7 @@ export class Store {
       conflict: 'merge_conflict', failed: 'merge_failed', blocked: 'merge_blocked', interrupted: 'merge_interrupted', cancelled: 'merge_blocked',
     };
     return { tagIds: tags.map(tag => tag.id), tags, hasCompletedRun, attachments: this.taskAttachments(row.id), steps: validateWorkflowSteps(JSON.parse(row.steps_template ?? '[]')), id: row.id, workerId: row.worker_id ?? null, worker, title: row.title, instruction: row.instruction, provider: worker?.provider ?? row.provider, cwd: row.cwd, ultracode: readFlag(row.ultracode),
-      schedule: row.schedule, intervalMinutes: row.interval_minutes, firstRunAt: row.first_run_at,
+      priority: row.priority ?? DEFAULT_TASK_PRIORITY, schedule: row.schedule, intervalMinutes: row.interval_minutes, firstRunAt: row.first_run_at,
       nextRunAt: row.next_run_at, paused: !!row.paused, createdAt: row.created_at, updatedAt: row.updated_at, archivedAt: row.archived_at ?? null,
       status: latestRun?.integration ? integrationStatuses[latestRun.integration.status] ?? latestRun.status : latest?.status ?? 'ready', latestRun,
       runCount: (this.db.query('SELECT count(*) AS n FROM runs WHERE task_id = ?').get(row.id) as Row).n };
@@ -1571,10 +1585,11 @@ export class Store {
       const worker = steps.length ? null : this.assignedWorker(input.workerId);
       const provider = steps.length ? this.getWorker(steps[0]!.workerId).provider : worker?.provider ?? input.provider;
       const ultracode = validatedTaskUltracode(input.ultracode);
-      this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template,ultracode,autopilot_position) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
+      const priority = validatedTaskPriority(input.priority === undefined ? DEFAULT_TASK_PRIORITY : input.priority);
+      this.db.query(`INSERT INTO tasks (id,title,instruction,provider,cwd,schedule,interval_minutes,first_run_at,next_run_at,paused,created_at,updated_at,worker_id,steps_template,ultracode,autopilot_position,priority) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.instruction, provider,
         input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt,
         input.schedule === 'interval' ? (input.firstRunAt ?? now) : null, +input.paused, now, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode),
-        input.schedule === 'auto' ? this.nextAutopilotPosition() : null);
+        input.schedule === 'auto' ? this.nextAutopilotPosition() : null, priority);
       this.replaceTaskAttachments(id, input.attachmentIds, now);
       this.replaceTaskTags(id, input.tagIds === undefined ? [] : input.tagIds);
       return this.getTask(id);
@@ -1591,11 +1606,12 @@ export class Store {
       let next = task.nextRunAt;
       if (changedSchedule) next = input.schedule === 'interval' ? (input.firstRunAt ?? now) : null;
       const ultracode = validatedTaskUltracode(input.ultracode === undefined ? task.ultracode : input.ultracode);
-      // A card switched to the autopilot queues at the end; leaving it gives up its place.
-      const position = input.schedule !== 'auto' ? null : task.schedule === 'auto'
+      const priority = validatedTaskPriority(input.priority === undefined ? task.priority : input.priority);
+      // A card switched to the autopilot, or moved to another priority, queues at the end of its priority; leaving it gives up its place.
+      const position = input.schedule !== 'auto' ? null : task.schedule === 'auto' && priority === task.priority
         ? (this.db.query('SELECT autopilot_position FROM tasks WHERE id=?').get(id) as Row).autopilot_position : this.nextAutopilotPosition();
-      this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=?,ultracode=?,autopilot_position=? WHERE id=?`)
-        .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode), position, id);
+      this.db.query(`UPDATE tasks SET title=?,instruction=?,provider=?,cwd=?,schedule=?,interval_minutes=?,first_run_at=?,next_run_at=?,paused=?,updated_at=?,worker_id=?,steps_template=?,ultracode=?,autopilot_position=?,priority=? WHERE id=?`)
+        .run(input.title, input.instruction, provider, input.cwd, input.schedule, input.intervalMinutes, input.firstRunAt, next, +input.paused, now, worker?.id ?? null, JSON.stringify(steps), storedFlag(ultracode), position, priority, id);
       this.replaceTaskAttachments(id, input.attachmentIds, now);
       if (input.tagIds !== undefined) this.replaceTaskTags(id, input.tagIds);
       return this.getTask(id);

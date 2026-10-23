@@ -2,6 +2,7 @@ import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import type { AutopilotInput, Effort, IntegratorProfileInput, TaskInput, WorkerInput } from '../src/lib/types';
 import { AUTOPILOT_MAX_WINDOW_MS } from '../src/lib/autopilot';
+import { DEFAULT_TASK_PRIORITY, isTaskPriority, TASK_PRIORITIES } from '../src/lib/priority';
 import { AppError } from './store';
 import { validateWorkflowSteps } from './workflows';
 import { attachmentIds } from './attachments';
@@ -31,6 +32,8 @@ export async function validateTask(value: unknown): Promise<TaskInput> {
   if (typeof v.paused !== 'boolean') throw new AppError('paused должен быть boolean');
   const ultracode = v.ultracode ?? null;
   if (ultracode !== null && typeof ultracode !== 'boolean') throw new AppError('ultracode должен быть true, false или null');
+  const priority = v.priority === undefined ? DEFAULT_TASK_PRIORITY : v.priority;
+  if (!isTaskPriority(priority)) throw new AppError(`Приоритет: укажите ${TASK_PRIORITIES.join(', ')}`);
   let intervalMinutes: number | null = null;
   let firstRunAt: number | null = null;
   if (v.schedule === 'interval') {
@@ -41,7 +44,7 @@ export async function validateTask(value: unknown): Promise<TaskInput> {
       firstRunAt = v.firstRunAt;
     }
   }
-  return { ...(v.tagIds !== undefined ? { tagIds: validateTagIds(v.tagIds) } : {}), ...(v.attachmentIds !== undefined ? { attachmentIds: attachmentIds(v.attachmentIds) } : {}), steps: validateWorkflowSteps(v.steps), workerId, title, instruction, provider: v.provider, cwd, ultracode, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
+  return { ...(v.tagIds !== undefined ? { tagIds: validateTagIds(v.tagIds) } : {}), ...(v.attachmentIds !== undefined ? { attachmentIds: attachmentIds(v.attachmentIds) } : {}), steps: validateWorkflowSteps(v.steps), workerId, title, instruction, provider: v.provider, cwd, ultracode, priority, schedule: v.schedule, intervalMinutes, firstRunAt, paused: v.paused };
 }
 
 /** The autopilot switch. A stop time is optional; when enabling it must lie ahead and within a month. */
@@ -55,7 +58,7 @@ export function validateAutopilot(value: unknown, now = Date.now()): AutopilotIn
   if (v.enabled && until !== null && until > now + AUTOPILOT_MAX_WINDOW_MS) throw new AppError('Время остановки: не больше 31 дня вперёд');
   return { enabled: v.enabled, until: until as number | null };
 }
-/** A move within the autopilot queue: the card that should follow the moved one, or null for the end of the queue. */
+/** A move within the autopilot queue: the card of the same priority that should follow the moved one, or null for the end of that priority. */
 export function validateAutopilotMove(value: unknown, taskId: string): { beforeTaskId: string | null } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError('Ожидается JSON-объект');
   const v = value as Record<string, unknown>;

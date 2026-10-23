@@ -20,7 +20,7 @@ const expired = () => failure('Task attachment capability is unavailable or expi
 const context = (a: Attachment): TaskAttachmentContext => ({ id: a.id, name: a.name, mime: a.mime, size: a.size, previewable: a.previewable });
 const taskContext = (task: Task) => ({ id: task.id, title: task.title, instruction: task.instruction, status: task.status,
   archived: task.archivedAt !== null, createdAt: task.createdAt, updatedAt: task.updatedAt,
-  provider: task.provider, cwd: task.cwd, schedule: task.schedule, paused: task.paused, intervalMinutes: task.intervalMinutes,
+  provider: task.provider, cwd: task.cwd, schedule: task.schedule, paused: task.paused, priority: task.priority, intervalMinutes: task.intervalMinutes,
   firstRunAt: task.firstRunAt, nextRunAt: task.nextRunAt, workerId: task.workerId, tagIds: task.tagIds, steps: task.steps,
   latestRunId: task.latestRun?.id ?? null, hasCompletedRun: task.hasCompletedRun ?? false });
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);

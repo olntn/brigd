@@ -5,7 +5,7 @@ const date = Date.UTC(2026, 9, 14, 12);
 function task(title: string): Task {
   return {
     id: 'backup-task', title, instruction: 'Проверь проект.', provider: 'codex', cwd: '/workspace/project',
-    schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false, tagIds: [], tags: [],
+    schedule: 'manual', priority: 'normal', intervalMinutes: null, firstRunAt: null, paused: false, tagIds: [], tags: [],
     steps: [], workerId: null, worker: null, createdAt: date, updatedAt: date, archivedAt: null,
     nextRunAt: null, status: 'ready', latestRun: null, runCount: 0,
   };

@@ -60,6 +60,17 @@ test('agent can assign multiple employees by ID and uses the saved app working d
   expect(store.listTasks().every(task => task.runCount === 0)).toBe(true);
 });
 
+test('agent can set a card priority; an unknown priority creates nothing', async () => {
+  const anna = worker('Анна');
+  const rejected = await invoke('create-task', { worker: 'Анна', title: 'Срочно', instruction: 'Проверка', priority: 'срочно' });
+  expect(rejected.code).toBe(1);
+  expect(rejected.error).toContain('critical (Критический)');
+  expect(store.listTasks()).toEqual([]);
+  const result = await invoke('create-task', { worker: 'Анна', title: 'Срочно', instruction: 'Проверка', priority: 'critical' });
+  expect(result.value).toMatchObject({ workerId: anna.id, priority: 'critical', schedule: 'manual' });
+  expect((await invoke('create-task', { worker: 'Анна', title: 'Обычная', instruction: 'Проверка' })).value.priority).toBe('normal');
+});
+
 test('unknown or archived employee and unsupported task fields do not create or launch work', async () => {
   const anna = worker('Анна');
   store.archiveWorker(anna.id);

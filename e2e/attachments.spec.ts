@@ -701,7 +701,7 @@ function fixtureDetail(): TaskDetail {
     tagIds: [], tags: [],
     id: input.taskId!, title: 'Файлы пользователя и результат агента', instruction: run.instruction,
     workerId: null, worker: null, steps: [], provider: 'codex', cwd: run.cwd,
-    schedule: 'manual', intervalMinutes: null, firstRunAt: null, paused: false,
+    schedule: 'manual', priority: 'normal', intervalMinutes: null, firstRunAt: null, paused: false,
     createdAt: timestamp, updatedAt: timestamp, archivedAt: null, nextRunAt: null, status: 'completed', latestRun: run, runCount: 1,
     attachments: [input, directOutput],
   };

@@ -525,6 +525,22 @@ describe('autopilot', () => {
     expect(store.autopilotPool(now).map(task => task.id)).toEqual([first.id]);
   });
 
+  test('claims a higher-priority task of the repository first, whatever its place in the queue', async () => {
+    const now = Date.now();
+    const low = store.createTask(input(folder, { schedule: 'auto', priority: 'low' }), now - 4);
+    const normal = store.createTask(input(folder, { schedule: 'auto' }), now - 3);
+    const critical = store.createTask(input(folder, { schedule: 'auto', priority: 'critical' }), now - 1);
+    engine.setAutopilot({ enabled: true, until: null }, now);
+    await flush();
+    expect(store.autopilotOverview().attempts.map(run => run.taskId)).toEqual([critical.id]);
+    agent.calls[0]!.resolve(outcome());
+    await flush();
+    engine.tick(now + 1_000);
+    await flush();
+    expect(store.autopilotOverview().attempts.map(run => run.taskId)).toEqual([critical.id, normal.id]);
+    expect(store.autopilotPool(now).map(task => task.id)).toEqual([low.id]);
+  });
+
   test('stops claiming at the stop time while started work finishes; a restart switches it off', async () => {
     const now = Date.now();
     const first = store.createTask(input(folder, { schedule: 'auto' }), now - 2);

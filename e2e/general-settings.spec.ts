@@ -10,7 +10,7 @@ const launchTypes = [
 function fixtureTask(input: Partial<Task> = {}): Task {
   return {
     id: 'existing-task', title: 'Существующая задача', instruction: 'Проверь проект.', provider: 'codex',
-    cwd: '/workspace/existing-project', schedule: 'manual', intervalMinutes: null, firstRunAt: null,
+    cwd: '/workspace/existing-project', schedule: 'manual', priority: 'normal', intervalMinutes: null, firstRunAt: null,
     paused: false, tagIds: [], tags: [], steps: [], workerId: null, worker: null,
     createdAt: Date.UTC(2026, 0, 15, 12), updatedAt: Date.UTC(2026, 0, 15, 12),
     archivedAt: null, nextRunAt: null, status: 'ready', latestRun: null, runCount: 0,

@@ -3,6 +3,7 @@
   import Icon from './Icon.svelte';
   import { AUTOPILOT_FAILURE_LIMIT, AUTOPILOT_STOP_REASONS, defaultAutopilotUntil } from './autopilot';
   import { TASK_STATUS_LABELS } from './status';
+  import { DEFAULT_TASK_PRIORITY, TASK_PRIORITIES, TASK_PRIORITY_LABELS } from './priority';
   import type { AutopilotInput, AutopilotOverview, AutopilotSettings, Run, Task, TaskStatus } from './types';
 
   let { tasks, settings, checksRequired, notify, onopen, onchanged, onsettings }: {
@@ -52,6 +53,10 @@
   const dateTime = (timestamp: number | null) => timestamp === null ? '—' : new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(timestamp);
   const shortPath = (path: string) => { const parts = path.replace(/\\/g, '/').split('/').filter(Boolean); return parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : path; };
   const taskOf = (run: Run) => tasks.find(task => task.id === run.taskId) ?? null;
+  const priorityRank = (task: Task) => TASK_PRIORITIES.indexOf(task.priority);
+  /** Pool tasks of the same priority: a task moves only among them. */
+  const samePriority = (task: Task) => (overview?.pool ?? []).filter(item => item.priority === task.priority);
+  const openLabel = (task: Task) => `Открыть: ${task.title}${task.priority === DEFAULT_TASK_PRIORITY ? '' : `, приоритет ${TASK_PRIORITY_LABELS[task.priority].toLowerCase()}`}`;
   /** The task's current status covers the merge and the integrator; the run alone is the fallback for a deleted task. */
   const outcome = (run: Run): TaskStatus => taskOf(run)?.status ?? run.status;
   const message = (failure: unknown) => failure instanceof TypeError
@@ -146,7 +151,7 @@
     finally { if (alive) pending = null; }
   }
 
-  /** Places a pool task right before another one, or last with null; the autopilot claims the queue from the top. */
+  /** Places a pool task right before another one of its priority, or last among them with null; the autopilot claims the queue from the top. */
   async function move(task: Task, beforeId: string | null, focus = false) {
     if (pending || !overview) return;
     const previous = overview;
@@ -154,6 +159,8 @@
     const index = beforeId === null ? pool.length : pool.findIndex(item => item.id === beforeId);
     if (index < 0) return;
     pool.splice(index, 0, task);
+    // The stable sort keeps each priority's own order, so a task placed last ends up last among its priority.
+    pool.sort((left, right) => priorityRank(left) - priorityRank(right));
     if (pool.every((item, position) => item.id === previous.pool[position]?.id)) return;
     pending = task.id;
     sequence++;
@@ -169,11 +176,12 @@
       notify(message(failure), 'error');
     } finally { if (alive) pending = null; }
   }
-  function handleKey(event: KeyboardEvent, task: Task, index: number) {
+  function handleKey(event: KeyboardEvent, task: Task) {
     if (!overview || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
     event.preventDefault();
-    if (event.key === 'ArrowUp' && index > 0) void move(task, overview.pool[index - 1]!.id, true);
-    if (event.key === 'ArrowDown' && index < overview.pool.length - 1) void move(task, overview.pool[index + 2]?.id ?? null, true);
+    const group = samePriority(task), index = group.findIndex(item => item.id === task.id);
+    if (event.key === 'ArrowUp' && index > 0) void move(task, group[index - 1]!.id, true);
+    if (event.key === 'ArrowDown' && index >= 0 && index < group.length - 1) void move(task, group[index + 2]?.id ?? null, true);
   }
   function dragStart(event: DragEvent, id: string) {
     if (pending) { event.preventDefault(); return; }
@@ -183,6 +191,9 @@
   }
   function dragOver(event: DragEvent, id: string) {
     if (!dragId) return;
+    const pool = overview?.pool ?? [];
+    // A task cannot be dropped among tasks of another priority; the browser shows that the drop is not allowed.
+    if (pool.find(item => item.id === id)?.priority !== pool.find(item => item.id === dragId)?.priority) { dropTarget = null; return; }
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
@@ -194,7 +205,7 @@
     dragId = null;
     dropTarget = null;
     if (!overview || !task || !target) return;
-    const rest = overview.pool.filter(item => item.id !== task.id);
+    const rest = samePriority(task).filter(item => item.id !== task.id);
     const index = rest.findIndex(item => item.id === target.id);
     if (index < 0) return;
     void move(task, rest[index + (target.zone === 'after' ? 1 : 0)]?.id ?? null);
@@ -230,13 +241,13 @@
 
   <section class="autopilot-section" aria-label="Очередь автопилота">
     <h2>Очередь <span class="autopilot-count">{overview.pool.length}</span></h2>
-    <p class="autopilot-help">Задачи с режимом «Автопилот»: первой запускается верхняя. Перетащите задачу, чтобы изменить порядок, или нажимайте ↑ и ↓ на значке перемещения. Новые задачи встают в конец. Задача занятого репозитория пропускается, пока он занят. Задача, которую автопилот уже брал в этой сессии, второй раз не запускается.</p>
+    <p class="autopilot-help">Задачи с режимом «Автопилот»: первой запускается верхняя. Сначала идут задачи с приоритетом «Критический», затем «Высокий», «Обычный» и «Низкий». Перетащите задачу, чтобы изменить порядок среди задач того же приоритета, или нажимайте ↑ и ↓ на значке перемещения; чтобы поднять задачу выше, повысьте её приоритет в форме задачи. Новые задачи встают в конец своего приоритета. Задача занятого репозитория пропускается, пока он занят. Задача, которую автопилот уже брал в этой сессии, второй раз не запускается.</p>
     {#if overview.pool.length}
       <ol class="autopilot-list" bind:this={queueList}>
         {#each overview.pool as task, index (task.id)}
           <li class="autopilot-row autopilot-queue-row" class:dragging={dragId === task.id} class:drop-before={dropTarget?.id === task.id && dropTarget.zone === 'before'} class:drop-after={dropTarget?.id === task.id && dropTarget.zone === 'after'} aria-busy={pending === task.id} draggable={!pending} ondragstart={(event) => dragStart(event, task.id)} ondragend={dragEnd} ondragover={(event) => dragOver(event, task.id)} ondrop={drop}>
-            <button type="button" class="autopilot-handle" data-queue-handle={task.id} aria-label={`Переместить: ${task.title}, место ${index + 1} из ${overview.pool.length}`} aria-keyshortcuts="ArrowUp ArrowDown" title="Перетащите или нажмите ↑ и ↓, чтобы изменить порядок" onkeydown={(event) => handleKey(event, task, index)}><Icon name="grip" size={15} /><span class="autopilot-position">{index + 1}</span></button>
-            <button class="autopilot-task" onclick={() => onopen(task)} aria-label={'Открыть: ' + task.title}><strong>{task.title}</strong><small>{shortPath(task.cwd)}{#if task.worker}{' · '}{task.worker.name}{/if}</small></button>
+            <button type="button" class="autopilot-handle" data-queue-handle={task.id} aria-label={`Переместить: ${task.title}, место ${index + 1} из ${overview.pool.length}`} aria-keyshortcuts="ArrowUp ArrowDown" title="Перетащите или нажмите ↑ и ↓, чтобы изменить порядок среди задач того же приоритета" onkeydown={(event) => handleKey(event, task)}><Icon name="grip" size={15} /><span class="autopilot-position">{index + 1}</span></button>
+            <button class="autopilot-task" onclick={() => onopen(task)} aria-label={openLabel(task)}><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}<span class="priority-badge priority-{task.priority}">{TASK_PRIORITY_LABELS[task.priority]}</span>{/if}{shortPath(task.cwd)}{#if task.worker}{' · '}{task.worker.name}{/if}</small></button>
             <span class="status-badge status-{task.status}"><span class="status-dot"></span>{TASK_STATUS_LABELS[task.status]}</span>
             <button class="button secondary" disabled={!!pending} onclick={() => setPaused(task, true)} aria-label={'Отложить: ' + task.title}><Icon name="pause" size={14} />Отложить</button>
           </li>
@@ -251,7 +262,7 @@
         {#each deferred as task (task.id)}
           <li class="autopilot-row" aria-busy={pending === task.id}>
             <span class="autopilot-position"><Icon name="pause" size={13} /></span>
-            <button class="autopilot-task" onclick={() => onopen(task)} aria-label={'Открыть: ' + task.title}><strong>{task.title}</strong><small>{shortPath(task.cwd)}{#if task.worker}{' · '}{task.worker.name}{/if}</small></button>
+            <button class="autopilot-task" onclick={() => onopen(task)} aria-label={openLabel(task)}><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}<span class="priority-badge priority-{task.priority}">{TASK_PRIORITY_LABELS[task.priority]}</span>{/if}{shortPath(task.cwd)}{#if task.worker}{' · '}{task.worker.name}{/if}</small></button>
             <span class="status-badge status-{task.status}"><span class="status-dot"></span>{TASK_STATUS_LABELS[task.status]}</span>
             <button class="button secondary" disabled={!!pending} onclick={() => setPaused(task, false)} aria-label={'Вернуть в очередь: ' + task.title}><Icon name="play" size={14} />Вернуть в очередь</button>
           </li>

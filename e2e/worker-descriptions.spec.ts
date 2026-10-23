@@ -44,7 +44,7 @@ function taskFixture(worker: Worker, workflow = false): TaskDetail {
     id, workerId: workflow ? null : worker.id, worker: workflow ? null : { ...worker },
     steps: steps.map(({ workerId, title, instruction }) => ({ workerId, title, instruction })),
     title: workflow ? 'Последовательность с описанием' : 'Задача с описанием', instruction: run.instruction,
-    provider: worker.provider, cwd: run.cwd, schedule: 'manual', intervalMinutes: null, firstRunAt: null,
+    provider: worker.provider, cwd: run.cwd, schedule: 'manual', priority: 'normal', intervalMinutes: null, firstRunAt: null,
     paused: false, createdAt: timestamp, updatedAt: timestamp, archivedAt: null, nextRunAt: null, status: run.status, latestRun: run, runCount: 1,
   };
   return { task, runs: [run], comments: [{ id: `${id}-comment`, taskId: id, runId: run.id, stepIndex: workflow ? 1 : null, kind: 'result', body: 'Результат проверки проекта.', createdAt: timestamp + 1000 }] };

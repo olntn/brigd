@@ -161,6 +161,8 @@ export interface RunStep extends TaskStepInput {
   error: string | null;
   attempts: StepAttempt[];
 }
+/** How urgent a card is; the autopilot claims a more urgent card first. */
+export type TaskPriority = 'critical' | 'high' | 'normal' | 'low';
 export interface TaskInput {
   tagIds?: string[];
   attachmentIds?: string[];
@@ -172,6 +174,8 @@ export interface TaskInput {
   cwd: string;
   /** true/false forces the provider's ultra agent mode for the task's new runs; null or omitted follows each worker's profile. */
   ultracode?: boolean | null;
+  /** Omitted on creation means normal; omitted on update keeps the saved priority. */
+  priority?: TaskPriority;
   /** auto: the autopilot starts the task when its turn comes and a slot is free. */
   schedule: 'manual' | 'interval' | 'auto';
   intervalMinutes: number | null;
@@ -179,6 +183,7 @@ export interface TaskInput {
   paused: boolean;
 }
 export interface Task extends TaskInput {
+  priority: TaskPriority;
   tagIds: string[];
   tags: Tag[];
   /** Once completed, new work continues a saved session instead of rerunning. */
@@ -403,7 +408,7 @@ export interface AutopilotState extends AutopilotInput {
   updatedAt: number;
 }
 export interface AutopilotOverview extends AutopilotState {
-  /** Tasks the autopilot will start next, in claim order. */
+  /** Tasks the autopilot will start next, in claim order: higher priority first, then the arranged queue order. */
   pool: Task[];
   /** Runs the autopilot started in the current or last session. */
   attempts: Run[];
