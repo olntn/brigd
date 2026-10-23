@@ -401,6 +401,8 @@ export class Store {
       for (const column of ['fallback_codex', 'fallback_claude']) {
         if (!columns.includes(column)) this.db.exec(`ALTER TABLE general_settings ADD COLUMN ${column} TEXT REFERENCES workers(id)`);
       }
+      // The worker preselected in the form of a new single-worker card.
+      if (!columns.includes('default_worker_id')) this.db.exec('ALTER TABLE general_settings ADD COLUMN default_worker_id TEXT REFERENCES workers(id)');
       this.db.exec('INSERT OR IGNORE INTO general_settings (singleton,default_cwd) VALUES (1,NULL)');
     }).immediate();
     // The explicit marker makes even an intentionally empty catalog persistent.
@@ -501,6 +503,11 @@ export class Store {
     this.db.query('UPDATE general_settings SET default_schedule=? WHERE singleton=1').run(schedule);
     return schedule;
   }
+  /** Saved ID as it is; the form skips an archived default instead of rewriting it. */
+  getDefaultWorkerId(): string | null {
+    const row = this.db.query('SELECT default_worker_id FROM general_settings WHERE singleton=1').get() as { default_worker_id: string | null };
+    return row.default_worker_id ?? null;
+  }
   /** Saved IDs as they are; an archived or missing worker is skipped at launch time, never silently rewritten. */
   getFallbackWorkers(): FallbackWorkers {
     const row = this.db.query('SELECT fallback_codex,fallback_claude FROM general_settings WHERE singleton=1').get() as { fallback_codex: string | null; fallback_claude: string | null };
@@ -514,6 +521,15 @@ export class Store {
     const row = this.db.query('SELECT archived FROM workers WHERE id=?').get(value) as Row | null;
     if (!row) throw new AppError('Работник замены не найден', 404);
     if (row.archived && value !== keptId) throw new AppError('Работник замены в архиве. Восстановите его или выберите другого.', 409);
+    return value;
+  }
+  /** The default must be an active profile; the already saved one may stay while archived; null clears it. */
+  private validatedDefaultWorker(value: unknown, keptId: string | null): string | null {
+    if (value === null) return null;
+    if (typeof value !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(value)) throw new AppError('Работник по умолчанию: выберите работника или оставьте поле пустым');
+    const row = this.db.query('SELECT archived FROM workers WHERE id=?').get(value) as Row | null;
+    if (!row) throw new AppError('Работник по умолчанию не найден', 404);
+    if (row.archived && value !== keptId) throw new AppError('Работник по умолчанию в архиве. Восстановите его или выберите другого.', 409);
     return value;
   }
   setFallbackWorkers(value: unknown): FallbackWorkers {
@@ -530,15 +546,17 @@ export class Store {
   }
   updateGeneralSettings(value: Record<string, unknown>): void {
     const keys = Object.keys(value);
-    if (!keys.length || keys.some(key => key !== 'defaultCwd' && key !== 'defaultSchedule' && key !== 'fallbackWorkers')) {
-      throw new AppError('Укажите defaultCwd, defaultSchedule и/или fallbackWorkers');
+    if (!keys.length || keys.some(key => key !== 'defaultCwd' && key !== 'defaultSchedule' && key !== 'defaultWorkerId' && key !== 'fallbackWorkers')) {
+      throw new AppError('Укажите defaultCwd, defaultSchedule, defaultWorkerId и/или fallbackWorkers');
     }
     const cwd = Object.hasOwn(value, 'defaultCwd') ? validatedDefaultCwd(value.defaultCwd) : null;
     const schedule = Object.hasOwn(value, 'defaultSchedule') ? validatedDefaultSchedule(value.defaultSchedule) : null;
     this.db.transaction(() => {
       if (Object.hasOwn(value, 'fallbackWorkers')) this.setFallbackWorkers(value.fallbackWorkers);
+      const current = this.getDefaultWorkerId();
+      const worker = Object.hasOwn(value, 'defaultWorkerId') ? this.validatedDefaultWorker(value.defaultWorkerId, current) : current;
       this.db.query(`UPDATE general_settings SET default_cwd=COALESCE(?,default_cwd),
-        default_schedule=COALESCE(?,default_schedule) WHERE singleton=1`).run(cwd, schedule);
+        default_schedule=COALESCE(?,default_schedule), default_worker_id=? WHERE singleton=1`).run(cwd, schedule, worker);
     }).immediate();
   }
   getIntegrationChecks(): string[][] | null {

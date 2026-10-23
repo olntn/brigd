@@ -73,6 +73,8 @@ export interface FallbackWorkers { codex: string | null; claude: string | null; 
 export interface GeneralSettings {
   defaultCwd: string;
   defaultSchedule: TaskInput['schedule'];
+  /** Preselected in the form of a new single-worker card; an archived profile is skipped there. */
+  defaultWorkerId: string | null;
   fallbackWorkers: FallbackWorkers;
 }
 

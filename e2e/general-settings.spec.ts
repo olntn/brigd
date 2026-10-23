@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import type { AppInfo, GeneralSettings, Task, TaskInput } from '../src/lib/types';
+import type { AppInfo, GeneralSettings, Task, TaskInput, Worker } from '../src/lib/types';
 
 const launchTypes = [
   { value: 'auto', label: 'Автопилот' },
@@ -18,12 +18,21 @@ function fixtureTask(input: Partial<Task> = {}): Task {
   };
 }
 
+function fixtureWorker(input: Partial<Worker> & Pick<Worker, 'id' | 'name' | 'provider'>): Worker {
+  return {
+    description: '', model: null, effort: 'default', ultracode: false, fallbackWorkerId: null, communicationStyle: '', avatarUrl: null,
+    archived: false, createdAt: Date.UTC(2026, 0, 15, 12), updatedAt: Date.UTC(2026, 0, 15, 12), ...input,
+  };
+}
+
 // Stateful API fixtures keep these UI checks independent from the shared demo
 // database. Server tests cover directory validation and storage persistence.
 async function fixtureApi(page: Page) {
   const state = {
     defaultCwd: '/workspace/project',
     defaultSchedule: 'manual' as GeneralSettings['defaultSchedule'],
+    defaultWorkerId: null as string | null,
+    workers: [] as Worker[],
     readError: '',
     saveFailure: null as { status: number; message: string } | null,
     pendingRead: null as Promise<void> | null,
@@ -51,17 +60,18 @@ async function fixtureApi(page: Page) {
         if (state.pendingSave) await state.pendingSave;
         state.defaultCwd = body.defaultCwd;
         state.defaultSchedule = body.defaultSchedule;
-        await route.fulfill({ json: { defaultCwd: state.defaultCwd, defaultSchedule: state.defaultSchedule, fallbackWorkers: { codex: null, claude: null } } });
+        state.defaultWorkerId = body.defaultWorkerId;
+        await route.fulfill({ json: { defaultCwd: state.defaultCwd, defaultSchedule: state.defaultSchedule, defaultWorkerId: state.defaultWorkerId, fallbackWorkers: { codex: null, claude: null } } });
       }
     } else if (path === '/api/settings/general' && method === 'GET') {
       if (state.pendingRead) await state.pendingRead;
       await route.fulfill(state.readError
         ? { status: 503, json: { error: state.readError } }
-        : { json: { defaultCwd: state.defaultCwd, defaultSchedule: state.defaultSchedule, fallbackWorkers: { codex: null, claude: null } } });
+        : { json: { defaultCwd: state.defaultCwd, defaultSchedule: state.defaultSchedule, defaultWorkerId: state.defaultWorkerId, fallbackWorkers: { codex: null, claude: null } } });
     } else if (path === '/api/tasks' && method === 'POST') {
       const body = route.request().postDataJSON() as TaskInput;
       state.taskWrites.push(body);
-      const task = fixtureTask({ ...body, id: `created-${state.taskWrites.length}` });
+      const task = fixtureTask({ ...body, id: `created-${state.taskWrites.length}`, worker: state.workers.find(worker => worker.id === body.workerId) ?? null });
       state.tasks.unshift(task);
       await route.fulfill({ json: task });
     } else if (method !== 'GET') {
@@ -75,7 +85,9 @@ async function fixtureApi(page: Page) {
       await route.fulfill(task
         ? { json: { task, runs: [], comments: [] } }
         : { status: 404, json: { error: 'Unknown fixture task' } });
-    } else if (path === '/api/workers' || path === '/api/models' || path === '/api/tags') {
+    } else if (path === '/api/workers') {
+      await route.fulfill({ json: state.workers });
+    } else if (path === '/api/models' || path === '/api/tags') {
       await route.fulfill({ json: [] });
     } else if (path === '/api/settings/autopilot') {
       await route.fulfill({ json: { integrationChecks: null, source: null } });
@@ -95,6 +107,7 @@ async function openSettings(page: Page) {
     dialog, panel,
     field: panel.getByLabel('Рабочая папка по умолчанию', { exact: true }),
     schedule: panel.getByRole('combobox', { name: 'Тип запуска по умолчанию', exact: true }),
+    worker: panel.getByRole('combobox', { name: 'Работник по умолчанию', exact: true }),
   };
 }
 
@@ -118,7 +131,7 @@ test('General comes first and saved working folders initialize new tasks after r
   await expect(settings.schedule).toHaveValue('auto');
   await settings.panel.getByRole('button', { name: 'Сохранить настройки', exact: true }).click();
   await expect(settings.panel.getByRole('status')).toContainText('Настройки сохранены');
-  expect(state.writes).toEqual([{ defaultCwd: '/workspace/saved-project', defaultSchedule: 'auto', fallbackWorkers: { codex: null, claude: null } }]);
+  expect(state.writes).toEqual([{ defaultCwd: '/workspace/saved-project', defaultSchedule: 'auto', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } }]);
 
   await settings.field.fill('/workspace/unsaved-project');
   await settings.schedule.selectOption('interval');
@@ -240,7 +253,7 @@ for (const { value, label } of launchTypes) {
     await settings.schedule.selectOption(value);
     await settings.panel.getByRole('button', { name: 'Сохранить настройки', exact: true }).click();
     await expect(settings.panel.getByRole('status')).toContainText('Настройки сохранены');
-    expect(state.writes).toEqual([{ defaultCwd: '/workspace/project', defaultSchedule: value, fallbackWorkers: { codex: null, claude: null } }]);
+    expect(state.writes).toEqual([{ defaultCwd: '/workspace/project', defaultSchedule: value, defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } }]);
 
     await page.reload();
     settings = await openSettings(page);
@@ -310,6 +323,73 @@ test('a new task can override the launch type without changing the saved default
     await page.keyboard.press('Escape');
     await expect(drawer).not.toBeVisible();
   }
-  expect(state.writes).toEqual([{ defaultCwd: '/workspace/project', defaultSchedule: 'auto', fallbackWorkers: { codex: null, claude: null } }]);
+  expect(state.writes).toEqual([{ defaultCwd: '/workspace/project', defaultSchedule: 'auto', defaultWorkerId: null, fallbackWorkers: { codex: null, claude: null } }]);
   expect(state.tasks.filter(task => task.id.startsWith('existing-')).map(task => task.schedule)).toEqual(launchTypes.map(type => type.value));
+});
+
+test('the saved default worker is preselected in new single-worker tasks only', async ({ page }) => {
+  const state = await fixtureApi(page);
+  state.workers = [
+    fixtureWorker({ id: 'worker-sol', name: 'Sol', provider: 'codex' }),
+    fixtureWorker({ id: 'worker-opus', name: 'Opus', provider: 'claude' }),
+    fixtureWorker({ id: 'worker-archived', name: 'Старый', provider: 'codex', archived: true }),
+  ];
+  state.tasks = [fixtureTask({ id: 'existing-unassigned', title: 'Существующая без работника' })];
+  await page.goto('/');
+  let settings = await openSettings(page);
+  await expect(settings.worker).toHaveValue('');
+  await expect(settings.worker.getByRole('option')).toHaveText(['Не выбирать', 'Sol · Codex', 'Opus · Claude Code']);
+  await settings.worker.selectOption('worker-opus');
+  await expect(settings.panel.getByText('Opus подставляется в поле «Работник» у новых простых задач.')).toBeVisible();
+  await settings.panel.getByRole('button', { name: 'Сохранить настройки', exact: true }).click();
+  await expect(settings.panel.getByRole('status')).toContainText('Настройки сохранены');
+  expect(state.writes).toEqual([{ defaultCwd: '/workspace/project', defaultSchedule: 'manual', defaultWorkerId: 'worker-opus', fallbackWorkers: { codex: null, claude: null } }]);
+
+  await page.reload();
+  settings = await openSettings(page);
+  await expect(settings.worker).toHaveValue('worker-opus');
+  await settings.dialog.getByRole('button', { name: 'Закрыть настройки', exact: true }).click();
+
+  await page.getByRole('button', { name: 'Новая задача', exact: true }).click();
+  let editor = page.getByRole('dialog', { name: 'Новая задача', exact: true });
+  await expect(editor.getByRole('combobox', { name: 'Работник', exact: true })).toHaveValue('worker-opus');
+  await editor.locator('[name="title"]').fill('С работником по умолчанию');
+  await editor.locator('[name="instruction"]').fill('Проверь проект.');
+  await editor.getByRole('button', { name: 'Создать задачу', exact: true }).click();
+  await expect(editor).not.toBeVisible();
+  expect(state.taskWrites.at(-1)).toMatchObject({ workerId: 'worker-opus', provider: 'claude' });
+  await page.keyboard.press('Escape');
+
+  // The form can still clear the preselected worker for one task.
+  await page.getByRole('button', { name: 'Новая задача', exact: true }).click();
+  editor = page.getByRole('dialog', { name: 'Новая задача', exact: true });
+  await editor.getByRole('combobox', { name: 'Работник', exact: true }).selectOption('');
+  await editor.locator('[name="title"]').fill('Без работника');
+  await editor.locator('[name="instruction"]').fill('Проверь проект.');
+  await editor.getByRole('button', { name: 'Создать задачу', exact: true }).click();
+  await expect(editor).not.toBeVisible();
+  expect(state.taskWrites.at(-1)).toMatchObject({ workerId: null });
+  expect(state.defaultWorkerId).toBe('worker-opus');
+  await page.keyboard.press('Escape');
+
+  // Editing keeps a card's own assignment.
+  await page.getByRole('button', { name: 'Открыть задачу: Существующая без работника', exact: true }).click();
+  const drawer = page.getByRole('dialog', { name: 'Существующая без работника', exact: true });
+  await drawer.getByRole('button', { name: 'Изменить', exact: true }).click();
+  const edit = page.getByRole('dialog', { name: 'Редактировать задачу', exact: true });
+  await expect(edit.getByRole('combobox', { name: 'Работник', exact: true })).toHaveValue('');
+  await edit.getByRole('button', { name: 'Отмена', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await expect(drawer).not.toBeVisible();
+
+  // An archived default stays saved but is not preselected.
+  state.defaultWorkerId = 'worker-archived';
+  await page.reload();
+  settings = await openSettings(page);
+  await expect(settings.worker).toHaveValue('worker-archived');
+  await expect(settings.panel.getByText('Старый в архиве и не подставляется в новые задачи.', { exact: false })).toBeVisible();
+  await settings.dialog.getByRole('button', { name: 'Закрыть настройки', exact: true }).click();
+  await page.getByRole('button', { name: 'Новая задача', exact: true }).click();
+  editor = page.getByRole('dialog', { name: 'Новая задача', exact: true });
+  await expect(editor.getByRole('combobox', { name: 'Работник', exact: true })).toHaveValue('');
 });
