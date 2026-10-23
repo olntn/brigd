@@ -31,6 +31,9 @@
   let tree = $derived(buildDocTree(pages));
   let total = $derived(pages.length + trash.length);
   let selectedTrashed = $derived(selectedId !== null && !loading && !pages.some(page => page.id === selectedId));
+  /** Trash lists only the pages deleted on their own; a subpage deleted with its parent is restored or purged through it. */
+  let selectedLive = $derived(pages.some(page => page.id === selectedId));
+  let selectedInTrash = $derived(trash.some(page => page.id === selectedId));
   // Search runs a moment after typing stops; stale answers are dropped.
   $effect(() => {
     const query = search.trim();
@@ -216,7 +219,9 @@
   </aside>
   <div class="docs-panel">
     {#if selectedId}
-      {#key selectedId}<DocEditor pageId={selectedId} autofocusTitle={createdId === selectedId} trashed={selectedTrashed} {notify} {onopentask} onchanged={pageChanged} onheadings={(items) => headings = items} />{/key}
+      {#key selectedId}<DocEditor pageId={selectedId} autofocusTitle={createdId === selectedId} trashed={selectedTrashed} {notify} {onopentask} onchanged={pageChanged} onheadings={(items) => headings = items}
+        ondelete={selectedLive || selectedInTrash ? (permanent) => { if (selectedId) void askDelete(selectedId, permanent); } : undefined}
+        onrestore={selectedInTrash ? () => { if (selectedId) void restore(selectedId); } : undefined} />{/key}
     {:else if !loading && !pages.length}
       <div class="no-results docs-empty"><span class="empty-icon"><Icon name="book" size={27} /></span><h2>Документация рядом с задачами</h2><p>Опишите проект, соглашения и процессы. Страницы вкладываются друг в друга, а тип блока меняется через «/».</p><button class="button primary" disabled={pending || loading} onclick={() => { void create(null); }}><Icon name="plus" size={16} />Создать первую страницу</button></div>
     {:else if !loading}

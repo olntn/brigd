@@ -303,6 +303,8 @@ export class Store {
         ['workers', 'ultracode', 'INTEGER NOT NULL DEFAULT 0 CHECK(ultracode IN (0,1))'],
         // The worker that picks up when this profile's provider runs out of usage limits; NULL follows the general settings.
         ['workers', 'fallback_worker_id', 'TEXT REFERENCES workers(id)'],
+        // A deleted profile whose runs still reference it stays as a hidden row; NULL for every listed profile.
+        ['workers', 'deleted_at', 'INTEGER'],
         // The turn a replacement worker started after an exhausted limit; NULL while nobody was replaced.
         ['runs', 'fallback_turn', 'INTEGER'],
         ['tasks', 'worker_id', 'TEXT REFERENCES workers(id)'],
@@ -534,7 +536,7 @@ export class Store {
     if (value === undefined || value === null) return null;
     if (typeof value !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(value)) throw new AppError('Замена при лимитах: выберите работника или оставьте поле пустым');
     if (value === selfId) throw new AppError('Работник не может заменять сам себя');
-    const row = this.db.query('SELECT archived FROM workers WHERE id=?').get(value) as Row | null;
+    const row = this.db.query('SELECT archived FROM workers WHERE id=? AND deleted_at IS NULL').get(value) as Row | null;
     if (!row) throw new AppError('Работник замены не найден', 404);
     if (row.archived && value !== keptId) throw new AppError('Работник замены в архиве. Восстановите его или выберите другого.', 409);
     return value;
@@ -543,7 +545,7 @@ export class Store {
   private validatedDefaultWorker(value: unknown, keptId: string | null): string | null {
     if (value === null) return null;
     if (typeof value !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(value)) throw new AppError('Работник по умолчанию: выберите работника или оставьте поле пустым');
-    const row = this.db.query('SELECT archived FROM workers WHERE id=?').get(value) as Row | null;
+    const row = this.db.query('SELECT archived FROM workers WHERE id=? AND deleted_at IS NULL').get(value) as Row | null;
     if (!row) throw new AppError('Работник по умолчанию не найден', 404);
     if (row.archived && value !== keptId) throw new AppError('Работник по умолчанию в архиве. Восстановите его или выберите другого.', 409);
     return value;
@@ -1022,10 +1024,10 @@ export class Store {
       createdAt: row.created_at, updatedAt: row.updated_at };
   }
   listWorkers(): Worker[] {
-    return (this.db.query('SELECT * FROM workers ORDER BY archived, created_at DESC, rowid DESC').all() as Row[]).map(row => this.mapWorker(row));
+    return (this.db.query('SELECT * FROM workers WHERE deleted_at IS NULL ORDER BY archived, created_at DESC, rowid DESC').all() as Row[]).map(row => this.mapWorker(row));
   }
   getWorker(id: string): Worker {
-    const row = this.db.query('SELECT * FROM workers WHERE id=?').get(id) as Row | null;
+    const row = this.db.query('SELECT * FROM workers WHERE id=? AND deleted_at IS NULL').get(id) as Row | null;
     if (!row) throw new AppError('Работник не найден', 404);
     return this.mapWorker(row);
   }
@@ -1067,7 +1069,7 @@ export class Store {
     const id = own ?? this.getFallbackWorkers()[run.provider];
     const source = own ? 'в профиле работника' : 'в Настройки → Общие';
     if (!id) return { worker: null, reason: 'Замена при лимитах не настроена: выберите работника в профиле или в Настройки → Общие.' };
-    const row = this.db.query('SELECT * FROM workers WHERE id=?').get(id) as Row | null;
+    const row = this.db.query('SELECT * FROM workers WHERE id=? AND deleted_at IS NULL').get(id) as Row | null;
     if (!row) return { worker: null, reason: `Работник замены (${source}) не найден.` };
     const worker = this.mapWorker(row);
     if (worker.archived) return { worker: null, reason: `Работник замены ${worker.name} (${source}) в архиве; восстановите его или выберите другого.` };
@@ -1099,6 +1101,30 @@ export class Store {
     // Keep references and immutable avatars so scheduled tasks and old sessions remain usable.
     this.db.query('UPDATE workers SET archived=1,updated_at=? WHERE id=?').run(now, id);
     return this.getWorker(id);
+  }
+  /** Removes a profile for good. A card that still names it, even an archived one, must be reassigned or deleted first;
+   * replacement and default choices pointing at it are cleared. Runs keep their own snapshots, so a profile that has
+   * already worked stays behind only as a hidden row its run history refers to. */
+  deleteWorker(id: string, now = Date.now()): void {
+    this.db.transaction(() => {
+      this.getWorker(id);
+      const assigned = this.db.query(`SELECT count(*) AS n, coalesce(sum(archived_at IS NOT NULL),0) AS archived FROM tasks WHERE worker_id=?
+        OR EXISTS (SELECT 1 FROM json_each(tasks.steps_template) WHERE json_extract(value,'$.workerId')=?)`).get(id, id) as Row;
+      if (assigned.n) {
+        throw new AppError(`Работник назначен в задачах: ${assigned.n}${assigned.archived ? `, из них в архиве: ${assigned.archived}` : ''}. Назначьте им другого работника или удалите эти задачи, затем повторите.`, 409);
+      }
+      this.db.query('UPDATE workers SET fallback_worker_id=NULL WHERE fallback_worker_id=?').run(id);
+      this.db.query(`UPDATE general_settings SET fallback_codex=nullif(fallback_codex,?1),fallback_claude=nullif(fallback_claude,?1),
+        default_worker_id=nullif(default_worker_id,?1) WHERE singleton=1`).run(id);
+      if (this.db.query('SELECT 1 FROM runs WHERE worker_id=? LIMIT 1').get(id)) this.db.query('UPDATE workers SET archived=1,deleted_at=?,updated_at=? WHERE id=?').run(now, now, id);
+      else this.db.query('DELETE FROM workers WHERE id=?').run(id);
+    }).immediate();
+  }
+  /** Hidden rows of deleted profiles go once no run history refers to them any more. */
+  private pruneDeletedWorkers() {
+    this.db.query(`DELETE FROM workers WHERE deleted_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.worker_id=workers.id)
+      AND NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.worker_id=workers.id) AND NOT EXISTS (SELECT 1 FROM workers w WHERE w.fallback_worker_id=workers.id)
+      AND NOT EXISTS (SELECT 1 FROM general_settings g WHERE workers.id IN (g.fallback_codex,g.fallback_claude,g.default_worker_id))`).run();
   }
   private mapIntegratorProfile(row: Row): IntegratorProfile {
     return { mode: row.mode, provider: row.provider, model: row.model ?? null, effort: row.effort,
@@ -1548,6 +1574,50 @@ export class Store {
       this.db.query('UPDATE tasks SET archived_at=NULL,next_run_at=?,updated_at=?,autopilot_position=? WHERE id=?').run(next, now, task.schedule === 'auto' ? this.nextAutopilotPosition() : null, id);
       return this.getTask(id);
     }).immediate();
+  }
+  /** Removes a card for good with its runs, discussion, logs and files. Worktree records stay, so storage clean-up
+   * can still recognise and reclaim the folders; Git branches in the project are never touched here. */
+  deleteTask(id: string): void {
+    this.db.transaction(() => {
+      if (!this.db.query('SELECT 1 FROM tasks WHERE id=?').get(id)) throw new AppError('Задача не найдена', 404);
+      if (this.activeRun(id)) throw new AppError('Сначала завершите или отмените текущий запуск, затем удалите задачу.', 409);
+      this.purgeTask(id);
+      this.pruneDeletedWorkers();
+    }).immediate();
+  }
+  /** Deletes the cards that were already in the archive at `archivedBefore`; a card archived later or still busy stays. */
+  deleteArchivedTasks(archivedBefore: number, keep: readonly string[] = []): { deleted: number; skipped: number } {
+    return this.db.transaction(() => {
+      const ids = (this.db.query('SELECT id FROM tasks WHERE archived_at IS NOT NULL AND archived_at<=? ORDER BY archived_at, rowid').all(archivedBefore) as Row[]).map(row => row.id as string);
+      let deleted = 0;
+      for (const id of ids) {
+        if (keep.includes(id) || this.activeRun(id)) continue;
+        this.purgeTask(id);
+        deleted++;
+      }
+      if (deleted) this.pruneDeletedWorkers();
+      return { deleted, skipped: ids.length - deleted };
+    }).immediate();
+  }
+  private purgeTask(id: string) {
+    const runs = 'SELECT id FROM runs WHERE task_id=?1';
+    const files = 'SELECT id FROM attachments WHERE task_id=?1';
+    for (const statement of [
+      `DELETE FROM comment_attachment_links WHERE comment_id IN (SELECT id FROM comments WHERE task_id=?1) OR attachment_id IN (${files})`,
+      `DELETE FROM task_attachment_links WHERE task_id=?1 OR attachment_id IN (${files})`,
+      `DELETE FROM run_attachment_inputs WHERE run_id IN (${runs}) OR attachment_id IN (${files})`,
+      `DELETE FROM attachment_publications WHERE run_id IN (${runs})`,
+      `DELETE FROM task_tool_operations WHERE run_id IN (${runs})`,
+      'DELETE FROM attachments WHERE task_id=?1',
+      `DELETE FROM followup_requests WHERE task_id=?1 OR run_id IN (${runs})`,
+      `DELETE FROM execution_requests WHERE run_id IN (${runs})`,
+      `DELETE FROM integrations WHERE run_id IN (${runs})`,
+      `DELETE FROM run_code_diffs WHERE run_id IN (${runs})`,
+      `DELETE FROM task_logs WHERE task_id=?1 OR run_id IN (${runs})`,
+      `DELETE FROM comments WHERE task_id=?1 OR run_id IN (${runs})`,
+      'DELETE FROM runs WHERE task_id=?1',
+      'DELETE FROM tasks WHERE id=?1',
+    ]) this.db.query(statement).run(id);
   }
   getRun(id: string): Run {
     const row = this.db.query('SELECT * FROM runs WHERE id = ?').get(id) as Row | null;

@@ -7,7 +7,7 @@
   import { docsFailureMessage, docsRequest, DocsRequestError } from './docs-client';
   import type { DocBlock, DocBlockType, DocImage, DocPage, DocPageSummary, Task, TaskDetail } from './types';
 
-  let { pageId, autofocusTitle = false, trashed = false, notify, onchanged, onheadings, onopentask }: {
+  let { pageId, autofocusTitle = false, trashed = false, notify, onchanged, onheadings, onopentask, ondelete, onrestore }: {
     pageId: string;
     autofocusTitle?: boolean;
     /** The sidebar no longer lists the page as live: reload so the editor shows the trash state or the restored page. */
@@ -16,6 +16,9 @@
     onchanged: (page: DocPageSummary) => void;
     onheadings: (headings: DocHeading[]) => void;
     onopentask?: (id: string) => void;
+    /** Asks to move the page to the trash, or to delete a trashed page for good. */
+    ondelete?: (permanent: boolean) => void;
+    onrestore?: () => void;
   } = $props();
 
   type SaveState = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict';
@@ -725,14 +728,14 @@
 {:else if page}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions (Undo shortcuts apply to the whole page, not to one control.) -->
   <article bind:this={root} class="doc-page" aria-label={'Страница: ' + (title.trim() || DOC_UNTITLED)} onkeydown={rootKey}>
-    {#if readonly}<div class="field-warning doc-notice" role="status"><Icon name="alert" size={16} /><span>Страница в корзине. Восстановите её в оглавлении, чтобы редактировать.</span></div>{/if}
+    {#if readonly}<div class="field-warning doc-notice" role="status"><Icon name="alert" size={16} /><span>Страница в корзине. Восстановите её, чтобы редактировать.</span>{#if onrestore}<button type="button" onclick={onrestore}>Восстановить</button>{/if}{#if ondelete}<button type="button" onclick={() => ondelete?.(true)}>Удалить навсегда</button>{/if}</div>{/if}
     {#if saveState === 'conflict'}
       <div class="connection-error doc-notice" role="alert"><Icon name="alert" size={17} /><span>{saveError}</span><button onclick={() => { void load(); }}>Загрузить новую версию</button></div>
     {:else if saveState === 'error'}
       <div class="connection-error doc-notice" role="alert"><Icon name="alert" size={17} /><span>{saveError}</span><button onclick={() => { void save(); }}>Повторить</button></div>
     {/if}
     <textarea bind:this={titleField} class="doc-title" rows="1" aria-label="Название страницы" placeholder={DOC_UNTITLED} maxlength={DOC_TITLE_LIMIT} value={title} disabled={readonly} use:grow oninput={titleInput} onkeydown={titleKey}></textarea>
-    <div class="doc-meta"><span class="doc-status doc-status-{saveState}" role="status">{readonly ? 'Только чтение' : STATUS[saveState]}</span><span>Обновлено {dateTime(page.updatedAt)}</span></div>
+    <div class="doc-meta"><span class="doc-status doc-status-{saveState}" role="status">{readonly ? 'Только чтение' : STATUS[saveState]}</span><span>Обновлено {dateTime(page.updatedAt)}</span>{#if !readonly && ondelete}<button type="button" class="doc-delete" onclick={() => ondelete?.(false)}><Icon name="trash" size={13} />Удалить страницу</button>{/if}</div>
     <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" class="doc-file-input" aria-label="Файл изображения" tabindex="-1" onchange={uploadImage} />
     <div class="doc-blocks">
       {#each blocks as block, position (block.id)}

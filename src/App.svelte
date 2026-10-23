@@ -32,6 +32,7 @@
   import { DEFAULT_TASK_PRIORITY, TASK_PRIORITIES, TASK_PRIORITY_LABELS } from './lib/priority';
   import { followupTargets, followupFingerprint, followupStage, runWorkflowSteps, taskHasCompletedRun, resolveFollowupTarget, followupSessionKey, type FollowupTarget } from './lib/followups';
   import { applyTheme, readTheme, saveTheme, themes, themeStorageKey, type Theme } from './lib/theme';
+  import { plural } from './lib/format';
   import type { AppInfo, Attachment, AutopilotSettings as AutopilotSettingsValue, Comment, FollowupInput, GeneralSettings as GeneralSettingsValue, ModelCatalogEntry, Provider, Run, Tag, Task, TaskDetail, TaskInput, TaskPriority, TaskStatus, Worker, WorkerSnapshot } from './lib/types';
 
   type Scope = 'all' | 'scheduled' | 'autopilot' | 'attention' | 'completed';
@@ -107,6 +108,11 @@
   let toast = $state<{ text: string; type: 'success' | 'error' } | null>(null);
   let drawer: HTMLDialogElement;
   let editor: HTMLDialogElement;
+  let deleteDialog: HTMLDialogElement;
+  /** One card, or every card that was in the archive when the confirmation opened. */
+  let deleting = $state<{ kind: 'task'; task: Task } | { kind: 'archive'; count: number; archivedBefore: number } | null>(null);
+  let deleteError = $state('');
+  let removing = $state(false);
   let settings: HTMLDialogElement;
   let settingsOpen = $state(false);
   const settingsSections = [
@@ -446,6 +452,14 @@
     void refresh();
   }
 
+  function workerDeleted(id: string) {
+    workerSequence++;
+    workers = workers.filter(worker => worker.id !== id).map(worker => worker.fallbackWorkerId === id ? { ...worker, fallbackWorkerId: null } : worker);
+    workersError = '';
+    workersLoading = false;
+    void refresh();
+  }
+
   async function loadDetail(id = selectedId) {
     if (!id) return;
     const sequence = ++drawerSequence;
@@ -733,6 +747,62 @@
     finally { pending = pending.filter(id => id !== task.id); }
   }
 
+  async function openDelete(target: NonNullable<typeof deleting>) {
+    if (removing) return;
+    deleting = target;
+    deleteError = '';
+    await tick();
+    deleteDialog.showModal();
+    deleteDialog.querySelector<HTMLButtonElement>('[data-cancel-delete]')?.focus();
+  }
+
+  function askDeleteTask(task: Task) {
+    if (pending.includes(task.id) || taskIsOccupied(task) || (selectedId === task.id && (followupSending || tagsSaving))) return;
+    void openDelete({ kind: 'task', task });
+  }
+
+  function askDeleteArchive() {
+    if (!archivedTasks.length) return;
+    void openDelete({ kind: 'archive', count: archivedTasks.length, archivedBefore: Math.max(...archivedTasks.map(task => task.archivedAt!)) });
+  }
+
+  function closeDelete() {
+    if (removing) return;
+    deleteDialog.close();
+    deleting = null;
+  }
+
+  async function confirmDelete(event: SubmitEvent) {
+    event.preventDefault();
+    const target = deleting;
+    if (!target || removing) return;
+    const taskId = target.kind === 'task' ? target.task.id : null;
+    if (taskId && pending.includes(taskId)) return;
+    removing = true;
+    deleteError = '';
+    if (taskId) pending = [...pending, taskId];
+    try {
+      let message = 'Задача удалена';
+      if (target.kind === 'task') await api<{ ok: true }>(`/api/tasks/${encodeURIComponent(target.task.id)}/purge`, { method: 'POST', body: '{}' });
+      else {
+        const result = await api<{ deleted: number; skipped: number }>('/api/archive/purge', { method: 'POST', body: JSON.stringify({ archivedBefore: target.archivedBefore }) });
+        message = `Удалено задач из архива: ${result.deleted}.${result.skipped ? ` Не удалены: ${result.skipped} — их процессы ещё завершаются, повторите позже.` : ''}`;
+      }
+      taskSequence++;
+      drawerSequence++;
+      if (taskId) tasks = tasks.filter(task => task.id !== taskId);
+      removing = false;
+      closeDelete();
+      if (taskId && selectedId === taskId) closeDrawer();
+      notify(message);
+      void refresh();
+    } catch (error) { deleteError = error instanceof Error ? error.message : 'Не удалось удалить'; }
+    finally {
+      removing = false;
+      if (taskId) pending = pending.filter(id => id !== taskId);
+    }
+  }
+
   async function integrationAction(runId: string, action: 'integrate' | 'cancel-integration' | 'reconcile', acknowledgement: boolean) {
     const task = selectedTask;
     const context = drawerContext;
@@ -1010,7 +1080,7 @@
       {:else if page === 'tags'}
         <Tags {tags} loading={tagsLoading} error={tagsError} onreload={loadTags} onchanged={tagChanged} ondeleted={tagDeleted} onmutation={tagMutation} {notify} />
       {:else if page === 'archive'}
-        <section class="page-heading" aria-label="Архив задач"><div><h1>Архив</h1><p>Задачи в архиве не показываются на доске и не запускаются по расписанию. История, комментарии и файлы сохраняются.</p></div></section>
+        <section class="page-heading" aria-label="Архив задач"><div><h1>Архив</h1><p>Задачи в архиве не показываются на доске и не запускаются по расписанию. История, комментарии и файлы сохраняются, пока задачу не удалят.</p></div>{#if !loading && archivedTasks.length}<button class="button danger" disabled={removing} onclick={askDeleteArchive}><Icon name="trash" size={16} />Удалить все</button>{/if}</section>
         {#if loading}
           <div class="list-empty" aria-busy="true"><Icon name="refresh" size={19} class="spin" /><span>Загружаем архив…</span></div>
         {:else if archivedTasks.length === 0}
@@ -1018,10 +1088,10 @@
         {:else}
           <div class="toolbar"><label class="search-box"><Icon name="search" size={16} /><input bind:value={archiveSearch} type="search" placeholder="Найти в архиве…" aria-label="Поиск в архиве" /></label><label class="provider-filter tag-filter"><Icon name="tag" size={15} /><select bind:value={archiveTagFilter} aria-label="Фильтр по тегу" disabled={tagsLoading}><option value="all">Все теги</option><option value="untagged">Без тегов</option>{#each tags as tag (tag.id)}<option value={tag.id}>{tag.name}</option>{/each}</select><Icon name="down" size={13} /></label></div>
           {#if tagsError}<div class="connection-error" role="alert"><span>{tagsError}</span><button onclick={() => { void loadTags(); }}>Повторить загрузку тегов</button></div>{/if}
-          <div class="task-list archive-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>В АРХИВЕ С</span><span></span><span></span></div>{#each archiveResults as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name="archive" size={17} /></span><span><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}{@render priorityBadge(task.priority)}{/if}{shortPath(task.cwd)}</small>{@render taskTags(task)}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{dateTime(task.archivedAt!)}</span><div class="archive-row-actions"><button class="button secondary" disabled={pending.includes(task.id)} aria-label={'Восстановить: ' + task.title} onclick={() => act(task, 'restore')}><Icon name={pending.includes(task.id) ? 'refresh' : 'restore'} size={15} class={pending.includes(task.id) ? 'spin' : ''} />Восстановить</button></div><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="search" size={20} /><span>В архиве ничего не найдено</span></div>{/each}</div>
+          <div class="task-list archive-list"><div class="list-heading"><span>ЗАДАЧА</span><span>АГЕНТ</span><span>СТАТУС</span><span>В АРХИВЕ С</span><span></span><span></span></div>{#each archiveResults as task (task.id)}<div class="task-row"><button class="list-task-name" onclick={() => openTask(task)}><span class="list-task-icon"><Icon name="archive" size={17} /></span><span><strong>{task.title}</strong><small>{#if task.priority !== DEFAULT_TASK_PRIORITY}{@render priorityBadge(task.priority)}{/if}{shortPath(task.cwd)}</small>{@render taskTags(task)}</span></button><div>{#if visibleWorker(task)}{@render workerBadge(visibleWorker(task)!, true)}{:else}{@render providerBadge(visibleProvider(task), true)}{/if}</div><div>{@render statusBadge(task.status)}</div><span class="list-schedule">{dateTime(task.archivedAt!)}</span><div class="archive-row-actions"><button class="button secondary" disabled={pending.includes(task.id)} aria-label={'Восстановить: ' + task.title} onclick={() => act(task, 'restore')}><Icon name={pending.includes(task.id) ? 'refresh' : 'restore'} size={15} class={pending.includes(task.id) ? 'spin' : ''} />Восстановить</button>{#if !taskIsOccupied(task)}<button class="button text-button danger-hover" disabled={pending.includes(task.id)} aria-label={'Удалить: ' + task.title} onclick={() => askDeleteTask(task)}><Icon name="trash" size={15} />Удалить</button>{/if}</div><button class="icon-button" aria-label={'Открыть: ' + task.title} onclick={() => openTask(task)}><Icon name="chevron" size={17} /></button></div>{:else}<div class="list-empty"><Icon name="search" size={20} /><span>В архиве ничего не найдено</span></div>{/each}</div>
         {/if}
       {:else if page === 'workers'}
-        <Workers {workers} loading={workersLoading} error={workersError} retry={() => { void loadWorkers(); }} onchange={workerChanged} {notify} {models} {modelsLoading} {modelsError} retryModels={() => { void loadModels(); }} />
+        <Workers {workers} loading={workersLoading} error={workersError} retry={() => { void loadWorkers(); }} onchange={workerChanged} ondelete={workerDeleted} {notify} {models} {modelsLoading} {modelsError} retryModels={() => { void loadModels(); }} />
       {:else}
       <section class="page-heading" aria-label="Управление задачами"><button class="button primary create-button" onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={17} />Новая задача</button></section>
 
@@ -1062,7 +1132,7 @@
             {#each columnData as column}
               {@const items = filtered.filter(task => task.status === column.status || (column.status === 'ready' && task.status === 'queued') || (column.status === 'running' && ['preparing', 'cancelling', 'awaiting_merge', 'integrating'].includes(task.status)))}
               <section class="board-column column-{column.status}" aria-label={column.title}>
-                <div class="column-heading"><span class="column-icon"><Icon name={column.icon} size={15} /></span><h2>{column.title}</h2>{#if column.status === 'ready'}<button class="icon-button add-column" onclick={() => openEditor()} disabled={!info} aria-label="Добавить задачу"><Icon name="plus" size={16} /></button>{/if}</div>
+                <div class="column-heading"><span class="column-icon"><Icon name={column.icon} size={15} /></span><h2>{column.title}</h2><span class="column-count" aria-label={'Задач: ' + items.length}>{items.length}</span>{#if column.status === 'ready'}<button class="icon-button add-column" onclick={() => openEditor()} disabled={!info} aria-label="Добавить задачу"><Icon name="plus" size={16} /></button>{/if}</div>
                 <div class="column-cards">{#each items as task (task.id)}{@render taskCard(task)}{:else}<div class="column-empty"><Icon name={column.icon} size={21} /><p>{column.empty}</p>{#if column.status === 'ready'}<button onclick={() => openEditor()} disabled={!info}><Icon name="plus" size={12} />Добавить задачу</button>{/if}</div>{/each}</div>
               </section>
             {/each}
@@ -1092,13 +1162,14 @@
         <div class="detail-actions">
           {#if selectedTask.archivedAt !== null}
             <button class="button primary" disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'restore')}><Icon name={taskBusy ? 'refresh' : 'restore'} size={15} class={taskBusy ? 'spin' : ''} />Восстановить</button>
+            {#if !taskIsOccupied(selectedTask)}<button class="button secondary danger-hover" disabled={taskBusy || followupSending || tagsSaving} onclick={() => selectedTask && askDeleteTask(selectedTask)}><Icon name="trash" size={15} />Удалить</button>{/if}
           {:else}
           {#if canStartManual(selectedTask)}
             <button class="button primary" disabled={taskBusy || integrationChecksMissing} onclick={() => selectedTask && act(selectedTask, 'run')}><Icon name={taskBusy ? 'refresh' : 'play'} size={15} class={taskBusy ? 'spin' : ''} />{selectedTask.runCount ? selectedTask.steps?.length ? 'Начать всю задачу заново' : 'Повторить запуск' : 'Запустить'}</button>
           {:else if selectedTask.status === 'cancelling'}<button class="button secondary" disabled><Icon name="refresh" class="spin" size={15} />Останавливаем…</button>
           {:else if currentRun && currentRun.status !== 'completed' && taskIsOccupied(selectedTask)}<button class="button secondary danger-hover" disabled={taskBusy || (currentRun.status === 'interrupted' && !acknowledgeInterruption)} title={currentRun.status === 'interrupted' ? 'Сначала подтвердите ниже, что предыдущий процесс CLI остановлен' : undefined} onclick={() => selectedTask && act(selectedTask, 'cancel')}><Icon name="stop" size={14} />Отменить запуск</button>{/if}
           <button class="button secondary" disabled={taskBusy} onclick={() => selectedTask && openEditor(selectedTask)}><Icon name="edit" size={15} />Изменить</button>
-          {#if !taskIsOccupied(selectedTask)}<button class="button secondary" disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'archive')}><Icon name="archive" size={15} />В архив</button>{/if}
+          {#if !taskIsOccupied(selectedTask)}<button class="button secondary" disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'archive')}><Icon name="archive" size={15} />В архив</button><button class="button secondary danger-hover" disabled={taskBusy || followupSending || tagsSaving} onclick={() => selectedTask && askDeleteTask(selectedTask)}><Icon name="trash" size={15} />Удалить</button>{/if}
           {#if selectedTask.schedule !== 'manual'}{@const pauseLabel = selectedTask.schedule === 'auto' ? (selectedTask.paused ? 'Вернуть в очередь автопилота' : 'Отложить в автопилоте') : selectedTask.paused ? 'Возобновить расписание' : 'Приостановить расписание'}<button class="icon-button schedule-pause" title={pauseLabel} aria-label={pauseLabel} disabled={taskBusy} onclick={() => selectedTask && act(selectedTask, 'pause')}><Icon name={selectedTask.paused ? 'play' : 'pause'} size={17} /></button>{/if}
           {/if}
         </div>
@@ -1227,6 +1298,19 @@
       </div>
     {:else}<div class="detail-loading"><Icon name="refresh" class="spin" />Загружаем задачу…</div>{/if}
   </div>
+</dialog>
+
+<dialog bind:this={deleteDialog} class="editor-dialog instruction-delete-dialog" aria-labelledby="task-delete-title" aria-describedby="task-delete-description" oncancel={(event) => { event.preventDefault(); closeDelete(); }} onclick={(event) => backdropClick(event, deleteDialog, closeDelete)}>
+  {#if deleting}
+    <form class="editor-form" onsubmit={confirmDelete} aria-busy={removing}>
+      <header class="editor-header"><h2 id="task-delete-title">{deleting.kind === 'task' ? 'Удалить задачу навсегда?' : 'Удалить все задачи из архива?'}</h2><button type="button" class="icon-button" aria-label="Закрыть удаление" disabled={removing} onclick={closeDelete}><Icon name="close" size={21} /></button></header>
+      <div class="editor-fields">
+        {#if deleteError}<div class="form-error" role="alert"><Icon name="alert" size={17} /><span>{deleteError}</span></div>{/if}
+        <p id="task-delete-description">{#if deleting.kind === 'task'}«{deleting.task.title}» будет удалена{:else}{deleting.count} {plural(deleting.count, 'задача будет удалена', 'задачи будут удалены', 'задач будут удалены')}{/if} без возможности восстановления вместе с историей запусков, обсуждением, логами и файлами. Рабочие папки запусков освободит очистка в Настройки → Хранилище; ветки Git в проекте не удаляются.</p>
+      </div>
+      <footer class="editor-footer"><button type="button" data-cancel-delete class="button secondary" disabled={removing} onclick={closeDelete}>Отмена</button><button type="submit" class="button danger" disabled={removing}>{#if removing}<Icon name="refresh" class="spin" size={16} />{/if}{removing ? 'Удаляем…' : deleting.kind === 'task' ? 'Удалить навсегда' : 'Удалить все'}</button></footer>
+    </form>
+  {/if}
 </dialog>
 
 <dialog class="settings-dialog" bind:this={settings} aria-labelledby="settings-title" oncancel={(event) => { event.preventDefault(); closeSettings(); }} onclick={(event) => backdropClick(event, settings, closeSettings)}>

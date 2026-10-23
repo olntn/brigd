@@ -230,6 +230,8 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         }
         if (method === 'DELETE') return json(engine.store.archiveWorker(id));
       }
+      const workerPurgeMatch = path.match(/^\/api\/workers\/([a-zA-Z0-9-]+)\/purge$/);
+      if (workerPurgeMatch && method === 'POST') { await body(req); engine.store.deleteWorker(workerPurgeMatch[1]!); return json({ ok: true }); }
       if (path === '/api/cli-config' && method === 'GET') return json({ claude: claudeStatus(cliHome), codex: codexStatus(cliHome) });
       const cliMatch = path.match(/^\/api\/cli-config\/(claude|codex)$/);
       if (cliMatch && method === 'POST') { await body(req); return json(cliMatch[1] === 'claude' ? configureClaude(cliHome) : configureCodex(cliHome)); }
@@ -331,7 +333,14 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         options.authorizeMutation?.();
         return json(engine.store.createTask(input), 201);
       }
-      const taskMatch = path.match(/^\/api\/tasks\/([a-zA-Z0-9-]+)(?:\/(run|comments|followups|archive|restore|tags|queue))?$/);
+      if (path === '/api/archive/purge' && method === 'POST') {
+        const value = await body(req);
+        if (Object.keys(value).length !== 1 || !Number.isSafeInteger(value.archivedBefore) || (value.archivedBefore as number) <= 0) {
+          throw new AppError('Укажите только archivedBefore: время в миллисекундах, не позже которого задачи попали в архив');
+        }
+        return json(engine.deleteArchivedTasks(value.archivedBefore as number));
+      }
+      const taskMatch = path.match(/^\/api\/tasks\/([a-zA-Z0-9-]+)(?:\/(run|comments|followups|archive|restore|purge|tags|queue))?$/);
       if (taskMatch) {
         const [, id, action] = taskMatch;
         if (!action && method === 'GET') return json(engine.store.detail(id));
@@ -352,6 +361,7 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         if (action === 'run' && method === 'POST') { await body(req); return json(engine.start(id), 201); }
         if (action === 'archive' && method === 'POST') { await body(req); return json(engine.store.archiveTask(id)); }
         if (action === 'restore' && method === 'POST') { await body(req); return json(engine.store.restoreTask(id)); }
+        if (action === 'purge' && method === 'POST') { await body(req); engine.deleteTask(id); return json({ ok: true }); }
         if (action === 'queue' && method === 'POST') return json(engine.store.moveAutopilotTask(id, validateAutopilotMove(await body(req), id).beforeTaskId));
         if (action === 'followups' && method === 'POST') return json(engine.followup(id, validateFollowup(await body(req))), 201);
         if (action === 'comments' && method === 'POST') {
