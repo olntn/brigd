@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CliAccessMode, Comment, ConcurrencySettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
+import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CheckTriage, CheckTriageCounts, CheckTriageOutcome, CliAccessMode, Comment, ConcurrencySettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunCheckFailure, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
 import type { IntegrationRecord, WorkspaceRun } from './workspace-storage';
 import { clock } from './clock';
@@ -10,6 +10,7 @@ import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { AUTOPILOT_FAILURE_LIMIT } from '../src/lib/autopilot';
 import { DEFAULT_TASK_PRIORITY, isTaskPriority, TASK_PRIORITIES, TASK_PRIORITY_LABELS } from '../src/lib/priority';
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
+import { CHECK_HANDBACK_LIMIT, CHECK_HANDBACK_OUTPUT_LIMIT, countTriage, emptyTriageCounts } from '../src/lib/check-triage';
 import { CONCURRENCY_LIMIT_MAX, validateConcurrencyLimit } from '../src/lib/concurrency';
 import { DEFAULT_TAG_COLOR, TAG_COUNT_LIMIT } from '../src/lib/tags';
 import { normalizeProgress, RUN_PROGRESS_MAX_LENGTH } from '../src/lib/progress';
@@ -24,7 +25,7 @@ import { validateSessionId } from './protocol';
 import { sanitizeLogError } from './log-errors';
 import { effortOptions, INTEGRATOR_WORKER_ID, integratorSnapshot, isBuiltinWorker, MODEL_CATALOG_PROVIDER_LIMIT, modelPresets, normalizeModel, normalizeWorkerDescription } from '../src/lib/workers';
 import { validateModel, validateModelPatch } from './models';
-import { followupRequestText, validateFollowup } from './followups';
+import { followupRequestText, handbackOutput, validateFollowup } from './followups';
 import { attachmentIds, preparedAttachmentPayload, type PreparedAttachment } from './attachments';
 import { ATTACHMENT_MAX_COUNT, ATTACHMENT_TASK_MAX_COUNT, ATTACHMENT_TASK_MAX_BYTES, ATTACHMENT_STAGING_MAX_COUNT, ATTACHMENT_STAGING_MAX_BYTES, ATTACHMENT_TOTAL_MAX_BYTES, ATTACHMENT_STAGING_TTL_MS } from '../src/lib/attachments';
 export { AppError } from './errors';
@@ -137,10 +138,19 @@ function sameWorker(left: WorkerSnapshot, right: WorkerSnapshot): boolean {
 function withoutCheckOutput(run: Run): Run;
 function withoutCheckOutput(run: Run | null): Run | null;
 function withoutCheckOutput(run: Run | null): Run | null {
-  const integration = run?.integration;
-  if (!run || !integration?.checks.some(check => check.output !== undefined)) return run;
-  return { ...run, integration: { ...integration, checks: integration.checks.map(({ argv, exitCode }) => ({ argv, exitCode })) } };
+  if (!run) return run;
+  const integration = run.integration, triage = integration?.triage, failure = run.followup?.checkFailure;
+  const outputs = !!triage || !!failure?.output || !!integration?.checks.some(check => check.output !== undefined);
+  if (!outputs) return run;
+  return { ...run,
+    ...(failure ? { followup: { ...run.followup!, checkFailure: { ...failure, output: '' } } } : {}),
+    ...(integration ? { integration: { ...integration, checks: integration.checks.map(({ argv, exitCode }) => ({ argv, exitCode })),
+      ...(triage ? { triage: { ...triage, retries: triage.retries.map(({ check, exitCode }) => ({ check, exitCode })),
+        target: triage.target && { ...triage.target, checks: triage.target.checks.map(({ argv, exitCode }) => ({ argv, exitCode })) } } } : {}) } } : {}) };
 }
+/** Decided by its exit codes as the task's own failure; the engine hands it back or records why not in the same transaction. */
+export const awaitsHandback = (job: Integration | null | undefined): boolean =>
+  job?.status === 'failed' && job.triage?.stage === 'done' && job.triage.outcome === null && job.triage.target?.passed === true;
 function invalidSnapshot(): never {
   throw new AppError('Повреждён снимок запуска. Запуск остановлен; восстановите базу из резервной копии.', 409);
 }
@@ -178,7 +188,7 @@ function followupSnapshot(row: Row, worker: WorkerSnapshot | null): RunFollowup 
   if (row.trigger !== 'followup' || row.workflow_version !== 0 || row.steps_snapshot !== '[]' || row.current_step_index !== null || row.scheduled_for !== null) invalidSnapshot();
   const value = JSON.parse(row.followup_snapshot) as RunFollowup;
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).sort().join(',') !== 'request,sourceRunId,sourceStepIndex,workflow' ||
+      Object.keys(value).filter(key => key !== 'checkFailure').sort().join(',') !== 'request,sourceRunId,sourceStepIndex,workflow' ||
       typeof value.sourceRunId !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(value.sourceRunId) || value.sourceRunId === row.id ||
       (value.sourceStepIndex !== null && (!Number.isInteger(value.sourceStepIndex) || value.sourceStepIndex < 0)) ||
       typeof value.request !== 'string' || !value.request.trim() || value.request.length > 8_000 || value.request.includes('\0')) invalidSnapshot();
@@ -194,7 +204,19 @@ function followupSnapshot(row: Row, worker: WorkerSnapshot | null): RunFollowup 
     const selected = value.workflow.steps[value.workflow.currentStepIndex]!;
     if (!worker || !sameWorker(worker, selected.worker) || row.session_id !== selected.sessionId) invalidSnapshot();
   } else if (value.sourceStepIndex !== null) invalidSnapshot();
+  if (Object.hasOwn(value, 'checkFailure')) checkFailureSnapshot(value.checkFailure);
   return value;
+}
+function checkFailureSnapshot(value: unknown): asserts value is RunCheckFailure {
+  const failure = value as RunCheckFailure;
+  const text = (item: unknown, maximum: number) => typeof item === 'string' && item.length <= maximum && !item.includes('\0');
+  if (!failure || typeof failure !== 'object' || Array.isArray(failure) ||
+      Object.keys(failure).sort().join(',') !== 'argv,exitCode,integrationId,output,outputTruncated,round,targetBranch,targetCommit' ||
+      typeof failure.integrationId !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(failure.integrationId) ||
+      !Number.isInteger(failure.round) || failure.round < 1 || failure.round > CHECK_HANDBACK_LIMIT ||
+      !text(failure.targetBranch, 4_096) || !failure.targetBranch || typeof failure.targetCommit !== 'string' || !/^[a-f0-9]{40,64}$/.test(failure.targetCommit) ||
+      !Array.isArray(failure.argv) || !failure.argv.length || failure.argv.length > 30 || !failure.argv.every(arg => text(arg, 4_096) && !!arg) ||
+      !Number.isSafeInteger(failure.exitCode) || !text(failure.output, CHECK_HANDBACK_OUTPUT_LIMIT) || typeof failure.outputTruncated !== 'boolean') invalidSnapshot();
 }
 function reconcileSnapshot(row: Row, worker: WorkerSnapshot | null): RunReconcile | null {
   if (row.reconcile_snapshot == null) {
@@ -397,6 +419,12 @@ export class Store {
     this.db.exec(`CREATE TABLE IF NOT EXISTS autopilot_settings (
       singleton INTEGER PRIMARY KEY CHECK(singleton=1), integration_checks TEXT
     ); INSERT OR IGNORE INTO autopilot_settings (singleton,integration_checks) VALUES (1,NULL)`);
+    // Failed-check triage: the saved switch (NULL follows the service's default) and how often each outcome happened.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS check_triage_settings (
+      singleton INTEGER PRIMARY KEY CHECK(singleton=1), enabled INTEGER CHECK(enabled IN (0,1)),
+      flaky INTEGER NOT NULL DEFAULT 0, target_failed INTEGER NOT NULL DEFAULT 0, returned INTEGER NOT NULL DEFAULT 0,
+      exhausted INTEGER NOT NULL DEFAULT 0, not_returned INTEGER NOT NULL DEFAULT 0, stopped INTEGER NOT NULL DEFAULT 0
+    ); INSERT OR IGNORE INTO check_triage_settings (singleton) VALUES (1)`);
     // Documentation pages: a global tree with the page content as one JSON array of blocks.
     this.db.exec(`CREATE TABLE IF NOT EXISTS doc_pages (
       seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
@@ -602,6 +630,27 @@ export class Store {
     try { validated = checks === null ? null : validateIntegrationChecks(checks); }
     catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректный BRIGD_INTEGRATION_CHECKS'); }
     this.db.query('UPDATE autopilot_settings SET integration_checks=? WHERE singleton=1').run(validated === null ? null : JSON.stringify(validated));
+  }
+  /** The saved switch of failed-check triage; null follows the service's default. */
+  getCheckTriage(): boolean | null {
+    const row = this.db.query('SELECT enabled FROM check_triage_settings WHERE singleton=1').get() as { enabled: number | null };
+    return row.enabled === null ? null : !!row.enabled;
+  }
+  setCheckTriage(enabled: unknown): void {
+    if (enabled !== null && typeof enabled !== 'boolean') throw new AppError('enabled должен быть true, false или null');
+    this.db.query('UPDATE check_triage_settings SET enabled=? WHERE singleton=1').run(enabled === null ? null : +enabled);
+  }
+  checkTriageCounts(): CheckTriageCounts {
+    const row = this.db.query('SELECT flaky,target_failed,returned,exhausted,not_returned,stopped FROM check_triage_settings WHERE singleton=1').get() as Row;
+    return { flaky: row.flaky, targetFailed: row.target_failed, returned: row.returned, exhausted: row.exhausted, notReturned: row.not_returned, stopped: row.stopped };
+  }
+  /** Counted once per finished attempt, when its outcome is final. */
+  private recordTriage(triage: CheckTriage | null | undefined) {
+    const counts = emptyTriageCounts();
+    countTriage(counts, triage);
+    if (!Object.values(counts).some(Boolean)) return;
+    this.db.query(`UPDATE check_triage_settings SET flaky=flaky+?,target_failed=target_failed+?,returned=returned+?,exhausted=exhausted+?,
+      not_returned=not_returned+?,stopped=stopped+? WHERE singleton=1`).run(counts.flaky, counts.targetFailed, counts.returned, counts.exhausted, counts.notReturned, counts.stopped);
   }
   getConcurrencyLimits(): ConcurrencySettings['saved'] {
     const row = this.db.query('SELECT max_parallel,max_per_repository FROM concurrency_settings WHERE singleton=1').get() as { max_parallel: number | null; max_per_repository: number | null };
@@ -1225,7 +1274,16 @@ export class Store {
   autopilotOverview(): AutopilotOverview {
     const state = this.getAutopilot();
     return { ...state, pool: this.autopilotPool(state.enabled ? state.startedAt : null).map(task => ({ ...task, latestRun: withoutCheckOutput(task.latestRun) })),
-      attempts: this.autopilotAttempts(state.startedAt).map(run => withoutCheckOutput(run)) };
+      attempts: this.autopilotAttempts(state.startedAt).map(run => withoutCheckOutput(run)), triage: this.autopilotTriage(state.startedAt) };
+  }
+  /** Every merge of the session's tasks counts, hand-backs and integrator runs included: their triage is part of the same task. */
+  private autopilotTriage(sessionStart: number | null): CheckTriageCounts {
+    const counts = emptyTriageCounts();
+    if (sessionStart === null) return counts;
+    const rows = this.db.query(`SELECT i.snapshot FROM integrations i JOIN runs r ON r.id=i.run_id WHERE r.started_at>=?1
+      AND r.task_id IN (SELECT task_id FROM runs WHERE trigger='autopilot' AND started_at>=?1)`).all(sessionStart) as Row[];
+    for (const row of rows) countTriage(counts, (JSON.parse(row.snapshot) as Integration).triage);
+    return counts;
   }
   /** Starts a pool task on the autopilot's behalf; null when the task left the pool or the autopilot was switched off meanwhile. */
   startAutopilot(taskId: string, mock: boolean, now = clock()): Run | null {
@@ -1803,6 +1861,10 @@ export class Store {
     return createHash('sha256').update(JSON.stringify([input.sourceRunId, input.sourceStepIndex, input.body, input.attachmentIds])).digest('hex');
   }
   startFollowup(taskId: string, value: FollowupInput, now = clock()): { run: Run; created: boolean } {
+    return this.insertFollowup(taskId, value, now);
+  }
+  /** A hand-back is brigd's own request: the card shows it as a system note and the agent receives the failure as data. */
+  private insertFollowup(taskId: string, value: FollowupInput, now: number, checkFailure?: RunCheckFailure): { run: Run; created: boolean } {
     const input = validateFollowup(value);
     return this.db.transaction(() => {
       const prior = this.getFollowupRequest(taskId, input);
@@ -1827,7 +1889,7 @@ export class Store {
       catch { invalidSnapshot(); }
       const worker = selected ? selected.worker : source.worker;
       const followup: RunFollowup = { sourceRunId: source.id, sourceStepIndex: input.sourceStepIndex, request: followupRequestText(input.body),
-        workflow: selected ? { steps: source.steps, currentStepIndex: input.sourceStepIndex! } : source.followup?.workflow ?? null };
+        workflow: selected ? { steps: source.steps, currentStepIndex: input.sourceStepIndex! } : source.followup?.workflow ?? null, ...(checkFailure ? { checkFailure } : {}) };
       if (followup.workflow) completedWorkflowSnapshot(followup.workflow);
       const id = crypto.randomUUID();
       this.db.query(`INSERT INTO runs (id,task_id,provider,cwd,instruction,trigger,status,session_id,started_at,updated_at,mock,worker_id,worker_snapshot,instructions_snapshot,followup_snapshot,ultracode)
@@ -1843,7 +1905,7 @@ export class Store {
       this.db.query(`INSERT OR IGNORE INTO run_attachment_inputs(run_id,turn,attachment_id)
         SELECT ?,1,id FROM attachments WHERE task_id=? AND run_id=? AND created_turn<=? AND (step_index IS ? OR ? IS NULL)`)
         .run(id, taskId, source.id, sourceTurn, input.sourceStepIndex, input.sourceStepIndex);
-      this.comment(taskId, id, 'user', followup.request, now, null, input.attachmentIds);
+      this.comment(taskId, id, checkFailure ? 'system' : 'user', followup.request, now, null, input.attachmentIds);
       for (const attachmentId of input.attachmentIds) this.db.query('INSERT OR IGNORE INTO run_attachment_inputs(run_id,turn,attachment_id) VALUES (?,1,?)').run(id, attachmentId);
       this.db.query('INSERT INTO followup_requests(task_id,request_id,fingerprint,run_id) VALUES (?,?,?,?)').run(taskId, input.requestId, this.followupFingerprint(input), id);
       return { run: this.getRun(id), created: true };
@@ -1885,6 +1947,79 @@ export class Store {
       const run = this.getRun(runId);
       if (run.status !== 'preparing' || !matchesFence(run, fence) || !run.reconcile) return;
       this.db.query('UPDATE runs SET reconcile_snapshot=? WHERE id=?').run(JSON.stringify({ ...run.reconcile, ...patch }), runId);
+    }).immediate();
+  }
+  /** The run whose saved session a hand-back continues: an integrator run passes the failure on to the result it merged. */
+  private handbackSource(run: Run): Run {
+    let current = run;
+    for (let hops = 0; current.reconcile && hops < 100; hops++) current = this.getRun(current.reconcile.sourceRunId);
+    return current;
+  }
+  /** Automatic hand-backs already made for this result. A person's own follow-up starts a new result with a fresh count. */
+  private handbackReturns(run: Run): number {
+    return this.handbackSource(run).followup?.checkFailure?.round ?? 0;
+  }
+  /** The run that started the chain of follow-ups and integrator runs, e.g. the autopilot's own attempt. */
+  private chainRoot(run: Run): Run {
+    let current = run;
+    for (let hops = 0; hops < 100; hops++) {
+      const parent = current.reconcile?.sourceRunId ?? current.followup?.sourceRunId;
+      if (!parent) break;
+      current = this.getRun(parent);
+    }
+    return current;
+  }
+  /**
+   * A result whose check failed in its candidate, failed again on the rerun and passes on the target goes back to the worker's
+   * saved session, or the card says why not. Called in the transaction that stores the failed attempt, so a restart never
+   * leaves a decided result without its hand-back.
+   */
+  handBackFailedCheck(id: string, attempt: number, enabled: boolean, now = clock()): Integration | null {
+    return this.db.transaction(() => {
+      const row = this.db.query('SELECT snapshot FROM integrations WHERE id=?').get(id) as Row | null;
+      if (!row) return null;
+      const job = JSON.parse(row.snapshot) as Integration;
+      if (job.attempt !== attempt || !awaitsHandback(job)) return job;
+      const run = this.getRun(job.runId);
+      const source = this.handbackSource(run);
+      const returns = this.handbackReturns(run);
+      const [outcome, note, runId] = ((): [CheckTriageOutcome, string, string | null] => {
+        if (!enabled) return ['disabled', 'Автоматический возврат выключен в настройках → Автопилот. Отправьте дополнительный запрос работнику вручную.', null];
+        if (source.steps.length) return ['workflow', 'Задача с этапами не возвращается автоматически: по коду возврата не видно, какой этап внёс ошибку. Выберите этап и отправьте дополнительный запрос.', null];
+        if (returns >= CHECK_HANDBACK_LIMIT) return ['limit', `Лимит автоматических возвратов исчерпан: ${returns} из ${CHECK_HANDBACK_LIMIT}. Нужно решение человека: отправьте дополнительный запрос или исправьте результат вручную.`, null];
+        if (!source.sessionId) return ['no_session', 'Автоматический возврат не выполнен: CLI не сохранил ID сессии работника, а продолжить можно только её. Исправьте результат вручную или поставьте задачу заново.', null];
+        try {
+          const followup = this.startHandback(source, run, job, returns + 1, now);
+          return ['returned', `Задача возвращена работнику в его сохранённую сессию: возврат ${returns + 1} из ${CHECK_HANDBACK_LIMIT}.`, followup.id];
+        } catch (error) {
+          if (!(error instanceof AppError)) throw error;
+          return ['error', `Автоматический возврат не выполнен: ${error.message}`, null];
+        }
+      })();
+      const triage: CheckTriage = { ...job.triage!, outcome, handback: { returns: outcome === 'returned' ? returns + 1 : returns, limit: CHECK_HANDBACK_LIMIT, runId } };
+      const next: Integration = { ...job, triage, error: [job.error, note].filter(Boolean).join(' ').slice(0, 4_000), updatedAt: now };
+      this.writeIntegration(next);
+      this.recordTriage(triage);
+      this.log(run.taskId, run.id, { kind: 'integration', summary: outcome === 'returned' ? 'Задача возвращена работнику после упавшей проверки' : 'Автоматический возврат после упавшей проверки не выполнен', details: [note] }, now);
+      if (outcome !== 'returned') this.comment(run.taskId, run.id, 'system', note, now);
+      // Exhausted hand-backs leave a result for a person: the circuit breaker counts it like a failed run.
+      if (outcome === 'limit') { const root = this.chainRoot(run); if (root.trigger === 'autopilot') this.noteAutopilotOutcome(root, 'failed', now); }
+      return next;
+    }).immediate();
+  }
+  private startHandback(source: Run, failed: Run, job: Integration, round: number, now: number): Run {
+    return this.db.transaction(() => {
+      const retry = job.triage!.retries.at(-1)!;
+      const check = job.checks[retry.check];
+      const targetBranch = failed.workspace?.targetBranch;
+      if (!check || retry.exitCode === null || !targetBranch || !job.targetCommit) throw new AppError('в записи слияния нет данных упавшей проверки.', 409);
+      const output = handbackOutput(retry.output ?? '', !!retry.outputTruncated);
+      const checkFailure: RunCheckFailure = { integrationId: job.id, round, targetBranch, targetCommit: job.targetCommit, argv: check.argv, exitCode: retry.exitCode, ...output };
+      const request = `Проверка слияния ${check.argv.join(' ').slice(0, 2_000)} не прошла и при повторе (код ${retry.exitCode}), а на целевой ветке ${targetBranch} проходит. brigd возвращает задачу работнику: возврат ${round} из ${CHECK_HANDBACK_LIMIT}.`;
+      const { run } = this.insertFollowup(source.taskId, { sourceRunId: source.id, sourceStepIndex: null, body: request, attachmentIds: [], requestId: `check-${job.id}-${job.attempt}` }, now, checkFailure);
+      const workspace = run.workspace;
+      if (!workspace) throw new AppError('у результата нет сохранённой рабочей папки.', 409);
+      return this.enqueueExecution(run, { repositoryId: workspace.repositoryId, repositoryRoot: workspace.repositoryRoot, projectCwd: workspace.projectCwd });
     }).immediate();
   }
   claimDue(mock: boolean, now = clock(), settlingTaskIds: readonly string[] = []): Run[] {
@@ -2065,7 +2200,7 @@ export class Store {
         // can be captured again; completed historical snapshots stay intact.
         const active = this.db.query(`SELECT id FROM runs WHERE workspace_id=? AND status IN (${OPEN})`).get(run.workspace.id);
         if (active) throw new AppError('Сначала завершите активное продолжение этой рабочей папки.', 409);
-        const next = { ...prior, status: 'queued' as const, rechecks: 0, error: null, checks: [], updatedAt: clock() };
+        const next = { ...prior, status: 'queued' as const, rechecks: 0, error: null, checks: [], triage: null, updatedAt: clock() };
         this.writeIntegration(next); return next;
       }
       const job: Integration = { id: crypto.randomUUID(), runId, repositoryId: run.workspace.repositoryId, status: 'queued', attempt: 0,
@@ -2088,7 +2223,7 @@ export class Store {
         const job = JSON.parse(row.snapshot) as Integration;
         if (this.occupiedSlots() >= maximum) break;
         if (this.integrationWaits(job.repositoryId, row.workspace_id)) continue;
-        const next = { ...job, status: 'checking' as const, attempt: job.attempt + 1, error: null, sourceCommit: null, targetCommit: null, resultCommit: null, candidatePath: null, checks: [], updatedAt: clock() };
+        const next = { ...job, status: 'checking' as const, attempt: job.attempt + 1, error: null, sourceCommit: null, targetCommit: null, resultCommit: null, candidatePath: null, checks: [], triage: null, updatedAt: clock() };
         this.writeIntegration(next); claimed.push(next);
       }
       return claimed;
@@ -2118,7 +2253,12 @@ export class Store {
         next.rechecks = (job.rechecks ?? 0) + 1;
         if (next.rechecks >= INTEGRATION_RECHECK_LIMIT) Object.assign(next, { status: 'blocked', error: 'Целевая ветка неоднократно изменялась во время проверки. Повторите слияние после завершения изменений.' });
       }
+      // A triage overtaken by a cancellation, a block or a moved target ends without a decision.
+      if (finish && next.triage && (next.triage.stage !== 'done' || next.triage.outcome === null && next.triage.target?.passed && next.status !== 'failed')) {
+        next.triage = { ...next.triage, stage: 'done', outcome: next.triage.outcome ?? 'stopped' };
+      }
       this.writeIntegration(next);
+      if (finish && next.status !== 'queued' && !awaitsHandback(next)) this.recordTriage(next.triage);
       if (finish) {
         const run = this.getRun(job.runId);
         if (next.status === 'merged' && run.workspace && next.sourceCommit) {
@@ -2126,7 +2266,9 @@ export class Store {
         }
         this.log(run.taskId, run.id, { kind: 'integration', summary: next.status === 'merged' ? 'Проверенный результат принят в целевую ветку' : 'Проверка и слияние завершены',
           details: [`Статус: ${next.status}.`, ...(next.error ? [next.error] : []), ...(next.conflicts?.length ? [`Конфликтующие файлы: ${next.conflicts.join(', ')}.`] : []),
-            ...next.checks.map((check, index) => `Проверка ${index + 1}: код ${check.exitCode}.`)] });
+            ...next.checks.map((check, index) => `Проверка ${index + 1}: код ${check.exitCode}.`),
+            ...(next.triage?.retries ?? []).map(retry => retry.exitCode === null ? `Повтор проверки ${retry.check + 1} остановлен.` : `Повтор проверки ${retry.check + 1}: код ${retry.exitCode}.`),
+            ...(next.triage?.target ? [`Целевая ветка на коммите ${next.triage.target.commit.slice(0, 12)}: ${next.triage.target.passed ? 'проверка проходит' : next.triage.target.passed === false ? 'проверка не проходит' : 'проверка остановлена'}.`] : [])] });
       }
       return next;
     }).immediate();
@@ -2288,7 +2430,10 @@ export class Store {
       this.db.query("UPDATE execution_requests SET state='interrupted' WHERE state IN ('preparing','running')").run();
       for (const row of this.db.query("SELECT snapshot FROM integrations WHERE state IN ('checking','merging','cancelling')").all() as Row[]) {
         const job = JSON.parse(row.snapshot) as Integration;
-        this.writeIntegration({ ...job, status: 'interrupted', updatedAt: now, error: 'Сервис остановился во время проверки или слияния. Проверьте прежние процессы перед повтором.' });
+        // The triage does not resume on its own either: its rerun or target check may still be running.
+        const triage = job.triage && job.triage.stage !== 'done' ? { ...job.triage, stage: 'done' as const, outcome: 'interrupted' as const } : job.triage;
+        if (triage !== job.triage) this.recordTriage(triage);
+        this.writeIntegration({ ...job, ...(triage ? { triage } : {}), status: 'interrupted', updatedAt: now, error: 'Сервис остановился во время проверки или слияния. Проверьте прежние процессы перед повтором.' });
       }
       for (const row of rows) {
         const run = this.mapRun(row);

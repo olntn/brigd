@@ -1333,3 +1333,27 @@ button.autopilot-task:hover strong { color: var(--accent-text); }
 .docs-search-results mark { padding: 0 1px; border-radius: 2px; background: var(--warning-bg); color: var(--text); }
 .docs-search-empty { margin: 4px 10px; color: var(--muted); font-size: .85rem; line-height: 1.6; }
 @media (max-width: 700px) { .doc-task-search, .doc-cell-input { font-size: max(16px, .9rem); } }
+.integration-flaky { display: flex; gap: 10px; align-items: flex-start; margin: 10px 0; padding: 10px 12px; border: 1px solid var(--warning-line); border-radius: var(--radius-md); background: var(--warning-bg); color: var(--warning); }
+.integration-flaky > svg { flex-shrink: 0; margin-top: 2px; }
+.integration-flaky strong { display: block; font-size: 13px; }
+.integration-panel .integration-flaky p { margin: 4px 0 0; color: var(--text); }
+.integration-retry { margin: 0 0 6px; color: var(--secondary); }
+.integration-triage { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.integration-triage h4 { margin: 0 0 8px; font-size: 13px; }
+.triage-stages { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; counter-reset: triage; }
+.triage-stage { display: grid; gap: 3px; padding: 8px 10px 8px 32px; position: relative; border: 1px solid var(--line); border-radius: var(--radius-md); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; counter-increment: triage; }
+.triage-stage::before { content: counter(triage); position: absolute; left: 10px; top: 8px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.triage-stage-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; font-weight: 600; }
+.triage-state { font-weight: 400; font-size: .77rem; color: var(--muted); }
+.triage-passed { border-color: var(--success-line); background: var(--success-bg); }.triage-passed .triage-state { color: var(--success); }
+.triage-failed { border-color: var(--error-line); background: var(--error-bg); }.triage-failed .triage-state { color: var(--error); }
+.triage-running { border-color: var(--accent); }.triage-running .triage-state { color: var(--accent-text); }
+.triage-stage .integration-checks { margin: 6px 0 0; }
+.list-task-name .list-flaky-label { color: var(--warning); }
+.check-triage-settings { margin-top: 34px; padding-top: 26px; border-top: 1px solid var(--line); }
+.check-triage-toggle { display: flex; align-items: flex-start; gap: 10px; margin-top: 18px; font-size: .92rem; line-height: 1.6; cursor: pointer; overflow-wrap: anywhere; }
+.check-triage-toggle input { margin-top: 4px; flex-shrink: 0; }
+.check-triage-toggle input:disabled + span { color: var(--muted); }
+.check-triage-steps { margin: 14px 0 0; padding-left: 20px; display: grid; gap: 6px; font-size: .85rem; line-height: 1.7; color: var(--secondary); overflow-wrap: anywhere; }
+.check-triage-settings .model-catalog-actions { margin-top: 14px; }
+.check-triage-settings > .form-error { margin-top: 14px; }

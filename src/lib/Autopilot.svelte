@@ -285,6 +285,7 @@
       <p class="autopilot-help">{t('Автопилот ещё не включали. После первой сессии здесь будет список взятых задач и их результаты.')}</p>
     {:else}
       <p class="autopilot-help">{overview.stoppedAt !== null ? t('С {start} по {end}.', { start: dateTime(overview.startedAt), end: dateTime(overview.stoppedAt) }) : t('С {start}.', { start: dateTime(overview.startedAt) })} {t('Готово: {done} · Ждут ответа: {waiting} · Ошибки и блокировки: {failed} · Проблемы слияния: {merge} · В работе: {active}.', { done: summary.done, waiting: summary.waiting, failed: summary.failed, merge: summary.merge, active: summary.active })}{#if archivedAttempts} {t('Задачи из архива не показаны: {count}.', { count: archivedAttempts })}{/if}</p>
+      {#if overview.triage}<p class="autopilot-help autopilot-triage" aria-label={t('Разбор упавших проверок за сессию')}>{t('Разбор упавших проверок: прошли со второй попытки — {flaky} · целевая ветка не проходит — {targetFailed} · возвращено работникам — {returned} · исчерпан лимит возвратов — {exhausted} · без возврата — {notReturned} · остановлено — {stopped}.', { ...overview.triage })}</p>{/if}
       {#if attempts.length}
         <ul class="autopilot-list">
           {#each attempts as run (run.id)}

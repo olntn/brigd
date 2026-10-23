@@ -1,10 +1,13 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { Integration, IntegrationCheck, Run } from '../src/lib/types';
+import type { CheckTriage, Integration, IntegrationCheck, Run, TargetCheck, TriageCommand } from '../src/lib/types';
 import { CHECK_OUTPUT_LIMIT } from '../src/lib/integration-checks';
-import { runBoundedProcess } from './adapter';
+import { CHECK_TRIAGE_TIME_LIMIT_MS } from '../src/lib/check-triage';
+import { AgentRunError, runBoundedProcess } from './adapter';
 import { GitWorkspaces } from './workspaces';
+import { gitExit, removeTree, TARGET_SUFFIX } from './workspace-storage';
 import { INTEGRATOR_WORKER } from '../src/lib/workers';
+import { clock } from './clock';
 
 /** Merge commits are authored by the built-in integrator so history separates them from human and worker commits; the committer stays the repository identity. */
 export const INTEGRATOR_AUTHOR = `${INTEGRATOR_WORKER.name} <integrator@localhost>`;
@@ -18,6 +21,14 @@ export interface Reconciliation { targetCommit: string; conflicts: string[]; }
 export interface Integrator {
   execute(run: Run, job: Integration, signal: AbortSignal, update: IntegrationUpdate): Promise<Partial<Integration> & { status: Integration['status'] }>;
   prepareReconcile(run: Run, signal: AbortSignal): Promise<Reconciliation>;
+  /** Merges the target commit a hand-back failed on into the saved worktree, so the worker resumes on the tested code. */
+  prepareHandback?(run: Run, signal: AbortSignal): Promise<{ merged: boolean }>;
+}
+export interface TriageOptions {
+  /** Read when a check fails, so the switch in the settings applies to the next failure without a restart. */
+  enabled?: () => boolean;
+  /** Reruns and the target check of one attempt together; CHECK_TRIAGE_TIME_LIMIT_MS by default. */
+  timeLimitMs?: number;
 }
 function readGit(cwd: string, args: string[], optional = false): string {
   const child = Bun.spawnSync(['git', '-C', cwd, ...args], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
@@ -55,6 +66,33 @@ export class OutputTail {
     return { output: this.chunks.join(''), ...(this.cut ? { outputTruncated: true } : {}) };
   }
 }
+/** Runs one check command and keeps the end of its output. Past `timeoutMs` the process tree is stopped and exitCode is null. */
+async function runCheck(argv: string[], cwd: string, signal: AbortSignal, timeoutMs?: number): Promise<TriageCommand> {
+  const tail = new OutputTail();
+  try {
+    const exitCode = await runBoundedProcess(argv, { cwd, signal, onStdout: tail.push, onStderr: tail.push, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
+    return { argv, exitCode, ...tail.result() };
+  } catch (error) {
+    if (error instanceof AgentRunError && error.code === 'TIMEOUT' && !signal.aborted) return { argv, exitCode: null, ...tail.result() };
+    throw error;
+  }
+}
+/** A triage command within the attempt's remaining budget; nothing starts once it is spent. */
+async function budgeted(triage: CheckTriage, argv: string[], cwd: string, signal: AbortSignal): Promise<TriageCommand> {
+  const remaining = triage.limitMs - triage.spentMs;
+  if (remaining <= 0) return { argv, exitCode: null };
+  const started = performance.now();
+  try { return await runCheck(argv, cwd, signal, Math.ceil(remaining)); }
+  finally { triage.spentMs = Math.min(triage.limitMs, triage.spentMs + Math.round(performance.now() - started)); }
+}
+/** Removes a worktree brigd created for itself, without the abort signal: it runs after a cancellation too. */
+async function discardWorktree(repositoryRoot: string, path: string): Promise<void> {
+  const remove = () => gitExit(['-C', repositoryRoot, 'worktree', 'remove', '--force', '--force', path]);
+  await remove();
+  if (existsSync(path)) { removeTree(path); await remove(); }
+}
+const command = (argv: string[]) => argv.join(' ');
+const minutes = (milliseconds: number) => Math.max(1, Math.round(milliseconds / 60_000));
 /** Paths with unmerged index entries, relative to the work tree root. `prefix` addresses Git the way the caller does. */
 export function unmergedPaths(prefix: string[], cwd: string): string[] {
   const child = Bun.spawnSync([...prefix, 'ls-files', '-u', '-z', '--full-name'], { cwd, stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
@@ -88,7 +126,7 @@ function checkedOutTarget(cwd: string, ref: string): string | null {
   return matches[0] ?? null;
 }
 export class GitIntegrator implements Integrator {
-  constructor(private readonly configuredChecks?: string[][] | (() => string[][] | undefined)) {}
+  constructor(private readonly configuredChecks?: string[][] | (() => string[][] | undefined), private readonly triageOptions: TriageOptions = {}) {}
   async execute(run: Run, job: Integration, signal: AbortSignal, update: IntegrationUpdate) {
     const workspace = run.workspace!;
     try {
@@ -136,12 +174,33 @@ export class GitIntegrator implements Integrator {
       }
       const testedTree = readGit(candidatePath, ['write-tree']);
       const checks: Integration['checks'] = [];
-      for (const argv of commands) {
+      let triage: CheckTriage | null = null;
+      const report = () => update({ checks: [...checks], ...(triage ? { triage: structuredClone(triage) } : {}) });
+      const failure = (message: string) => new IntegrationError('failed', message, triage ? { checks: [...checks], triage: structuredClone(triage) } : {});
+      for (const [index, argv] of commands.entries()) {
         signal.throwIfAborted();
-        const tail = new OutputTail();
-        const exitCode = await runBoundedProcess(argv, { cwd: candidatePath, signal, onStdout: tail.push, onStderr: tail.push });
-        checks.push({ argv, exitCode, ...tail.result() }); update({ checks: [...checks] });
-        if (exitCode !== 0) throw new IntegrationError('failed', `Проверка ${checks.length} завершилась с кодом ${exitCode}. Целевая ветка сохранена.`);
+        const { exitCode, ...tail } = await runCheck(argv, candidatePath, signal);
+        checks.push({ ...tail, exitCode: exitCode! }); report();
+        if (exitCode === 0) continue;
+        if (!this.triageOptions.enabled?.()) throw failure(`Проверка ${index + 1} завершилась с кодом ${exitCode}. Целевая ветка сохранена.`);
+        // Exit codes alone decide: one rerun tells a flaky check from a failing one, the target commit tells whose failure it is.
+        triage ??= { stage: 'retry', startedAt: clock(), limitMs: this.triageOptions.timeLimitMs ?? CHECK_TRIAGE_TIME_LIMIT_MS, spentMs: 0, retries: [], target: null, handback: null, outcome: null };
+        triage.stage = 'retry'; triage.retries.push({ check: index, exitCode: null }); report();
+        const { argv: _argv, ...retry } = await budgeted(triage, argv, candidatePath, signal);
+        triage.retries[triage.retries.length - 1] = { check: index, ...retry };
+        const stopped = `Разбор упавшей проверки ${index + 1} остановлен: повтор и проверка целевой ветки вместе превысили лимит ${minutes(triage.limitMs)} мин. Задача не возвращена работнику.`;
+        if (retry.exitCode === null) { Object.assign(triage, { stage: 'done', outcome: 'timeout' }); throw failure(stopped); }
+        if (retry.exitCode === 0) { triage.stage = 'done'; report(); continue; }
+        const verdict = await this.checkTarget(workspace.repositoryRoot, `${candidatePath}${TARGET_SUFFIX}`, targetCommit, commands.slice(0, index + 1), signal, triage, report);
+        const target = triage.target!.checks.at(-1)!;
+        triage.stage = 'done';
+        if (verdict === 'timeout') { triage.outcome = 'timeout'; throw failure(stopped); }
+        if (verdict === 'failed') {
+          triage.outcome = 'target_failed';
+          throw failure(`Целевая ветка ${workspace.targetBranch} не проходит проверку ${command(target.argv)}: код ${target.exitCode} на коммите ${targetCommit.slice(0, 12)}. Задача не возвращена работнику; исправьте целевую ветку и повторите проверку.`);
+        }
+        // The outcome is left to the engine: it hands the result back or explains why it did not.
+        throw failure(`Проверка ${index + 1} (${command(argv)}) завершилась с кодом ${exitCode}, при повторе — с кодом ${retry.exitCode}, а на целевой ветке ${workspace.targetBranch} проходит: причина в результате задачи.`);
       }
       if (readGit(candidatePath, ['rev-parse', 'HEAD']) !== targetCommit || readGit(candidatePath, ['write-tree']) !== testedTree ||
           readGit(candidatePath, ['diff', '--name-only'])) throw new IntegrationError('failed', 'Проверки изменили отслеживаемые файлы или Git-состояние кандидата. Нужна повторная проверка неизменённого результата.');
@@ -163,12 +222,52 @@ export class GitIntegrator implements Integrator {
       } else if (await git(workspace.path, ['update-ref', targetRef, resultCommit, targetCommit], signal)) {
         throw new IntegrationError('blocked', 'Целевая ветка изменилась или Git запретил обновление. Повторите проверку её актуального состояния.');
       }
-      return { status: 'merged' as const, sourceCommit, targetCommit, resultCommit, checks, error: null };
+      return { status: 'merged' as const, sourceCommit, targetCommit, resultCommit, checks, ...(triage ? { triage } : {}), error: null };
     } catch (error) {
       if (signal.aborted) return { status: 'cancelled' as const, error: 'Слияние отменено. Уже выполненные Git-операции не откатываются.' };
       if (error instanceof IntegrationError) return { status: error.status, error: error.message, ...error.patch };
       return { status: 'blocked' as const, error: error instanceof Error ? error.message.slice(0, 1000) : 'Не удалось выполнить проверку и слияние.' };
     }
+  }
+  /** The failed command and the commands before it (dependencies are installed by them) on the target commit in a clean worktree. */
+  private async checkTarget(repositoryRoot: string, path: string, commit: string, commands: string[][], signal: AbortSignal, triage: CheckTriage, report: () => void): Promise<'passed' | 'failed' | 'timeout'> {
+    const target: TargetCheck = { commit, checks: [], passed: null };
+    Object.assign(triage, { stage: 'target', target }); report();
+    if (existsSync(path)) await discardWorktree(repositoryRoot, path);
+    if (await git(repositoryRoot, ['worktree', 'add', '--detach', path, commit], signal)) throw new IntegrationError('blocked', 'Не удалось подготовить отдельный worktree целевой ветки для разбора упавшей проверки.', { triage: structuredClone(triage) });
+    try {
+      for (const argv of commands) {
+        target.checks.push({ argv, exitCode: null }); report();
+        const result = await budgeted(triage, argv, path, signal);
+        target.checks[target.checks.length - 1] = result;
+        if (result.exitCode === null) return 'timeout';
+        if (result.exitCode !== 0) { target.passed = false; return 'failed'; }
+      }
+      target.passed = true;
+      return 'passed';
+    } finally {
+      report();
+      await discardWorktree(repositoryRoot, path).catch(() => {});
+    }
+  }
+  /** Brings the saved worktree to the exact tested code: the target commit of the failed candidate, merged with a commit of its own. */
+  async prepareHandback(run: Run, signal: AbortSignal): Promise<{ merged: boolean }> {
+    const workspace = run.workspace, failure = run.followup?.checkFailure;
+    if (!workspace || workspace.mode !== 'worktree' || !failure) throw new Error('Возврат после упавшей проверки работает только с результатом в отдельном worktree.');
+    const prefix = ['git', '-C', workspace.path];
+    if (mergeInProgress(prefix, workspace.path)) throw new Error('В worktree задачи осталось незавершённое объединение. Завершите или отмените его перед возвратом работнику.');
+    if (!sourceClean(workspace.path)) throw new Error('В worktree задачи остались несохранённые изменения. Сохраните или отмените их перед возвратом работнику.');
+    if (await git(workspace.path, ['merge-base', '--is-ancestor', failure.targetCommit, 'HEAD'], signal) === 0) return { merged: false };
+    if (await git(workspace.path, ['merge', '--no-ff', '--no-commit', failure.targetCommit], signal)) {
+      if (mergeInProgress(prefix, workspace.path)) await git(workspace.path, ['merge', '--abort'], signal);
+      throw new Error(`Не удалось объединить проверенный коммит ветки ${failure.targetBranch} с worktree задачи. Разрешите расхождение вручную и отправьте дополнительный запрос.`);
+    }
+    const identity = readGit(workspace.path, ['var', 'GIT_AUTHOR_IDENT'], true);
+    if (await git(workspace.path, [...(identity ? [] : ['-c', 'user.name=brigd', '-c', 'user.email=brigd@localhost']), 'commit', '--author', INTEGRATOR_AUTHOR, '-m', `brigd: объединение ${failure.targetBranch} в ${workspace.branch}`], signal)) {
+      await git(workspace.path, ['merge', '--abort'], signal);
+      throw new Error('Не удалось создать merge-коммит проверенной целевой ветки в worktree задачи. Проверьте Git-конфигурацию, hooks и нативные разрешения.');
+    }
+    return { merged: true };
   }
   /** Merges the current target into the saved worktree so the integrator can resolve conflicts there. Errors block the run. */
   async prepareReconcile(run: Run, signal: AbortSignal): Promise<Reconciliation> {

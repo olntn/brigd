@@ -216,6 +216,23 @@ export interface RunFollowup {
   request: string;
   /** Historical context only. These stages are never scheduled again. */
   workflow: { steps: RunStep[]; currentStepIndex: number } | null;
+  /** Present when brigd itself handed the result back after a failed merge check; the request is then brigd's own text. */
+  checkFailure?: RunCheckFailure;
+}
+/** A merge check that failed on the result, failed again on its rerun and passes on the target branch. */
+export interface RunCheckFailure {
+  integrationId: string;
+  /** This hand-back's number for the result, 1 to CHECK_HANDBACK_LIMIT. */
+  round: number;
+  targetBranch: string;
+  /** The target commit the failing candidate was built on; merged into the worktree before the worker resumes. */
+  targetCommit: string;
+  argv: string[];
+  /** The rerun's exit code. */
+  exitCode: number;
+  /** The end of the rerun's output with terminal control sequences removed, at most CHECK_HANDBACK_OUTPUT_LIMIT characters. */
+  output: string;
+  outputTruncated: boolean;
 }
 /** A built-in integrator turn that resolves a merge conflict of an earlier result in its worktree. */
 export interface RunReconcile {
@@ -342,6 +359,8 @@ export interface Integration {
   /** Paths that failed to merge automatically, relative to the repository root. */
   conflicts?: string[];
   checks: IntegrationCheck[];
+  /** What brigd did on its own after a check exited non-zero in this attempt; absent when every check passed at once or triage is off. */
+  triage?: CheckTriage | null;
   error: string | null;
   updatedAt: number;
 }
@@ -352,6 +371,96 @@ export interface IntegrationCheck {
   output?: string;
   /** The beginning of the output was cut to fit the limit. */
   outputTruncated?: boolean;
+}
+/** How a failed merge check ended once brigd had rerun it and checked the target branch; decided by exit codes alone, without a model. */
+export type CheckTriageOutcome =
+  /** The command fails on the current target commit as well: the target branch is broken, the task is not returned. */
+  | 'target_failed'
+  /** The result was handed back to the worker's saved session. */
+  | 'returned'
+  /** The result was already handed back CHECK_HANDBACK_LIMIT times; a person decides. */
+  | 'limit'
+  /** The worker's run has no saved CLI session to continue. */
+  | 'no_session'
+  /** A multi-stage run: brigd cannot tell which stage to hand the failure to. */
+  | 'workflow'
+  /** Switched off in the settings after the triage had started. */
+  | 'disabled'
+  /** The hand-back could not be created, e.g. the task was archived or another run started meanwhile. */
+  | 'error'
+  /** The rerun and target check together ran past the time limit. */
+  | 'timeout'
+  /** The service restarted during the triage. */
+  | 'interrupted'
+  /** The merge was cancelled or blocked before the triage decided. */
+  | 'stopped';
+export interface CheckTriage {
+  /** The step running now; 'done' once the outcome is known or every failed command passed on its rerun. */
+  stage: 'retry' | 'target' | 'done';
+  startedAt: number;
+  /** Reruns and the target check of one attempt share this budget; a command still running past it is stopped. */
+  limitMs: number;
+  /** Time already spent on reruns and the target check. */
+  spentMs: number;
+  /** One rerun of each failed command, in the same candidate; exitCode is null while it runs. */
+  retries: CheckRetry[];
+  /** The failed command, preceded by the commands before it, on the current target commit in a clean worktree. */
+  target: TargetCheck | null;
+  /** Automatic hand-backs of this result to its worker; null until the outcome needs it. */
+  handback: CheckHandback | null;
+  /** null while the triage runs, and when every failed command passed on its rerun. */
+  outcome: CheckTriageOutcome | null;
+}
+export interface CheckRetry {
+  /** Index of the retried command in `checks`. */
+  check: number;
+  exitCode: number | null;
+  output?: string;
+  outputTruncated?: boolean;
+}
+export interface TargetCheck {
+  commit: string;
+  /** Commands run on the target so far, in order; the last one decides. */
+  checks: TriageCommand[];
+  /** null while running or when stopped by the time limit. */
+  passed: boolean | null;
+}
+/** A command run during triage; exitCode is null while it runs or once the time limit stopped it. */
+export interface TriageCommand {
+  argv: string[];
+  exitCode: number | null;
+  output?: string;
+  outputTruncated?: boolean;
+}
+export interface CheckHandback {
+  /** Automatic hand-backs of this result so far, including the one created now. */
+  returns: number;
+  limit: number;
+  /** The follow-up run created by this hand-back. */
+  runId: string | null;
+}
+/** Outcomes of failed-check triage, by kind. */
+export interface CheckTriageCounts {
+  /** Results whose failed command passed on its rerun. */
+  flaky: number;
+  targetFailed: number;
+  returned: number;
+  /** The limit of automatic hand-backs was reached. */
+  exhausted: number;
+  /** No saved session, a multi-stage run, switched off, or the hand-back could not be created. */
+  notReturned: number;
+  /** Time limit, restart or cancellation. */
+  stopped: number;
+}
+export interface CheckTriageSettings {
+  enabled: boolean;
+  /** The saved choice; null follows `defaultEnabled`. */
+  saved: boolean | null;
+  defaultEnabled: boolean;
+  timeLimitMinutes: number;
+  handbackLimit: number;
+  /** Since the database was created. */
+  counts: CheckTriageCounts;
 }
 export interface Comment {
   attachments?: Attachment[];
@@ -427,6 +536,8 @@ export interface AutopilotOverview extends AutopilotState {
   pool: Task[];
   /** Runs the autopilot started in the current or last session. */
   attempts: Run[];
+  /** Failed-check triage of the session's tasks, over every run of those tasks since the session started. */
+  triage: CheckTriageCounts;
 }
 
 export type DocBlockType = 'paragraph' | 'heading1' | 'heading2' | 'heading3' | 'bulleted' | 'numbered' | 'todo' | 'quote' | 'code' | 'divider'

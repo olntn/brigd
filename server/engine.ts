@@ -1,8 +1,9 @@
-import type { AutopilotInput, AutopilotOverview, AutopilotSettings, CliAccessMode, CliAccessSettings, ConcurrencyLimits, ConcurrencySettings, FollowupInput, Integration, Run, StorageCleanupResult, StorageOverview } from '../src/lib/types';
+import type { AutopilotInput, AutopilotOverview, AutopilotSettings, CheckTriageSettings, CliAccessMode, CliAccessSettings, ConcurrencyLimits, ConcurrencySettings, FollowupInput, Integration, Run, StorageCleanupResult, StorageOverview } from '../src/lib/types';
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
 import { DEFAULT_CONCURRENCY, isConcurrencyLimit } from '../src/lib/concurrency';
+import { CHECK_HANDBACK_LIMIT, CHECK_TRIAGE_TIME_LIMIT_MS, DEFAULT_CHECK_TRIAGE } from '../src/lib/check-triage';
 import { startAgent, buildPrompt, type AgentHandle, type AgentInput, type AgentCallbacks } from './adapter';
-import { AppError, INTEGRATION_RECHECK_LIMIT, Store, runFence, type RunFence } from './store';
+import { AppError, INTEGRATION_RECHECK_LIMIT, Store, awaitsHandback, runFence, type RunFence } from './store';
 import { ProtocolError, UsageLimitError, validateEnvelope, validateSessionId } from './protocol';
 import { workflowContext } from './workflows';
 import { runUltracode } from '../src/lib/workers';
@@ -21,7 +22,11 @@ export interface EngineOptions { workspaces?: WorkspaceProvider; integrator?: In
   /** Start-up limits (BRIGD_MAX_PARALLEL / BRIGD_MAX_PER_REPOSITORY); values saved in the settings win. */
   maxParallel?: number; maxPerRepository?: number;
   /** Hand every merge conflict to the built-in integrator without waiting for a click. */
-  autoReconcile?: boolean; }
+  autoReconcile?: boolean;
+  /** Triage failed merge checks when nothing is saved in the settings; DEFAULT_CHECK_TRIAGE by default. */
+  checkTriage?: boolean;
+  /** Reruns and the target check of one merge attempt together; CHECK_TRIAGE_TIME_LIMIT_MS by default. */
+  checkTriageTimeLimitMs?: number; }
 interface Launch { taskId: string; handle: AgentHandle | null; fence: RunFence; cancelRequested: boolean; bridge?: ReturnType<typeof createTaskBridge>; settled?: Promise<void>; }
 export class Engine {
   readonly codeDiffs: RunCodeDiffs;
@@ -38,6 +43,8 @@ export class Engine {
   private readonly defaultLimits: ConcurrencyLimits;
   private readonly integrator: Integrator;
   private readonly autoReconcile: boolean;
+  private readonly defaultCheckTriage: boolean;
+  private readonly checkTriageTimeLimitMs: number;
   private readonly environmentChecks?: string[][];
   private readonly configuredCliAccess: CliAccessMode;
   private readonly requiresIntegrationChecks: boolean;
@@ -53,7 +60,9 @@ export class Engine {
     this.requiresIntegrationChecks = !mock && this.workspaces instanceof GitWorkspaces;
     this.storage = this.workspaces instanceof GitWorkspaces ? new WorkspaceStorage(this.workspaces.root, store) : null;
     this.defaultLimits = { maxParallel: options.maxParallel ?? DEFAULT_CONCURRENCY.maxParallel, maxPerRepository: options.maxPerRepository ?? DEFAULT_CONCURRENCY.maxPerRepository };
-    this.integrator = options.integrator ?? new GitIntegrator(() => this.integrationChecks());
+    this.defaultCheckTriage = options.checkTriage ?? DEFAULT_CHECK_TRIAGE;
+    this.checkTriageTimeLimitMs = options.checkTriageTimeLimitMs ?? CHECK_TRIAGE_TIME_LIMIT_MS;
+    this.integrator = options.integrator ?? new GitIntegrator(() => this.integrationChecks(), { enabled: () => this.checkTriageEnabled(), timeLimitMs: this.checkTriageTimeLimitMs });
     this.autoReconcile = options.autoReconcile ?? true;
     if (!isConcurrencyLimit(this.defaultLimits.maxParallel)) throw new Error('Лимит процессов должен быть 1–32');
     if (!isConcurrencyLimit(this.defaultLimits.maxPerRepository)) throw new Error('Лимит агентов на репозиторий должен быть 1–32');
@@ -105,6 +114,21 @@ export class Engine {
     }
     this.store.setIntegrationChecks(input.integrationChecks);
     return this.getAutopilotSettings();
+  }
+  /** Read at each failure and each hand-back, so the switch applies to the next one without a restart. */
+  private checkTriageEnabled(): boolean {
+    return this.store.getCheckTriage() ?? this.defaultCheckTriage;
+  }
+  getCheckTriageSettings(): CheckTriageSettings {
+    const saved = this.store.getCheckTriage();
+    return { enabled: saved ?? this.defaultCheckTriage, saved, defaultEnabled: this.defaultCheckTriage, timeLimitMinutes: Math.round(this.checkTriageTimeLimitMs / 60_000),
+      handbackLimit: CHECK_HANDBACK_LIMIT, counts: this.store.checkTriageCounts() };
+  }
+  /** null returns to the service's default. A triage already running finishes; a later hand-back reads the new value. */
+  setCheckTriageSettings(input: { enabled: unknown }): CheckTriageSettings {
+    if (this.closing) throw new AppError('Сервис останавливается', 503);
+    this.store.setCheckTriage(input.enabled);
+    return this.getCheckTriageSettings();
   }
   storageOverview(): Promise<StorageOverview> {
     return this.storage ? this.storage.overview() : Promise.resolve({ ...UNAVAILABLE_STORAGE, scannedAt: clock() });
@@ -283,6 +307,8 @@ export class Engine {
           if (launch.cancelRequested || this.closing) { this.release(run, launch); return; }
           // A resumed integrator session keeps the merge it was already working in.
           if (run.trigger === 'reconcile' && run.turn === 1 && !run.sessionId) return this.prepareReconcile(run, launch);
+          // A hand-back resumes on the exact code that failed: the tested target commit is merged into the worktree first.
+          if (run.followup?.checkFailure && run.turn === 1) return this.prepareHandback(run, launch);
           this.codeDiffs.begin(this.store.getRun(run.id));
           const current = this.store.beginExecution(run.id, launch.fence);
           if (!current) { this.release(run, launch); return; }
@@ -344,6 +370,22 @@ export class Engine {
     }).immediate();
     this.release(run, launch);
   }
+  private async prepareHandback(run: Run, launch: Launch): Promise<void> {
+    const failure = run.followup!.checkFailure!;
+    let merged = false;
+    try { merged = (await this.integrator.prepareHandback?.(this.store.getRun(run.id), new AbortController().signal))?.merged ?? false; }
+    catch (error) {
+      this.store.failPreparation(run.id, launch.fence, (error instanceof Error ? error.message : String(error)).slice(0, 16_000), true);
+      this.release(run, launch); return;
+    }
+    if (launch.cancelRequested || this.closing) { this.release(run, launch); return; }
+    if (merged) this.store.log(run.taskId, run.id, { kind: 'lifecycle', summary: 'Проверенная целевая ветка объединена в worktree задачи',
+      details: [`Целевой коммит: ${failure.targetCommit}.`, 'Работник продолжит на том же коде, на котором упала проверка слияния.'] });
+    this.codeDiffs.begin(this.store.getRun(run.id));
+    const current = this.store.beginExecution(run.id, launch.fence);
+    if (!current) { this.release(run, launch); return; }
+    return this.invoke(current, launch);
+  }
   private autoReconcileConflict(job: Integration) {
     try {
       this.store.db.transaction(() => this.enqueue(this.store.startReconcile(job.runId))).immediate();
@@ -377,7 +419,11 @@ export class Engine {
               return null;
             });
           }
-          const finished = this.store.updateIntegration(job.id, job.attempt, result, true);
+          // The failed attempt and its hand-back are stored together: a restart never finds one without the other.
+          const finished = this.store.db.transaction(() => {
+            const stored = this.store.updateIntegration(job.id, job.attempt, result, true);
+            return awaitsHandback(stored) ? this.store.handBackFailedCheck(job.id, job.attempt, this.checkTriageEnabled()) : stored;
+          }).immediate();
           if (released) this.store.log(run.taskId, run.id, { kind: 'integration', ...released });
           if (finished?.status === 'conflict' && this.autoReconcile && !this.closing) this.autoReconcileConflict(finished);
         } finally { this.suspendedDrains--; }
@@ -422,6 +468,7 @@ export class Engine {
         ...(runUltracode(run) !== undefined ? { ultracode: runUltracode(run) } : {}),
         sessionId: run.sessionId ?? undefined, answer, mock: run.mock, ...(workflow ? { workflow } : {}),
         ...(run.followup ? { followup: { sourceRunId: run.followup.sourceRunId, sourceStepIndex: run.followup.sourceStepIndex, request: run.followup.request } } : {}),
+        ...(run.followup?.checkFailure ? { checkFailure: { ...run.followup.checkFailure, limit: CHECK_HANDBACK_LIMIT, checkCommands: this.integrationChecks() ?? run.workspace?.checkCommands ?? [] } } : {}),
         ...(run.reconcile ? { reconcile: { targetBranch: run.reconcile.targetBranch, targetCommit: run.reconcile.targetCommit, conflicts: run.reconcile.conflicts,
           checkCommands: this.integrationChecks() ?? run.workspace?.checkCommands ?? [], resultSummary: this.store.getRun(run.reconcile.sourceRunId).summary ?? '' } } : {}) };
       buildPrompt(input); // Enforce the complete UTF-8 bound before even a custom factory.

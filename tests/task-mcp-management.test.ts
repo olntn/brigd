@@ -272,6 +272,13 @@ describe('MCP app management through the shared HTTP controller', () => {
     expect(parse(await call(broker, 'get_concurrency_settings'))).toMatchObject({ maxPerRepository: 3, saved: { maxParallel: null, maxPerRepository: 3 } });
     expect((await call(broker, 'update_concurrency_settings', { data: { maxPerRepository: 33 }, idempotency_key: 'invalid-concurrency' })).isError).toBe(true);
     expect(store.getConcurrencyLimits().maxPerRepository).toBe(3);
+    expect(parse(await call(broker, 'get_check_triage_settings'))).toMatchObject({ enabled: true, saved: null, defaultEnabled: true, timeLimitMinutes: 30, handbackLimit: 3, counts: { flaky: 0, returned: 0 } });
+    await mutate(broker, 'update_check_triage_settings', { data: { enabled: false } });
+    expect(store.getCheckTriage()).toBe(false);
+    expect((await call(broker, 'update_check_triage_settings', { data: { enabled: 'off' }, idempotency_key: 'invalid-triage' })).isError).toBe(true);
+    expect(store.getCheckTriage()).toBe(false);
+    await mutate(broker, 'update_check_triage_settings', { data: { enabled: null } });
+    expect(parse(await call(broker, 'get_check_triage_settings'))).toMatchObject({ enabled: true, saved: null });
     await mutate(broker, 'update_integrator', { data: { mode: 'custom', provider: 'codex', communicationStyle: 'Resolve only the reported conflicts.' } });
     expect(parse(await call(broker, 'get_integrator'))).toMatchObject({ mode: 'custom', communicationStyle: 'Resolve only the reported conflicts.' });
     await mutate(broker, 'update_autopilot', { data: { enabled: true, until: null } });

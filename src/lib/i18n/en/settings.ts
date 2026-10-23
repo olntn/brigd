@@ -299,6 +299,26 @@ const dictionary: Dictionary = {
   'Автопилот.': 'Autopilot.',
   'Включите его на вкладке «Автопилот» с временем остановки. Там же памятка «Перед тем как уйти» и итоги сессии.':
     'Turn it on in the “Autopilot” tab with a stop time. The “Before you leave” checklist and the session summary are there too.',
+  // Failed merge check triage (CheckTriageSettings).
+  'Разбор упавших проверок': 'Failed check triage',
+  'Что brigd делает сам, когда команда проверки слияния завершилась с ненулевым кодом.': 'What brigd does on its own when a merge check command exits with a non-zero code.',
+  'Повторить загрузку настройки': 'Load the setting again',
+  'Загружаем настройку разбора…': 'Loading the triage setting…',
+  'Не удалось загрузить настройку разбора. Попробуйте ещё раз.': 'Could not load the triage setting. Try again.',
+  'Не удалось сохранить настройку. Попробуйте ещё раз.': 'Could not save the setting. Try again.',
+  'Восстановлено значение по умолчанию.': 'The default value is restored.',
+  'Разбор включён. Он применяется к следующей упавшей проверке.': 'Triage is on. It applies to the next failed check.',
+  'Разбор выключен. Упавшая проверка остаётся в карточке до решения человека.': 'Triage is off. A failed check stays on the card until a person decides.',
+  'Разбирать упавшие проверки автоматически': 'Triage failed checks automatically',
+  'Повтор: упавшая команда один раз запускается заново целиком в том же объединённом коде. Если она прошла, слияние продолжается, а карточка получает заметную пометку «Проверка прошла со второй попытки».': 'Rerun: the failed command runs once more in full on the same combined code. If it passes, the merge goes on and the card gets a visible “Check passed on the second attempt” mark.',
+  'Проверка целевой ветки: если повтор тоже упал, те же команды выполняются на текущей вершине целевой ветки в отдельной чистой папке. Если упало и там, задача не возвращается: сломана целевая ветка.': 'Target branch check: if the rerun fails too, the same commands run on the current tip of the target branch in a separate clean folder. If they fail there as well, the task is not handed back: the target branch is broken.',
+  'Возврат работнику: иначе brigd отправляет дополнительный запрос в сохранённую сессию работника с концом вывода проверки — не больше {limit} раз на один результат, затем решает человек.': 'Hand-back: otherwise brigd sends a follow-up with the end of the check output to the worker’s saved session — at most {limit} times per result, then a person decides.',
+  'Решения принимаются по кодам возврата, без модели. Разбор идёт в очереди слияния: пока он длится, новые агенты этого репозитория ждут. Повторы и проверка целевой ветки одной попытки вместе длятся не дольше {minutes} мин. Задачи с этапами автоматически не возвращаются.': 'Decisions follow exit codes alone, without a model. Triage runs in the merge queue: while it lasts, new agents of the repository wait. Reruns and the target branch check of one attempt take at most {minutes} min together. Multi-stage tasks are not handed back automatically.',
+  'Используется значение по умолчанию: {value}.': 'The default value is used: {value}.',
+  'включено': 'on',
+  'выключено': 'off',
+  'Всего: прошли со второй попытки — {flaky} · целевая ветка не проходит — {targetFailed} · возвращено работникам — {returned} · исчерпан лимит возвратов — {exhausted} · без возврата — {notReturned} · остановлено — {stopped}.': 'In total: passed on the second attempt — {flaky} · target branch fails — {targetFailed} · handed back to workers — {returned} · hand-back limit reached — {exhausted} · not handed back — {notReturned} · stopped — {stopped}.',
+  'Вернуть значение по умолчанию': 'Restore the default',
 };
 
 export default dictionary;
