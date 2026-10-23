@@ -60,7 +60,7 @@ function canonical(value: unknown): unknown {
 function summary(value: unknown): unknown {
   if (!record(value)) return value;
   const fields = ['id', 'taskId', 'runId', 'title', 'name', 'provider', 'modelId', 'model', 'label', 'enabled', 'archived', 'archivedAt',
-    'timeLimitMinutes', 'agentTimeLimitMinutes', 'integrationCheckTimeLimitMinutes', 'timeLimitExceeded', 'status', 'progress', 'trigger', 'schedule', 'paused', 'ultracode', 'priority', 'nextRunAt', 'startedAt', 'finishedAt', 'workerId', 'kind', 'createdAt', 'updatedAt',
+    'timeLimitMinutes', 'agentTimeLimitMinutes', 'integrationCheckTimeLimitMinutes', 'timeLimitExceeded', 'status', 'progress', 'usage', 'trigger', 'schedule', 'paused', 'ultracode', 'priority', 'nextRunAt', 'startedAt', 'finishedAt', 'workerId', 'kind', 'createdAt', 'updatedAt',
     'selected', 'autoUpdate', 'size', 'source', 'color', 'mode', 'defaultSchedule', 'defaultWorkerId', 'ok', 'accepted', 'action', 'parentId', 'position', 'snippet'];
   const result = Object.fromEntries(fields.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
   return Object.keys(result).length ? result : { updated: true };
@@ -145,7 +145,7 @@ export function createAppController(store: Store, context: AppToolContext, acces
       if (name === 'get_run') {
         const value = store.getRun(args.run_id as string);
         const details = (output: boolean) => ({ ...summary(value) as object, summary: value.summary, error: value.error, sessionId: value.sessionId,
-          currentStepIndex: value.currentStepIndex, step_count: value.steps.length,
+          currentStepIndex: value.currentStepIndex, step_count: value.steps.length, usage: value.usage ?? null, turns: store.turnUsage(value.id),
           steps: value.steps.map(step => ({ title: step.title, workerId: step.workerId, status: step.status, summary: step.summary, error: step.error })),
           integration: value.integration ? integrationDetails(value.integration, output) : null });
         let result: object = details(true);

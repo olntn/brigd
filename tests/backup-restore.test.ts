@@ -347,3 +347,26 @@ test('offline replacement leaves the existing database intact when the source is
   expect(existsSync(f.path)).toBe(true);
   expectNoTemporaryFiles(f);
 });
+
+test('restoring brings back the snapshot\'s turn usage, and a snapshot from before usage was recorded gains an empty table', async () => {
+  const f = fixture();
+  const { task } = await addTask(f, 'Measured', 'usage');
+  const run = f.store.startManual(task.id, true);
+  const record = (turn: number) => f.store.recordRunUsage({ runId: run.id, turn, stepIndex: null, attemptId: null, provider: 'codex', workerId: null, trigger: 'manual',
+    usage: { inputTokens: 100 * turn, outputTokens: 10, cachedTokens: null, costUsd: null }, durationMs: 1_000, startedAt: turn, finishedAt: turn + 1 });
+  record(1);
+  const withUsage = f.backups.create('with-usage.sqlite');
+  record(2);
+  await restoreBackup(f.backups, withUsage.id, f.runtime);
+  expect(f.store.turnUsage(run.id).map(entry => entry.inputTokens)).toEqual([100]);
+
+  const legacy = f.backups.create('legacy.sqlite');
+  const legacyPath = f.backups.download(legacy.id).path;
+  const db = new Database(legacyPath);
+  try { db.exec("DROP TABLE run_usage; DELETE FROM app_migrations WHERE name='run_usage_v1'"); } finally { db.close(); }
+  const uploaded = f.backups.upload(readFileSync(legacyPath), 'legacy-upload.sqlite');
+  await restoreBackup(f.backups, uploaded.id, f.runtime);
+  expect(f.store.turnUsage(run.id)).toEqual([]);
+  expect(f.store.getRun(run.id).usage).toBeUndefined();
+  expect(record(3)).toBe(true);
+});

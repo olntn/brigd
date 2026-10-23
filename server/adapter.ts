@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import type { Attachment, CliAccessMode, Effort, Envelope, InstructionSnapshot, Provider, RunCheckFailure, RunFollowup, RunReconcile, TaskLogInput, WorkspaceSnapshot } from '../src/lib/types';
+import type { Attachment, CliAccessMode, Effort, Envelope, InstructionSnapshot, Provider, RunCheckFailure, RunFollowup, RunReconcile, TaskLogInput, TokenUsage, WorkspaceSnapshot } from '../src/lib/types';
 import { CHECK_HANDBACK_OUTPUT_LIMIT } from '../src/lib/check-triage';
 import { effortOptions, normalizeModel } from '../src/lib/workers';
 import schema from './envelope.schema.json';
@@ -41,8 +41,11 @@ export interface AgentCallbacks {
   onLog?: (entry: TaskLogInput) => void;
   /** Demo agents report their stage directly; real CLIs call the set_progress task tool instead. */
   onProgress?: (status: string) => void;
+  /** Tokens and cost reported so far in this turn, so a turn that later fails or is cancelled keeps them. */
+  onUsage?: (usage: TokenUsage) => void;
 }
-export interface AgentOutcome { envelope: Envelope; sessionId: string }
+/** `usage` is absent when the CLI reported none; that never fails the turn. */
+export interface AgentOutcome { envelope: Envelope; sessionId: string; usage?: TokenUsage }
 export interface AgentHandle { result: Promise<AgentOutcome>; cancel: () => void }
 
 export class AgentRunError extends Error {
@@ -472,6 +475,22 @@ async function inspectCli(provider: Provider, binary: string, cwd: string, inspe
   return cached;
 }
 
+/**
+ * Plausible demo usage, stable for the same session and request so the interface can be checked in `dev:demo`.
+ * Claude Code reports tokens and cost, Codex tokens only; `[nousage]` imitates an older CLI that reports neither.
+ */
+export function mockUsage(provider: Provider, seed: string): TokenUsage {
+  let hash = 2166136261;
+  for (const character of seed) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619) >>> 0;
+  const next = () => { hash = Math.imul(hash ^ (hash >>> 15), 2246822519) >>> 0; return hash / 4294967296; };
+  const inputTokens = 8_000 + Math.round(next() * 180_000);
+  const cachedTokens = Math.round(inputTokens * (0.4 + next() * 0.5));
+  const outputTokens = 400 + Math.round(next() * 9_000);
+  // Roughly a mid-range model's rates per million tokens: fresh input 3 $, cached input 0.3 $, output 15 $.
+  const costUsd = provider === 'claude' ? Math.round(((inputTokens - cachedTokens) * 3 + cachedTokens * 0.3 + outputTokens * 15) / 1_000) / 1_000 : null;
+  return { inputTokens, outputTokens, cachedTokens, costUsd };
+}
+
 async function runMock(input: AgentInput, callbacks: AgentCallbacks, signal: AbortSignal): Promise<AgentOutcome> {
   if (input.sessionId && !input.sessionId.startsWith(`mock-${input.provider}-`)) {
     throw new ProtocolError('A real CLI session cannot be resumed in mock mode.');
@@ -497,19 +516,24 @@ async function runMock(input: AgentInput, callbacks: AgentCallbacks, signal: Abo
     if (signal.aborted) cancel();
   });
   const instruction = input.followup?.request ?? input.workflow?.instruction ?? input.instruction;
-  if (instruction.includes('[fail]')) throw new AgentRunError('MOCK_FAILURE', 'Mock: simulated CLI failure.');
+  const usage = instruction.includes('[nousage]') ? undefined : mockUsage(input.provider, `${sessionId}\n${input.answer ?? ''}\n${instruction}`);
+  // Like a real CLI, a failed turn has already spent its tokens; one refused for exhausted limits has not.
+  if (instruction.includes('[fail]')) {
+    if (usage) callbacks.onUsage?.(usage);
+    throw new AgentRunError('MOCK_FAILURE', 'Mock: simulated CLI failure.');
+  }
   // [limit] exhausts every provider; [limit:codex] or [limit:claude] only the named one, so a replacement worker can finish.
   const limit = /\[limit(?::(codex|claude))?\]/.exec(instruction);
   if (limit && (!limit[1] || limit[1] === input.provider)) throw new UsageLimitError(input.provider, `Mock: simulated ${input.provider === 'codex' ? 'Codex' : 'Claude Code'} usage limit.`);
-  if (instruction.includes('[blocked]') || (input.followup && instruction.includes('[block]'))) return {
-    sessionId, envelope: { status: 'blocked', summary: 'Mock: native tool approval is required. Task comments cannot approve it.', questions: [] },
-  };
-  if (instruction.includes('[ask]') && !input.answer?.trim()) return {
-    sessionId, envelope: { status: 'needs_input', summary: 'Mock: one detail is needed before continuing.', questions: ['Mock: what outcome should this task prioritize?'] },
-  };
-  return {
-    sessionId, envelope: { status: 'completed', summary: input.answer ? 'Mock: clarification received and the same session completed. No real work was performed.' : input.followup ? 'Mock: follow-up completed in the saved session. No real work was performed.' : 'Mock: simulated task completed. No real work was performed.', questions: [] },
-  };
+  if (usage) callbacks.onUsage?.(usage);
+  const outcome = (envelope: Envelope): AgentOutcome => ({ sessionId, envelope, ...(usage ? { usage } : {}) });
+  if (instruction.includes('[blocked]') || (input.followup && instruction.includes('[block]'))) {
+    return outcome({ status: 'blocked', summary: 'Mock: native tool approval is required. Task comments cannot approve it.', questions: [] });
+  }
+  if (instruction.includes('[ask]') && !input.answer?.trim()) {
+    return outcome({ status: 'needs_input', summary: 'Mock: one detail is needed before continuing.', questions: ['Mock: what outcome should this task prioritize?'] });
+  }
+  return outcome({ status: 'completed', summary: input.answer ? 'Mock: clarification received and the same session completed. No real work was performed.' : input.followup ? 'Mock: follow-up completed in the saved session. No real work was performed.' : 'Mock: simulated task completed. No real work was performed.', questions: [] });
 }
 
 export function startAgent(input: AgentInput, callbacks: AgentCallbacks): AgentHandle {

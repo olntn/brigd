@@ -77,7 +77,7 @@ describe('persistent independent model catalog migration', () => {
     expect(initial.map(selectedFields)).toEqual(expectedSeeds);
     expect(initial.every(model => /^[a-zA-Z0-9-]+$/.test(model.id) && model.createdAt > 0 && model.createdAt === model.updatedAt)).toBe(true);
     expect(new Set(initial.map(model => model.id)).size).toBe(6);
-    expect(store.db.query('SELECT name FROM app_migrations').all()).toEqual([{ name: 'model_catalog_v1' }]);
+    expect(store.db.query("SELECT name FROM app_migrations WHERE name LIKE 'model_catalog%'").all()).toEqual([{ name: 'model_catalog_v1' }]);
     expect(store.db.query('PRAGMA foreign_key_list(model_catalog)').all()).toEqual([]);
     for (const table of ['workers', 'tasks', 'runs']) {
       expect((store.db.query(`PRAGMA foreign_key_list(${table})`).all() as { table: string }[]).some(row => row.table === 'model_catalog')).toBe(false);

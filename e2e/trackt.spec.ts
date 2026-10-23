@@ -41,10 +41,16 @@ test('create, note, clarify, resume exact session, history and reload', async ({
   await expect(drawer.locator('.drawer-badges').getByText('Завершено', { exact: true })).toBeVisible();
   await drawer.getByRole('tab', { name: /Запуски/ }).click();
   await expect(drawer.locator('.run-entry')).toHaveCount(1);
-  await expect(drawer.getByText('Ход 2', { exact: false })).toBeVisible();
+  await expect(drawer.locator('.run-details').getByText('Ход 2', { exact: false })).toBeVisible();
+  // The demo agent reports usage: one line per turn and the run total.
+  const usage = drawer.getByLabel('Расход запуска', { exact: true });
+  await expect(usage.locator('p')).toHaveCount(3);
+  await expect(usage.locator('p').first()).toContainText(/^Ход 1:.*токенов · \d+ (сек\.|мин)/);
+  await expect(usage.locator('p').last()).toContainText('Всего за запуск');
   const detail = await (await request.get(`/api/tasks/${task.id}`)).json();
   expect(detail.runs[0].sessionId).toBe(originalSession);
   expect(detail.runs[0].turn).toBe(2);
+  expect(detail.runs[0].usage).toMatchObject({ turns: 2, pricedTurns: 0, costUsd: null });
   await page.keyboard.press('Escape');
   await expect(drawer).not.toBeVisible();
   await page.getByLabel('Поиск задач', { exact: true }).fill(title);

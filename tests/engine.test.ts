@@ -864,3 +864,82 @@ describe('timed turns', () => {
     expect(store.getTask(tasks[3]!.id).latestRun).toBeNull();
   });
 });
+
+describe('turn usage', () => {
+  const usage = { inputTokens: 194_496, outputTokens: 5_321, cachedTokens: 184_220, costUsd: 0.4213 };
+
+  test('a completed turn records the reported tokens and cost, the measured duration, provider, worker and trigger', async () => {
+    const worker = store.createWorker({ name: 'Reviewer', provider: 'claude', avatarUrl: null, effort: 'default', communicationStyle: '' });
+    const task = store.createTask(input(folder, { provider: 'claude', workerId: worker.id }));
+    const run = engine.start(task.id);
+    agent.calls[0]!.resolve({ ...outcome(), usage });
+    await flush();
+    expect(store.getRun(run.id).status).toBe('completed');
+    const [recorded] = store.turnUsage(run.id);
+    expect(recorded).toMatchObject({ runId: run.id, turn: 1, stepIndex: null, attemptId: null, provider: 'claude', workerId: worker.id, trigger: 'manual', ...usage });
+    expect(recorded!.durationMs).toBeGreaterThanOrEqual(0);
+    expect(recorded!.finishedAt).toBeGreaterThanOrEqual(recorded!.startedAt);
+    expect(store.detail(task.id).runs[0]).toMatchObject({ usage: { turns: 1, pricedTurns: 1, ...usage }, turnUsage: [recorded] });
+  });
+
+  test('a turn without usage, as from an older CLI, still completes and records only its duration', async () => {
+    const task = store.createTask(input(folder));
+    const run = engine.start(task.id);
+    agent.calls[0]!.resolve(outcome());
+    await flush();
+    expect(store.getRun(run.id)).toMatchObject({ status: 'completed', error: null });
+    expect(store.turnUsage(run.id)).toEqual([expect.objectContaining({ provider: 'codex', inputTokens: null, outputTokens: null, cachedTokens: null, costUsd: null })]);
+  });
+
+  test('failed and cancelled turns keep the usage they reported before ending', async () => {
+    const failing = store.createTask(input(folder, { title: 'Failing' }));
+    const failed = engine.start(failing.id);
+    agent.calls[0]!.callbacks.onUsage!({ ...usage, costUsd: null });
+    agent.calls[0]!.reject(new ProtocolError('The CLI reported a failed turn. No successful result was accepted.'));
+    await flush();
+    expect(store.getRun(failed.id).status).toBe('failed');
+    expect(store.turnUsage(failed.id)).toEqual([expect.objectContaining({ inputTokens: usage.inputTokens, costUsd: null })]);
+
+    const cancelling = store.createTask(input(folder, { title: 'Cancelled' }));
+    const cancelled = engine.start(cancelling.id);
+    agent.calls[1]!.callbacks.onUsage!(usage);
+    engine.cancel(cancelled.id);
+    await flush();
+    expect(store.getRun(cancelled.id).status).toBe('cancelled');
+    expect(store.turnUsage(cancelled.id)).toEqual([expect.objectContaining(usage)]);
+  });
+
+  test('the final outcome wins over an earlier report, once per turn, across workflow steps and their attempts', async () => {
+    const worker = store.createWorker({ name: 'Reviewer', provider: 'codex', avatarUrl: null, effort: 'default', communicationStyle: '' });
+    const task = store.createTask(input(folder, { steps: [
+      { workerId: worker.id, title: 'First', instruction: 'Review first.' },
+      { workerId: worker.id, title: 'Second', instruction: 'Review second.' },
+    ] }));
+    const run = engine.start(task.id);
+    agent.calls[0]!.reject(new Error('Attempt failed'));
+    await flush();
+    engine.retry(run.id);
+    agent.calls[1]!.callbacks.onUsage!({ inputTokens: 1, outputTokens: 1, cachedTokens: null, costUsd: null });
+    agent.calls[1]!.resolve({ ...outcome(), usage: { inputTokens: 100, outputTokens: 10, cachedTokens: 40, costUsd: null } });
+    await flush();
+    agent.calls[2]!.resolve({ ...outcome('completed', 'second-step-session'), usage: { inputTokens: 200, outputTokens: 20, cachedTokens: 0, costUsd: null } });
+    await flush();
+    const steps = store.getRun(run.id).steps;
+    expect(store.turnUsage(run.id).map(entry => [entry.turn, entry.stepIndex, entry.attemptId, entry.inputTokens])).toEqual([
+      [1, 0, steps[0]!.attempts[0]!.id, null], [2, 0, steps[0]!.attempts[1]!.id, 100], [3, 1, steps[1]!.attempts[0]!.id, 200],
+    ]);
+    expect(store.getRun(run.id).usage).toMatchObject({ turns: 3, inputTokens: 300, outputTokens: 30, costUsd: null });
+  });
+
+  test('demo mode records plausible usage for the interface', async () => {
+    await engine.shutdown();
+    engine = new Engine(store, true);
+    const task = store.createTask(input(folder, { provider: 'claude', instruction: 'Demo usage [delay:1]' }));
+    const run = engine.start(task.id);
+    const deadline = performance.now() + 5_000;
+    while (store.getRun(run.id).status !== 'completed' && performance.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    expect(store.getRun(run.id).usage).toMatchObject({ turns: 1, pricedTurns: 1 });
+    expect(store.getRun(run.id).usage!.inputTokens).toBeGreaterThan(0);
+    expect(store.getRun(run.id).usage!.costUsd).toBeGreaterThan(0);
+  });
+});

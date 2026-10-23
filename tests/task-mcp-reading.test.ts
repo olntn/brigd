@@ -8,6 +8,7 @@ import sharp from 'sharp';
 import { prepareAttachment } from '../server/attachments';
 import { Store, runFence } from '../server/store';
 import { createTaskBridge, createTaskBroker, type TaskBroker } from '../server/task-mcp';
+import { createAppController } from '../server/task-mcp-app';
 import { MAX_TASK_RESULT_BYTES, TASK_MCP_TOOLS, type TaskToolResult } from '../server/task-mcp-protocol';
 import type { Attachment, Comment, Run, TaskInput } from '../src/lib/types';
 
@@ -274,5 +275,27 @@ describe('official SDK comment reading over stdio', () => {
     } finally {
       await client.close();
     }
+  });
+});
+
+describe('run usage through MCP get_run', () => {
+  test('get_run reports the run\'s sum and every turn, with null where the CLI said nothing', async () => {
+    const task = store.createTask(taskInput());
+    const run = store.startManual(task.id, false);
+    const record = (turn: number, provider: 'codex' | 'claude', usage: Parameters<Store['recordRunUsage']>[0]['usage']) => store.recordRunUsage({
+      runId: run.id, turn, stepIndex: null, attemptId: null, provider, workerId: null, trigger: 'manual', usage, durationMs: 1_000 * turn, startedAt: turn, finishedAt: turn + 1 });
+    const app = createAppController(store, { taskDefaults: () => ({ cwd: directory, provider: 'codex' }), beginOperation: () => { throw new Error('read only'); }, finishOperation: () => {} }, undefined, () => true, () => {});
+    expect(parse(await app.execute('get_run', { run_id: run.id }))).toMatchObject({ usage: null, turns: [] });
+    record(1, 'codex', { inputTokens: 24_763, outputTokens: 122, cachedTokens: 24_448, costUsd: null });
+    record(2, 'claude', { inputTokens: 194_496, outputTokens: 5_321, cachedTokens: 184_220, costUsd: 0.4213 });
+    record(3, 'claude', null);
+    const value = parse(await app.execute('get_run', { run_id: run.id }));
+    expect(value.usage).toEqual({ turns: 3, pricedTurns: 1, inputTokens: 219_259, outputTokens: 5_443, cachedTokens: 208_668, costUsd: 0.4213, durationMs: 6_000 });
+    expect(value.turns.map((turn: { provider: string; costUsd: number | null; inputTokens: number | null; durationMs: number }) => [turn.provider, turn.costUsd, turn.inputTokens, turn.durationMs]))
+      .toEqual([['codex', null, 24_763, 1_000], ['claude', 0.4213, 194_496, 2_000], ['claude', null, null, 3_000]]);
+    // Run lists carry the sum only.
+    const listed = parse(await app.execute('list_runs', { task_id: task.id }));
+    expect(listed.items[0]).toMatchObject({ id: run.id, usage: { turns: 3 } });
+    expect(listed.items[0].turns).toBeUndefined();
   });
 });

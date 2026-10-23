@@ -2,7 +2,7 @@ import type { Database } from 'bun:sqlite';
 import { readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CheckTriage, CheckTriageCounts, CheckTriageOutcome, CliAccessMode, Comment, ConcurrencySettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunCheckFailure, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
+import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CheckTriage, CheckTriageCounts, CheckTriageOutcome, CliAccessMode, Comment, ConcurrencySettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunCheckFailure, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, TokenUsage, TurnUsage, UsageTotals, Worker, WorkerInput, WorkerSnapshot, WorkerUsageOverview, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
 import type { IntegrationRecord, WorkspaceRun } from './workspace-storage';
 import { clock } from './clock';
@@ -269,6 +269,27 @@ export function nextOccurrence(due: number, intervalMinutes: number, now: number
   const latest = due + Math.max(0, Math.floor((now - due) / interval)) * interval;
   return { latest, next: latest + interval };
 }
+
+/** Sums over `run_usage u`; SUM keeps NULL when no turn reported a value. */
+const USAGE_TOTALS = `count(*) AS turns, count(u.cost_usd) AS priced_turns, SUM(u.input_tokens) AS input_tokens, SUM(u.output_tokens) AS output_tokens,
+  SUM(u.cached_tokens) AS cached_tokens, SUM(u.cost_usd) AS cost_usd, COALESCE(SUM(u.duration_ms),0) AS duration_ms`;
+/** Floating sums of cents drift; a millionth of a dollar is finer than any CLI reports. */
+const roundCost = (value: number | null): number | null => value === null ? null : Math.round(value * 1e6) / 1e6;
+function usageTotals(row: Row | null): UsageTotals | null {
+  if (!row?.turns) return null;
+  return { turns: row.turns, pricedTurns: row.priced_turns, inputTokens: row.input_tokens ?? null, outputTokens: row.output_tokens ?? null,
+    cachedTokens: row.cached_tokens ?? null, costUsd: roundCost(row.cost_usd ?? null), durationMs: row.duration_ms };
+}
+function mapTurnUsage(row: Row): TurnUsage {
+  return { runId: row.run_id, turn: row.turn, stepIndex: row.step_index ?? null, attemptId: row.attempt_id ?? null, provider: row.provider,
+    workerId: row.worker_id ?? null, trigger: row.trigger, inputTokens: row.input_tokens ?? null, outputTokens: row.output_tokens ?? null,
+    cachedTokens: row.cached_tokens ?? null, costUsd: roundCost(row.cost_usd ?? null), durationMs: row.duration_ms, startedAt: row.started_at, finishedAt: row.finished_at };
+}
+const RUN_TRIGGERS: readonly Run['trigger'][] = ['manual', 'schedule', 'followup', 'reconcile', 'autopilot'];
+/** A count the CLI reported, or null: an implausible value is dropped rather than failing the turn. */
+const storedCount = (value: unknown): number | null => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+/** How far back the worker card's recent usage reaches. */
+export const RECENT_USAGE_MS = 30 * 24 * 60 * 60_000;
 
 export class Store {
   readonly db: Database;
@@ -548,6 +569,24 @@ export class Store {
     // Upgrade the occupancy index without leaving an unguarded migration window.
     this.db.transaction(() => {
       this.db.exec(`DROP INDEX IF EXISTS one_open_run; CREATE UNIQUE INDEX one_open_run ON runs(task_id) WHERE ${OCCUPIED}`);
+    }).immediate();
+    // One row per agent turn: tokens and cost the CLI reported, NULL where it reported none, and the measured duration.
+    // Deleting a task detaches its rows (run_id NULL) instead of removing them, so worker totals keep the spending.
+    this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS run_usage (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+          turn INTEGER NOT NULL CHECK(turn>=1), step_index INTEGER CHECK(step_index>=0), attempt_id TEXT,
+          provider TEXT NOT NULL CHECK(provider IN ('codex','claude')), worker_id TEXT, trigger TEXT NOT NULL,
+          input_tokens INTEGER CHECK(input_tokens>=0), output_tokens INTEGER CHECK(output_tokens>=0),
+          cached_tokens INTEGER CHECK(cached_tokens>=0), cost_usd REAL CHECK(cost_usd>=0),
+          duration_ms INTEGER NOT NULL CHECK(duration_ms>=0), started_at INTEGER NOT NULL, finished_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS run_usage_by_run ON run_usage(run_id,seq);
+        CREATE INDEX IF NOT EXISTS run_usage_by_worker ON run_usage(worker_id,finished_at);
+        CREATE INDEX IF NOT EXISTS run_usage_by_start ON run_usage(started_at);
+      `);
+      this.db.query('INSERT OR IGNORE INTO app_migrations (name,applied_at) VALUES (?,?)').run('run_usage_v1', clock());
     }).immediate();
     // Every later write on this connection, from any module, advances the revision.
     db.onWrite = scopes => this.changed(...scopes);
@@ -1324,7 +1363,7 @@ export class Store {
   autopilotOverview(): AutopilotOverview {
     const state = this.getAutopilot();
     return { ...state, pool: this.autopilotPool(state.enabled ? state.startedAt : null).map(task => ({ ...task, latestRun: withoutCheckOutput(task.latestRun) })),
-      attempts: this.autopilotAttempts(state.startedAt).map(run => withoutCheckOutput(run)), triage: this.autopilotTriage(state.startedAt) };
+      attempts: this.autopilotAttempts(state.startedAt).map(run => withoutCheckOutput(run)), triage: this.autopilotTriage(state.startedAt), usage: this.autopilotUsage(state) };
   }
   /** Every merge of the session's tasks counts, hand-backs and integrator runs included: their triage is part of the same task. */
   private autopilotTriage(sessionStart: number | null): CheckTriageCounts {
@@ -1641,7 +1680,8 @@ export class Store {
     const followup = followupSnapshot(row, worker as WorkerSnapshot | null);
     const reconcile = reconcileSnapshot(row, worker as WorkerSnapshot | null);
     const workspace = row.workspace_id ? this.getWorkspace(row.workspace_id) : null;
-    return { timeLimitExceeded: row.status === 'failed' && row.time_limit_minutes != null && row.error === agentTimeoutMessage(row.time_limit_minutes), integration: this.integrationForRun(row.id), workspace, followup, reconcile, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, ultracode: readFlag(row.ultracode), timeLimitMinutes: validateTimeLimitMinutes(row.time_limit_minutes), fallbackTurn: row.fallback_turn ?? null,
+    const usage = this.runUsage(row.id);
+    return { ...(usage ? { usage } : {}), timeLimitExceeded: row.status === 'failed' && row.time_limit_minutes != null && row.error === agentTimeoutMessage(row.time_limit_minutes), integration: this.integrationForRun(row.id), workspace, followup, reconcile, inputAttachments: this.inputAttachments(row.id, row.turn), steps, currentStepIndex: row.current_step_index ?? null, id: row.id, taskId: row.task_id, instructions: JSON.parse(row.instructions_snapshot ?? '[]') as InstructionSnapshot[], workerId: row.worker_id ?? null, worker: worker as WorkerSnapshot | null, ultracode: readFlag(row.ultracode), timeLimitMinutes: validateTimeLimitMinutes(row.time_limit_minutes), fallbackTurn: row.fallback_turn ?? null,
       progress: row.status === 'running' && row.progress_turn === row.turn && typeof row.progress === 'string' ? { text: row.progress, updatedAt: row.progress_at } : null, provider: row.provider, cwd: row.cwd, instruction: row.instruction,
       trigger: row.trigger, scheduledFor: row.scheduled_for, status: row.status, sessionId: row.session_id,
       startedAt: row.started_at, updatedAt: row.updated_at, finishedAt: row.finished_at, summary: row.summary,
@@ -1751,6 +1791,8 @@ export class Store {
       `DELETE FROM run_code_diffs WHERE run_id IN (${runs})`,
       `DELETE FROM task_logs WHERE task_id=?1 OR run_id IN (${runs})`,
       `DELETE FROM comments WHERE task_id=?1 OR run_id IN (${runs})`,
+      // Spending stays in the worker totals without its task.
+      `UPDATE run_usage SET run_id=NULL WHERE run_id IN (${runs})`,
       'DELETE FROM runs WHERE task_id=?1',
       'DELETE FROM tasks WHERE id=?1',
     ]) this.db.query(statement).run(id);
@@ -1766,7 +1808,13 @@ export class Store {
     return row ? this.mapRun(row) : null;
   }
   detail(id: string): TaskDetail {
-    return { task: this.getTask(id), attachments: this.listTaskAttachments(id), runs: (this.db.query('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC').all(id) as Row[]).map(r => this.mapRun(r)),
+    const turns = new Map<string, TurnUsage[]>();
+    for (const row of this.db.query('SELECT u.* FROM run_usage u JOIN runs r ON r.id=u.run_id WHERE r.task_id=? ORDER BY u.seq').all(id) as Row[]) {
+      const turn = mapTurnUsage(row);
+      turns.set(turn.runId, [...turns.get(turn.runId) ?? [], turn]);
+    }
+    return { task: this.getTask(id), attachments: this.listTaskAttachments(id), runs: (this.db.query('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC').all(id) as Row[])
+      .map(r => this.mapRun(r)).map(run => turns.has(run.id) ? { ...run, turnUsage: turns.get(run.id)! } : run),
       logs: (this.db.query('SELECT * FROM task_logs WHERE task_id = ? ORDER BY seq').all(id) as Row[]).map(row => ({
         id: row.id, taskId: row.task_id, runId: row.run_id, stepIndex: row.step_index, kind: row.kind,
         summary: row.summary, details: JSON.parse(row.details), ...(row.error ? { error: row.error } : {}), createdAt: row.created_at,
@@ -1860,6 +1908,44 @@ export class Store {
       bound.forEach((attachmentId, position) => this.db.query('INSERT INTO comment_attachment_links(comment_id,attachment_id,position) VALUES (?,?,?)').run(id, attachmentId, position));
       return this.mapComment(this.db.query('SELECT * FROM comments WHERE id=?').get(id) as Row);
     }).immediate();
+  }
+  /**
+   * Records one ended agent turn, whatever its outcome. Tokens and cost the CLI did not report stay NULL, so a turn of an
+   * older CLI keeps only its measured duration. Returns false when the run no longer exists, for example after a restore.
+   */
+  recordRunUsage(entry: Omit<TurnUsage, keyof TokenUsage> & { usage: TokenUsage | null }): boolean {
+    const usage = entry.usage;
+    if (!Number.isSafeInteger(entry.turn) || entry.turn < 1 || (entry.stepIndex !== null && (!Number.isSafeInteger(entry.stepIndex) || entry.stepIndex < 0)) ||
+        (entry.provider !== 'codex' && entry.provider !== 'claude') || !RUN_TRIGGERS.includes(entry.trigger)) throw new Error('Invalid turn usage record.');
+    const cost = typeof usage?.costUsd === 'number' && Number.isFinite(usage.costUsd) && usage.costUsd >= 0 ? usage.costUsd : null;
+    const time = (value: number) => Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+    const result = this.db.query(`INSERT INTO run_usage (run_id,turn,step_index,attempt_id,provider,worker_id,trigger,input_tokens,output_tokens,cached_tokens,cost_usd,duration_ms,started_at,finished_at)
+      SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14 WHERE EXISTS(SELECT 1 FROM runs WHERE id=?1)`)
+      .run(entry.runId, entry.turn, entry.stepIndex, entry.attemptId, entry.provider, entry.workerId, entry.trigger,
+        storedCount(usage?.inputTokens), storedCount(usage?.outputTokens), storedCount(usage?.cachedTokens), cost,
+        time(entry.durationMs), time(entry.startedAt), time(entry.finishedAt));
+    return result.changes > 0;
+  }
+  /** Every recorded turn of a run, oldest first. */
+  turnUsage(runId: string): TurnUsage[] {
+    return (this.db.query('SELECT * FROM run_usage WHERE run_id=? ORDER BY seq').all(runId) as Row[]).map(mapTurnUsage);
+  }
+  private runUsage(runId: string): UsageTotals | null {
+    return usageTotals(this.db.query(`SELECT ${USAGE_TOTALS} FROM run_usage u WHERE u.run_id=?`).get(runId) as Row);
+  }
+  /** The session's tasks as its report counts them, hand-backs and integrator runs included, up to the moment it stopped. */
+  private autopilotUsage(state: AutopilotState): UsageTotals | null {
+    if (state.startedAt === null) return null;
+    return usageTotals(this.db.query(`SELECT ${USAGE_TOTALS} FROM run_usage u JOIN runs r ON r.id=u.run_id WHERE r.started_at>=?1 AND (?2 IS NULL OR u.started_at<=?2)
+      AND r.task_id IN (SELECT task_id FROM runs WHERE trigger='autopilot' AND started_at>=?1)`).get(state.startedAt, state.enabled ? null : state.stoppedAt) as Row);
+  }
+  /** Per worker, over the last 30 days and all time; turns of deleted tasks still count. */
+  workerUsage(now = clock()): WorkerUsageOverview {
+    const recentSince = now - RECENT_USAGE_MS;
+    const totals = (where: string, ...params: number[]) => new Map((this.db.query(`SELECT u.worker_id, ${USAGE_TOTALS} FROM run_usage u
+      WHERE u.worker_id IS NOT NULL ${where} GROUP BY u.worker_id`).all(...params) as Row[]).map(row => [row.worker_id as string, usageTotals(row)!]));
+    const recent = totals('AND u.finished_at>=?', recentSince);
+    return { recentSince, workers: [...totals('')].map(([workerId, total]) => ({ workerId, recent: recent.get(workerId) ?? null, total })) };
   }
   log(taskId: string, runId: string | null, entry: TaskLogInput, now = clock(), stepIndex?: number | null): TaskLog {
     this.getTask(taskId);
