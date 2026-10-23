@@ -1111,7 +1111,7 @@
     <nav class="main-nav" aria-label={t('Задачи')}>
       <button class:active={page === 'tasks'} aria-label={t('Задачи')} onclick={() => { page = 'tasks'; resetFilters(); }}><Icon name="board" /><span>{t('Задачи')}</span></button>
       <button class:active={page === 'autopilot'} aria-label={t('Автопилот')} aria-describedby="autopilot-nav-status" title={t('Автопилот: {status}', { status: autopilotStatusLabel.toLowerCase() })} onclick={() => { page = 'autopilot'; }}>
-        <Icon name="moon" /><span class="autopilot-nav-label"><span>{t('Автопилот')}</span><span id="autopilot-nav-status" class="autopilot-nav-status" class:is-enabled={autopilotEnabled === true} class:is-unknown={autopilotEnabled === null}><span class="autopilot-nav-dot" aria-hidden="true"></span>{autopilotStatusLabel}</span></span>
+        <Icon name="moon" /><span class="autopilot-nav-label"><span>{t('Автопилот')}</span><span class="autopilot-nav-status" class:is-enabled={autopilotEnabled === true} class:is-unknown={autopilotEnabled === null} aria-hidden="true"></span></span><span id="autopilot-nav-status" class="sr-only">{autopilotStatusLabel}</span>
       </button>
       <button class:active={page === 'workers'} aria-label={t('Работники')} onclick={() => { page = 'workers'; void loadWorkers(); }}><Icon name="spark" /><span>{t('Работники')}</span></button>
       <button class:active={page === 'instructions'} aria-label={t('Инструкции')} onclick={() => { page = 'instructions'; }}><Icon name="list" /><span>{t('Инструкции')}</span></button>

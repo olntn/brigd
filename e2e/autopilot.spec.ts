@@ -22,24 +22,26 @@ test.beforeEach(async ({ page, request }) => {
 test('navigation shows autopilot changes on other pages and after reloading', async ({ page, request }) => {
   const navigation = page.getByRole('button', { name: 'Автопилот', exact: true });
   const badge = navigation.locator('.autopilot-nav-status');
-  await expect(badge).toHaveText('Выключен');
+  await expect(badge).toBeVisible();
+  await expect(badge).toBeEmpty();
+  await expect(badge).not.toHaveClass(/is-enabled|is-unknown/);
   await expect(navigation).toHaveAccessibleDescription('Выключен');
   await expect(navigation).not.toHaveClass(/active/);
 
   expect((await request.patch('/api/autopilot', { headers: origin, data: { enabled: true, until: null } })).ok()).toBe(true);
-  await expect(badge).toHaveText('Включён');
   await expect(badge).toHaveClass(/is-enabled/);
   await expect(navigation).toHaveAccessibleDescription('Включён');
 
   await page.getByRole('button', { name: 'Работники', exact: true }).click();
   expect((await request.patch('/api/autopilot', { headers: origin, data: { enabled: false, until: null } })).ok()).toBe(true);
-  await expect(badge).toHaveText('Выключен');
+  await expect(navigation).toHaveAccessibleDescription('Выключен');
   await expect(badge).not.toHaveClass(/is-enabled/);
 
   // Opening the application while already enabled must show the saved state.
   expect((await request.patch('/api/autopilot', { headers: origin, data: { enabled: true, until: null } })).ok()).toBe(true);
   await page.reload();
-  await expect(badge).toHaveText('Включён');
+  await expect(navigation).toHaveAccessibleDescription('Включён');
+  await expect(badge).toHaveClass(/is-enabled/);
   await expect(navigation).not.toHaveClass(/active/);
   await page.setViewportSize({ width: 360, height: 800 });
   await expect(badge).toBeVisible();
@@ -65,20 +67,20 @@ test('navigation distinguishes loading and unavailable status and recovers', asy
   await page.reload();
   const navigation = page.getByRole('button', { name: 'Автопилот', exact: true });
   const badge = navigation.locator('.autopilot-nav-status');
-  await expect(badge).toHaveText('Загрузка…');
+  await expect(navigation).toHaveAccessibleDescription('Загрузка…');
   release();
-  await expect(badge).toHaveText('Неизвестно');
+  await expect(navigation).toHaveAccessibleDescription('Неизвестно');
   await expect(badge).toHaveClass(/is-unknown/);
 
   unavailable = false;
-  await expect(badge).toHaveText('Выключен');
+  await expect(navigation).toHaveAccessibleDescription('Выключен');
   await expect(badge).not.toHaveClass(/is-unknown/);
   await navigation.click();
   await expect(page.getByRole('region', { name: 'Состояние автопилота' })).toBeVisible();
   unavailable = true;
-  await expect(badge).toHaveText('Неизвестно');
+  await expect(navigation).toHaveAccessibleDescription('Неизвестно');
   unavailable = false;
-  await expect(badge).toHaveText('Выключен');
+  await expect(navigation).toHaveAccessibleDescription('Выключен');
 });
 
 test('autopilot tab shows the queue, starts pool tasks once enabled and reports the session', async ({ page, request }) => {
