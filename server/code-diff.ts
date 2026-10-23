@@ -6,15 +6,15 @@ import type { Run } from '../src/lib/types';
 import { artifact, ARTIFACT_PATHSPECS } from './integration';
 import type { Store } from './store';
 
-const FILE_BYTES = 256 * 1024;
-const SNAPSHOT_BYTES = 2 * 1024 * 1024;
-const PATH_LIMIT = 200;
-const FILE_LIMIT = 100;
-const PATCH_BYTES = 64 * 1024;
-const DIFF_BYTES = 512 * 1024;
-const GIT_BYTES = 2 * 1024 * 1024;
+// Safety bounds only: ordinary code changes, including lock files, are shown in full.
+const FILE_BYTES = 4 * 1024 * 1024;
+const SNAPSHOT_BYTES = 32 * 1024 * 1024;
+const PATH_LIMIT = 1000;
+const DIFF_BYTES = 16 * 1024 * 1024;
+const GIT_BYTES = SNAPSHOT_BYTES + 16 * 1024 * 1024;
 const ACTIVE = new Set(['preparing', 'running', 'cancelling']);
 interface Version { mode: string; data: string | null; binary: boolean; omitted: boolean; }
+// truncated: some changed paths were not captured. Omitted contents are marked per file.
 interface Snapshot { commit: string; dirty: Record<string, Version | null>; truncated: boolean; }
 interface SavedDiff { baseline: string | null; result: string | null; }
 class DiffError extends Error {}
@@ -23,9 +23,9 @@ class DiffError extends Error {}
 // Clear ambient Git path/config overrides so -C always addresses the saved worktree.
 const gitEnvironment = () => ({ ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
   GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' });
-function git(cwd: string, args: string[], diff = false): Buffer {
+function git(cwd: string, args: string[], diff = false, input?: string): Buffer {
   const child = Bun.spawnSync(['git', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-C', cwd, ...args],
-    { env: gitEnvironment(), stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', timeout: 5_000, maxBuffer: GIT_BYTES });
+    { env: gitEnvironment(), stdin: input === undefined ? 'ignore' : Buffer.from(input), stdout: 'pipe', stderr: 'pipe', timeout: 5_000, maxBuffer: GIT_BYTES });
   if (child.exitCode !== 0 && !(diff && child.exitCode === 1)) throw new DiffError('Git не смог прочитать изменения рабочей папки.');
   return Buffer.from(child.stdout);
 }
@@ -86,7 +86,7 @@ function snapshot(root: string, initial = false): Snapshot {
   for (const path of [...changed].sort().slice(0, PATH_LIMIT)) dirty[path] = workFile(root, path, budget);
   const omitted = Object.values(dirty).some(value => value?.omitted);
   if (initial && omitted) throw new DiffError('Исходные несохранённые файлы слишком велики для точного снимка изменений запуска.');
-  return { commit, dirty, truncated: changed.size > PATH_LIMIT || omitted };
+  return { commit, dirty, truncated: changed.size > PATH_LIMIT };
 }
 interface TreeEntry { mode: string; object: string; }
 function treeEntries(root: string, commit: string, changed: string[]) {
@@ -100,32 +100,67 @@ function treeEntries(root: string, commit: string, changed: string[]) {
   }
   return result;
 }
-function treeFile(root: string, value: TreeEntry | undefined, budget: { bytes: number }): Version | null {
-  if (!value) return null;
-  if (value.mode === '160000') return { mode: value.mode, data: Buffer.from(value.object + '\n').toString('base64'), binary: false, omitted: false };
-  const size = Number(textGit(root, ['cat-file', '-s', value.object]));
-  if (size > FILE_BYTES || budget.bytes + size > SNAPSHOT_BYTES) return { mode: value.mode, data: null, binary: false, omitted: true };
-  const data = git(root, ['cat-file', 'blob', value.object]);
-  budget.bytes += data.length;
-  return { mode: value.mode, data: data.toString('base64'), binary: data.includes(0), omitted: false };
+/** Reads committed versions with two Git processes in total instead of two per file. */
+function treeFiles(root: string, entries: Map<string, TreeEntry>): Map<string, Version> {
+  const result = new Map<string, Version>(), blobs: [string, TreeEntry][] = [];
+  for (const [path, value] of entries) {
+    if (value.mode === '160000') result.set(path, { mode: value.mode, data: Buffer.from(value.object + '\n').toString('base64'), binary: false, omitted: false });
+    else blobs.push([path, value]);
+  }
+  if (!blobs.length) return result;
+  const sizes = git(root, ['cat-file', '--batch-check=%(objectsize)'], false, blobs.map(([, value]) => value.object + '\n').join('')).toString().split('\n');
+  const selected: [string, TreeEntry][] = [];
+  let bytes = 0;
+  blobs.forEach(([path, value], index) => {
+    const size = Number(sizes[index]);
+    if (!/^\d+$/.test(sizes[index] ?? '') || size > FILE_BYTES || bytes + size > SNAPSHOT_BYTES) result.set(path, { mode: value.mode, data: null, binary: false, omitted: true });
+    else { bytes += size; selected.push([path, value]); }
+  });
+  if (!selected.length) return result;
+  // Each object is returned as "<size>\n<content>\n".
+  const output = git(root, ['cat-file', '--batch=%(objectsize)'], false, selected.map(([, value]) => value.object + '\n').join(''));
+  let offset = 0;
+  for (const [path, value] of selected) {
+    const newline = output.indexOf(10, offset);
+    const header = newline < 0 ? '' : output.subarray(offset, newline).toString();
+    const size = Number(header), start = newline + 1;
+    if (!/^\d+$/.test(header) || output[start + size] !== 10) throw new DiffError('Git вернул неожиданное содержимое файла.');
+    const data = output.subarray(start, start + size);
+    offset = start + size + 1;
+    result.set(path, { mode: value.mode, data: data.toString('base64'), binary: data.includes(0), omitted: false });
+  }
+  return result;
 }
 const unavailable = (run: Run, reason: string): RunCodeDiff => ({ runId: run.id, state: 'unavailable', reason, files: [], additions: 0, deletions: 0,
-  truncated: false, baseCommit: null, headCommit: null, capturedAt: Date.now(), live: false });
+  truncated: false, filesOmitted: false, baseCommit: null, headCommit: null, capturedAt: Date.now(), live: false });
 
+/** A whole-file addition or deletion is a single hunk, so it needs no Git process. */
+function wholeFileHunk(data: string, sign: '+' | '-'): string {
+  const lines = Buffer.from(data, 'base64').toString().split('\n');
+  const complete = lines.at(-1) === '';
+  if (complete) lines.pop();
+  if (!lines.length) return '';
+  const range = lines.length === 1 ? '1' : `1,${lines.length}`;
+  return `${sign === '+' ? `@@ -0,0 +${range} @@` : `@@ -${range} +0,0 @@`}\n${lines.map(line => sign + line).join('\n')}\n${complete ? '' : '\\ No newline at end of file\n'}`;
+}
 function fileDiff(root: string, path: string, before: Version | null, after: Version | null, temp: string): CodeDiffFile | null {
   if (!before && !after || before && after && !before.omitted && !after.omitted && before.mode === after.mode && before.data === after.data) return null;
   const status = !before ? 'added' : !after ? 'deleted' : before.mode !== after.mode ? 'typechanged' : 'modified';
   const result: CodeDiffFile = { path, oldPath: null, status, additions: 0, deletions: 0, binary: !!(before?.binary || after?.binary),
     truncated: !!(before?.omitted || after?.omitted), patch: '' };
   if (result.truncated || result.binary) return result;
-  const oldFile = join(temp, 'before'), newFile = join(temp, 'after');
-  writeFileSync(oldFile, Buffer.from(before?.data ?? '', 'base64'));
-  writeFileSync(newFile, Buffer.from(after?.data ?? '', 'base64'));
-  let raw: string;
-  try { raw = git(root, ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--unified=3', '--', oldFile, newFile], true).toString(); }
-  catch { result.truncated = true; return result; }
-  const hunkAt = raw.indexOf('\n@@');
-  const hunks = hunkAt < 0 ? '' : raw.slice(hunkAt + 1);
+  let hunks: string;
+  if (!before || !after) hunks = before ? wholeFileHunk(before.data!, '-') : wholeFileHunk(after!.data!, '+');
+  else {
+    const oldFile = join(temp, 'before'), newFile = join(temp, 'after');
+    writeFileSync(oldFile, Buffer.from(before.data!, 'base64'));
+    writeFileSync(newFile, Buffer.from(after.data!, 'base64'));
+    let raw: string;
+    try { raw = git(root, ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--unified=3', '--', oldFile, newFile], true).toString(); }
+    catch { result.truncated = true; return result; }
+    const hunkAt = raw.indexOf('\n@@');
+    hunks = hunkAt < 0 ? '' : raw.slice(hunkAt + 1);
+  }
   for (const line of hunks.split('\n')) {
     if (line.startsWith('+')) result.additions++;
     else if (line.startsWith('-')) result.deletions++;
@@ -133,31 +168,25 @@ function fileDiff(root: string, path: string, before: Version | null, after: Ver
   const modes = !before ? `new file mode ${after!.mode}\n` : !after ? `deleted file mode ${before.mode}\n` : before.mode !== after.mode ? `old mode ${before.mode}\nnew mode ${after.mode}\n` : '';
   const headers = `diff --git ${JSON.stringify('a/' + path)} ${JSON.stringify('b/' + path)}\n${modes}--- ${before ? JSON.stringify('a/' + path) : '/dev/null'}\n+++ ${after ? JSON.stringify('b/' + path) : '/dev/null'}\n`;
   result.patch = headers + hunks;
-  if (Buffer.byteLength(result.patch) > PATCH_BYTES) {
-    result.patch = Buffer.from(result.patch).subarray(0, PATCH_BYTES).toString('utf8');
-    const end = result.patch.lastIndexOf('\n');
-    result.patch = end < 0 ? '' : result.patch.slice(0, end + 1);
-    result.truncated = true;
-  }
   return result;
 }
 function compare(run: Run, root: string, baseline: Snapshot, endpoint: Snapshot, live: boolean): RunCodeDiff {
   const changed = [...new Set([...paths(git(root, ['diff', '--no-ext-diff', '--no-textconv', '--name-only', '--no-renames', '-z', baseline.commit, endpoint.commit, '--', '.', ...ARTIFACT_PATHSPECS])),
     ...Object.keys(baseline.dirty), ...Object.keys(endpoint.dirty)])].filter(safePath).sort();
   const selected = changed.slice(0, PATH_LIMIT);
-  const beforeTree = treeEntries(root, baseline.commit, selected), afterTree = treeEntries(root, endpoint.commit, selected);
+  const beforeTree = treeFiles(root, treeEntries(root, baseline.commit, selected.filter(path => !owns(baseline.dirty, path))));
+  const afterTree = treeFiles(root, treeEntries(root, endpoint.commit, selected.filter(path => !owns(endpoint.dirty, path))));
+  const filesOmitted = changed.length > PATH_LIMIT || baseline.truncated || endpoint.truncated;
   const result: RunCodeDiff = { runId: run.id, state: 'available', reason: null, files: [], additions: 0, deletions: 0,
-    truncated: changed.length > PATH_LIMIT || baseline.truncated || endpoint.truncated, baseCommit: baseline.commit, headCommit: endpoint.commit, capturedAt: Date.now(), live };
+    truncated: filesOmitted, filesOmitted, baseCommit: baseline.commit, headCommit: endpoint.commit, capturedAt: Date.now(), live };
   const temp = mkdtempSync(join(tmpdir(), 'brigd-code-diff-'));
-  const beforeBudget = { bytes: 0 }, afterBudget = { bytes: 0 };
   let patchBytes = 0;
   try {
     for (const path of selected) {
-      const before = owns(baseline.dirty, path) ? baseline.dirty[path]! : treeFile(root, beforeTree.get(path), beforeBudget);
-      const after = owns(endpoint.dirty, path) ? endpoint.dirty[path]! : treeFile(root, afterTree.get(path), afterBudget);
+      const before = owns(baseline.dirty, path) ? baseline.dirty[path]! : beforeTree.get(path) ?? null;
+      const after = owns(endpoint.dirty, path) ? endpoint.dirty[path]! : afterTree.get(path) ?? null;
       const file = fileDiff(root, path, before, after, temp);
       if (!file) continue;
-      if (result.files.length >= FILE_LIMIT) { result.truncated = true; break; }
       if (patchBytes + Buffer.byteLength(file.patch) > DIFF_BYTES) { file.patch = ''; file.truncated = true; }
       patchBytes += Buffer.byteLength(file.patch);
       result.files.push(file); result.additions += file.additions; result.deletions += file.deletions;

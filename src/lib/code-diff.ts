@@ -18,6 +18,8 @@ export interface RunCodeDiff {
   additions: number;
   deletions: number;
   truncated: boolean;
+  /** Some changed paths are not listed. Absent in diffs saved by older versions. */
+  filesOmitted?: boolean;
   baseCommit: string | null;
   headCommit: string | null;
   capturedAt: number;

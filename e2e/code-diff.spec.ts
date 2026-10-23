@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
-import type { RunCodeDiff } from '../src/lib/code-diff';
+import type { CodeDiffFile, RunCodeDiff } from '../src/lib/code-diff';
 import type { AppInfo, Run, Task, TaskDetail } from '../src/lib/types';
 
 // These fixtures are read-only: opening a diff must never start an agent or
@@ -9,11 +9,11 @@ const taskId = 'code-diff-task';
 const latestRunId = 'code-diff-latest';
 const previousRunId = 'code-diff-previous';
 
-function fixtureDetail(runIds = [latestRunId, previousRunId]): TaskDetail {
+function fixtureDetail(runIds = [latestRunId, previousRunId], status: Run['status'] = 'completed'): TaskDetail {
   const runs: Run[] = runIds.map((id, index) => ({
     id, taskId, workerId: null, worker: null, steps: [], currentStepIndex: null,
     instructions: [], provider: 'codex', cwd: '/workspace/project', instruction: 'Добавить отображение изменений кода.',
-    trigger: 'manual', scheduledFor: null, status: 'completed', sessionId: `${id}-session`,
+    trigger: 'manual', scheduledFor: null, status: index ? 'completed' : status, sessionId: `${id}-session`,
     startedAt: timestamp - index * 60_000, updatedAt: timestamp - index * 60_000 + 5_000,
     finishedAt: timestamp - index * 60_000 + 5_000, summary: 'Изменения готовы.',
     error: null, turn: 1, mock: true,
@@ -232,8 +232,79 @@ test('binary, renamed and truncated files retain their paths and explain missing
   await expect(binary.locator('.diff-line')).toHaveCount(0);
   const renamed = panel.locator('.diff-file').filter({ hasText: 'src/new-name.ts' });
   await expect(renamed).toContainText('src/old-name.ts');
-  await expect(panel).toContainText(/Показана только часть изменений/);
-  await expect(panel.locator('.diff-file').filter({ hasText: 'src/large.ts' }).locator('.diff-line.addition .diff-code')).toHaveText('export const visible = true;');
+  const large = panel.locator('.diff-file').filter({ hasText: 'src/large.ts' });
+  await expect(large.locator('.diff-line.addition .diff-code')).toHaveText('export const visible = true;');
+  await expect(large).toContainText('Diff этого файла показан не полностью.');
+  // A partial file is explained on that file; the whole-diff warning is only for files missing from the list.
+  await expect(panel.locator('.diff-warning')).toHaveCount(0);
+});
+
+test('a diff with omitted files says so above the list', async ({ page }) => {
+  const diff: RunCodeDiff = { ...changedDiff(), truncated: true, filesOmitted: true };
+  const { panel } = await openChanges(page, fixtureDetail(), async route => { await route.fulfill({ json: diff }); });
+  await expect(panel.locator('.diff-warning')).toHaveText('Показаны не все изменённые файлы: их слишком много для просмотра.');
+  await expect(panel.locator('.diff-file')).toHaveCount(1);
+});
+
+function addedFile(path: string, lines: string[]): CodeDiffFile {
+  return { path, oldPath: null, status: 'added', additions: lines.length, deletions: 0, binary: false, truncated: false,
+    patch: `@@ -0,0 +1,${lines.length} @@\n${lines.map(line => `+${line}`).join('\n')}\n` };
+}
+function liveDiff(dLines: string[]): RunCodeDiff {
+  const files = [addedFile('a.ts', ['export const a = 1;']), addedFile('b.ts', ['export const b = 2;']),
+    addedFile('c.ts', ['export const c = 3;']), addedFile('d.ts', dLines)];
+  return { ...emptyDiff(), live: true, files, additions: files.reduce((sum, file) => sum + file.additions, 0) };
+}
+
+test('live refreshes keep the files a reader opened or closed, and pausing holds new code until shown', async ({ page }) => {
+  await page.clock.install({ time: timestamp });
+  let current = liveDiff(['export const first = true;']);
+  const { panel } = await openChanges(page, fixtureDetail(undefined, 'running'), async route => { await route.fulfill({ json: current }); });
+  const file = (path: string) => panel.locator('.diff-file').filter({ has: page.locator('summary', { hasText: path }) });
+  await expect(file('a.ts')).toHaveAttribute('open', '');
+  await expect(file('d.ts')).not.toHaveAttribute('open');
+  // Collapsed files do not render their code until opened.
+  await expect(file('d.ts').locator('.diff-line')).toHaveCount(0);
+  await file('d.ts').locator('summary').click();
+  await file('a.ts').locator('summary').click();
+  await expect(file('d.ts').locator('.diff-line.addition .diff-code')).toHaveText(['export const first = true;']);
+
+  current = liveDiff(['export const first = true;', 'export const second = true;']);
+  await panel.getByRole('button', { name: 'Обновить diff', exact: true }).click();
+  await expect(file('d.ts').locator('.diff-line.addition .diff-code')).toHaveText(['export const first = true;', 'export const second = true;']);
+  await expect(file('d.ts')).toHaveAttribute('open', '');
+  await expect(file('a.ts')).not.toHaveAttribute('open');
+  await expect(file('b.ts')).toHaveAttribute('open', '');
+
+  await panel.getByRole('button', { name: 'Приостановить автообновление', exact: true }).click();
+  await expect(panel.getByRole('status').filter({ hasText: 'Автообновление на паузе' })).toBeVisible();
+  current = liveDiff(['export const first = true;', 'export const second = true;', 'export const third = true;']);
+  await page.clock.fastForward(5_000);
+  await expect(panel.getByRole('status').filter({ hasText: 'Агент внёс новые изменения.' })).toBeVisible();
+  await expect(file('d.ts').locator('.diff-line.addition .diff-code')).toHaveCount(2);
+  await panel.getByRole('button', { name: 'Показать', exact: true }).click();
+  await expect(file('d.ts').locator('.diff-line.addition .diff-code')).toHaveCount(3);
+  await expect(file('d.ts')).toHaveAttribute('open', '');
+  await expect(panel.getByText('Агент внёс новые изменения.')).toHaveCount(0);
+
+  await panel.getByRole('button', { name: 'Возобновить автообновление', exact: true }).click();
+  await expect(panel.getByText('Текущие изменения запуска. Обновляются во время работы агента.', { exact: true })).toBeVisible();
+});
+
+test('a failed live refresh keeps the last diff on screen', async ({ page }) => {
+  let fail = false;
+  const { panel } = await openChanges(page, fixtureDetail(undefined, 'running'), async route => {
+    await route.fulfill(fail ? { json: { ...emptyDiff(), state: 'unavailable', reason: 'Git занят.' } } : { json: { ...changedDiff(), live: true } });
+  });
+  await expect(panel.locator('.diff-line.addition')).toHaveCount(2);
+  fail = true;
+  await panel.getByRole('button', { name: 'Обновить diff', exact: true }).click();
+  await expect(panel.locator('.diff-warning')).toContainText('Не удалось обновить изменения: Git занят.');
+  await expect(panel.locator('.diff-line.addition')).toHaveCount(2);
+  await expect(panel.getByText('Diff недоступен', { exact: true })).toHaveCount(0);
+  fail = false;
+  await panel.getByRole('button', { name: 'Обновить diff', exact: true }).click();
+  await expect(panel.locator('.diff-warning')).toHaveCount(0);
 });
 
 for (const theme of ['light', 'dark'] as const) {
