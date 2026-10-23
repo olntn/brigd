@@ -55,7 +55,7 @@ test('live diff includes committed, staged, unstaged, deleted, and untracked fil
   const index = git(cwd, 'rev-parse', '--path-format=absolute', '--git-path', 'index');
   const before = readFileSync(index);
   const result = await diff(run.id);
-  expect(result).toMatchObject({ state: 'available', live: true, additions: 5, deletions: 2, truncated: false });
+  expect(result).toMatchObject({ state: 'available', live: true, additions: 5, deletions: 2, truncated: false, filesOmitted: false });
   expect(result.files.map(file => file.path)).toEqual(['committed.ts', 'delete.txt', 'new.ts', 'src/value.txt', 'staged.ts']);
   expect(result.files.find(file => file.path === 'src/value.txt')).toMatchObject({ status: 'modified', additions: 2, deletions: 1 });
   expect(result.files.find(file => file.path === 'delete.txt')).toMatchObject({ status: 'deleted', additions: 0, deletions: 1 });
@@ -75,25 +75,67 @@ test('staged renames preserve both the removed and added paths', async () => {
   expect(result.files.map(file => [file.path, file.status])).toEqual([['src/renamed.txt', 'added'], ['src/value.txt', 'deleted']]);
 });
 
-test('binary files and oversized patches are explicit and bounded', async () => {
+test('large source and lock files are shown in full; only binary and huge files omit code', async () => {
   const run = await start(), cwd = run.workspace!.path;
   writeFileSync(join(cwd, 'binary.bin'), Buffer.from([1, 0, 2]));
-  writeFileSync(join(cwd, 'large.ts'), 'x'.repeat(300_000));
+  writeFileSync(join(cwd, 'long-line.ts'), 'x'.repeat(300_000));
   writeFileSync(join(cwd, 'many-lines.ts'), 'const a = 1;\n'.repeat(10_000));
+  writeFileSync(join(cwd, 'committed.lock'), 'dependency\n'.repeat(20_000)); git(cwd, 'add', 'committed.lock'); git(cwd, 'commit', '-m', 'lock file');
+  writeFileSync(join(cwd, 'huge.log'), 'y'.repeat(5 * 1024 * 1024));
   const result = await diff(run.id);
-  expect(result.truncated).toBe(true);
+  expect(result).toMatchObject({ truncated: true, filesOmitted: false });
   expect(result.files.find(file => file.path === 'binary.bin')).toMatchObject({ binary: true, patch: '', truncated: false });
-  expect(result.files.find(file => file.path === 'large.ts')).toMatchObject({ truncated: true, patch: '' });
-  expect(result.files.find(file => file.path === 'many-lines.ts')).toMatchObject({ truncated: true, additions: 10_000 });
-  expect(Buffer.byteLength(result.files.find(file => file.path === 'many-lines.ts')!.patch)).toBeLessThanOrEqual(64 * 1024);
+  expect(result.files.find(file => file.path === 'long-line.ts')).toMatchObject({ truncated: false, additions: 1 });
+  expect(result.files.find(file => file.path === 'long-line.ts')!.patch).toContain('x'.repeat(300_000));
+  const manyLines = result.files.find(file => file.path === 'many-lines.ts')!;
+  expect(manyLines).toMatchObject({ truncated: false, additions: 10_000 });
+  expect(manyLines.patch.split('\n').filter(line => line === '+const a = 1;')).toHaveLength(10_000);
+  expect(result.files.find(file => file.path === 'committed.lock')).toMatchObject({ truncated: false, additions: 20_000 });
+  expect(result.files.find(file => file.path === 'huge.log')).toMatchObject({ truncated: true, patch: '' });
 });
 
-test('file listing is capped while reporting a truncated result', async () => {
-  const run = await start();
-  for (let i = 0; i < 220; i++) writeFileSync(join(run.workspace!.path, `file-${i}.ts`), 'new\n');
+test('committed files are read from Git objects with their exact contents', async () => {
+  const run = await start(), cwd = run.workspace!.path;
+  writeFileSync(join(cwd, 'src/value.txt'), 'committed change\n');
+  writeFileSync(join(cwd, 'empty.txt'), '');
+  writeFileSync(join(cwd, 'binary.bin'), Buffer.from([0, 10, 10, 0]));
+  git(cwd, 'add', '.'); git(cwd, 'commit', '-m', 'agent commit');
   const result = await diff(run.id);
-  expect(result).toMatchObject({ state: 'available', truncated: true });
-  expect(result.files.length).toBe(100);
+  expect(result.files.map(file => [file.path, file.status])).toEqual([['binary.bin', 'added'], ['empty.txt', 'added'], ['src/value.txt', 'modified']]);
+  expect(result.files.find(file => file.path === 'binary.bin')).toMatchObject({ binary: true, truncated: false });
+  expect(result.files.find(file => file.path === 'empty.txt')).toMatchObject({ truncated: false, additions: 0 });
+  expect(result.files.find(file => file.path === 'src/value.txt')!.patch).toContain('-base\n+committed change');
+});
+
+test('whole-file additions and deletions match Git hunks without spawning a diff per file', async () => {
+  const contents: Record<string, string> = { 'lines.txt': 'a\nb\n', 'no-newline.txt': 'a\nb', 'single.txt': 'a', 'blank.txt': '\n\n',
+    'crlf.txt': 'x\r\ny\r\n', 'unicode.txt': 'Привет, мир\n', 'empty.txt': '' };
+  const hunks = (file: string) => {
+    const raw = Bun.spawnSync(['git', 'diff', '--no-index', '--no-color', '--', '/dev/null', file], { stdout: 'pipe' }).stdout.toString();
+    return raw.indexOf('\n@@') < 0 ? '' : raw.slice(raw.indexOf('\n@@') + 1);
+  };
+  for (const [name, text] of Object.entries(contents)) writeFileSync(join(root, `old-${name}`), text);
+  git(root, 'add', '.'); git(root, 'commit', '-m', 'deletion fixtures');
+  const run = await start(), cwd = run.workspace!.path;
+  for (const [name, text] of Object.entries(contents)) { writeFileSync(join(cwd, `new-${name}`), text); rmSync(join(cwd, `old-${name}`)); }
+  const result = await diff(run.id);
+  for (const name of Object.keys(contents)) {
+    const expected = hunks(join(cwd, `new-${name}`));
+    const added = result.files.find(file => file.path === `new-${name}`)!, deleted = result.files.find(file => file.path === `old-${name}`)!;
+    expect(added.patch.slice(added.patch.indexOf('+++ ')).split('\n').slice(1).join('\n')).toBe(expected);
+    expect(deleted.patch.slice(deleted.patch.indexOf('+++ ')).split('\n').slice(1).join('\n'))
+      .toBe(expected.replace(/^@@ -0,0 \+(\S+) @@/, '@@ -$1 +0,0 @@').replace(/^\+/gm, '-'));
+    expect(added.additions).toBe(deleted.deletions);
+  }
+  expect(result.files.find(file => file.path === 'new-lines.txt')).toMatchObject({ status: 'added', additions: 2 });
+});
+
+test('file listing is capped only for an extreme number of changed paths', async () => {
+  const run = await start();
+  for (let i = 0; i < 1005; i++) writeFileSync(join(run.workspace!.path, `file-${String(i).padStart(4, '0')}.ts`), 'new\n');
+  const result = await diff(run.id);
+  expect(result).toMatchObject({ state: 'available', truncated: true, filesOmitted: true });
+  expect(result.files.length).toBe(1000);
 });
 
 test('completed history stays frozen and a followup compares against its own dirty starting point', async () => {
@@ -140,7 +182,7 @@ test('a tracked file replaced by a FIFO cannot block diff reads', async () => {
 
 test('an unavailable initial baseline stays unavailable when a later turn becomes readable', async () => {
   const run = await start(), cwd = run.workspace!.path;
-  writeFileSync(join(cwd, 'oversized.ts'), 'x'.repeat(300_000)); await finish(run);
+  writeFileSync(join(cwd, 'oversized.ts'), 'x'.repeat(5 * 1024 * 1024)); await finish(run);
   const followup = engine.followup(run.taskId, { sourceRunId: run.id, sourceStepIndex: null, body: 'Update the large file.', attachmentIds: [], requestId: crypto.randomUUID() });
   await until(() => agent.calls.length === 2);
   const initial = await diff(followup.id);

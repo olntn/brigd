@@ -1,45 +1,80 @@
 <script lang="ts">
+  import { SvelteMap } from 'svelte/reactivity';
   import Icon from './Icon.svelte';
   import { diffLines } from './diff-lines';
   import { TASK_STATUS_LABELS } from './status';
   import type { Run } from './types';
   import type { CodeDiffFile, RunCodeDiff } from './code-diff';
 
+  // The first files open by default, except very long ones such as regenerated lock files.
+  // Code is rendered only for open files, so long diffs stay responsive.
+  const AUTO_OPEN_FILES = 3, AUTO_OPEN_LINES = 2000;
   let { runs }: { runs: Run[] } = $props();
   let selectedId = $state('');
   let diff = $state<RunCodeDiff | null>(null);
+  // A newer live snapshot received while the reader paused updates.
+  let pending = $state<RunCodeDiff | null>(null);
+  let paused = $state(false);
   let loading = $state(false);
   let error = $state('');
+  let refreshError = $state('');
   let refreshNonce = $state(0);
-  let loadedRunId = '';
+  let loadedRunId = '', shown = '';
+  let applyNext = false;
+  // Open files are remembered by path, so a refresh keeps what the reader opened or closed.
+  const expanded = new SvelteMap<string, boolean>();
   const selectedRun = $derived(runs.find(run => run.id === selectedId) ?? runs[0] ?? null);
   const runId = $derived(selectedRun?.id ?? '');
   const revision = $derived(selectedRun ? `${selectedRun.updatedAt}:${selectedRun.status}:${selectedRun.turn}:${selectedRun.integration?.updatedAt ?? ''}` : '');
   const live = $derived(!!selectedRun && ['preparing', 'running', 'cancelling', 'waiting_input', 'interrupted'].includes(selectedRun.status));
-  const files = $derived(diff?.files.map(file => ({ ...file, lines: diffLines(file.patch) })) ?? []);
   const statusLabels: Record<CodeDiffFile['status'], string> = {
     added: 'Добавлен', modified: 'Изменён', deleted: 'Удалён', renamed: 'Переименован', typechanged: 'Изменён тип',
   };
   const dateTime = (time: number) => new Intl.DateTimeFormat('ru-RU', {
     day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit',
   }).format(time);
+  const content = (value: RunCodeDiff) => JSON.stringify([value.state, value.reason, value.truncated, value.filesOmitted, value.live, value.files]);
+
+  function show(next: RunCodeDiff, key = content(next)) {
+    pending = null;
+    // Keep the rendered DOM untouched when a poll finds nothing new.
+    if (diff && key === shown) return;
+    next.files.forEach((file, index) => {
+      if (!expanded.has(file.path)) expanded.set(file.path, index < AUTO_OPEN_FILES && file.additions + file.deletions <= AUTO_OPEN_LINES);
+    });
+    diff = next; shown = key;
+  }
+  function reload() { applyNext = true; refreshNonce++; }
+  function togglePause() {
+    paused = !paused;
+    if (!paused && pending) show(pending);
+  }
 
   $effect(() => {
     // Fetch only while this tab is mounted. Abort and ignore replies from a previous selection.
     const id = runId;
     void revision; void refreshNonce;
+    const apply = applyNext;
+    applyNext = false;
     if (!id) { diff = null; error = ''; loading = false; loadedRunId = ''; return; }
     const controller = new AbortController();
-    if (loadedRunId !== id) { diff = null; loadedRunId = id; }
+    if (loadedRunId !== id) { diff = null; pending = null; paused = false; refreshError = ''; expanded.clear(); loadedRunId = id; }
     loading = true; error = '';
     void (async () => {
       try {
         const response = await fetch(`/api/runs/${encodeURIComponent(id)}/diff`, { signal: controller.signal });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || `Ошибка загрузки (${response.status})`);
-        if (!controller.signal.aborted) diff = result as RunCodeDiff;
+        if (controller.signal.aborted) return;
+        const next = result as RunCodeDiff, key = content(next);
+        // A momentary Git failure while the agent works must not replace code the reader is viewing.
+        if (diff?.state === 'available' && next.state === 'unavailable' && live) refreshError = next.reason || 'Не удалось получить изменения этого запуска.';
+        else if (paused && !apply && diff) { refreshError = ''; pending = key === shown ? null : next; }
+        else { refreshError = ''; show(next, key); }
       } catch (cause) {
-        if (!controller.signal.aborted) error = cause instanceof Error ? cause.message : 'Не удалось загрузить изменения.';
+        if (controller.signal.aborted) return;
+        const message = cause instanceof Error ? cause.message : 'Не удалось загрузить изменения.';
+        if (diff) refreshError = message; else error = message;
       } finally {
         if (!controller.signal.aborted) loading = false;
       }
@@ -64,7 +99,10 @@
         {/each}
       </select>
     </label>
-    <button class="button secondary" disabled={loading} onclick={() => refreshNonce++} aria-label="Обновить diff" title="Обновить diff"><Icon name="refresh" size={15} class={loading ? 'spin' : ''} /></button>
+    {#if diff?.state === 'available' && (live || paused)}
+      <button class="button secondary" onclick={togglePause} aria-label={paused ? 'Возобновить автообновление' : 'Приостановить автообновление'} title={paused ? 'Возобновить автообновление' : 'Приостановить автообновление'}><Icon name={paused ? 'play' : 'pause'} size={15} /></button>
+    {/if}
+    <button class="button secondary" disabled={loading} onclick={reload} aria-label="Обновить diff" title="Обновить diff"><Icon name="refresh" size={15} class={loading ? 'spin' : ''} /></button>
   </div>
 {/if}
 
@@ -72,32 +110,38 @@
   <div class="conversation-empty"><Icon name="code" size={25} /><strong>Запусков пока нет</strong><p>Изменения кода появятся здесь после работы агента.</p></div>
 {:else if loading && !diff}
   <p class="diff-message" role="status"><Icon name="refresh" size={17} class="spin" />Загружаем изменения…</p>
-{:else if error}
-  <div class="diff-error" role="alert"><p>{error}</p><button class="button secondary" onclick={() => refreshNonce++}>Повторить загрузку</button></div>
+{:else if error && !diff}
+  <div class="diff-error" role="alert"><p>{error}</p><button class="button secondary" onclick={reload}>Повторить загрузку</button></div>
 {:else if diff?.state === 'unavailable'}
   <div class="conversation-empty"><Icon name="code" size={25} /><strong>Diff недоступен</strong><p>{diff.reason || 'Не удалось получить изменения этого запуска.'}</p></div>
 {:else if diff}
-  {#if diff.live}<p class="diff-note">Текущие изменения запуска. Обновляются во время работы агента.</p>{/if}
-  {#if diff.truncated}<p class="diff-warning" role="status">Показана только часть изменений: diff превышает лимит отображения.</p>{/if}
+  {#if paused}
+    <p class="diff-note" role="status">Автообновление на паузе: открытый код не изменится, пока вы его читаете.{#if pending} Агент внёс новые изменения. <button class="diff-link" onclick={() => pending && show(pending)}>Показать</button>{/if}</p>
+  {:else if diff.live}<p class="diff-note">Текущие изменения запуска. Обновляются во время работы агента.</p>{/if}
+  {#if refreshError}<p class="diff-warning" role="status">Не удалось обновить изменения: {refreshError} Показан последний полученный снимок.</p>{/if}
+  {#if diff.filesOmitted ?? (diff.truncated && !diff.files.some(file => file.truncated))}<p class="diff-warning" role="status">Показаны не все изменённые файлы: их слишком много для просмотра.</p>{/if}
   {#if diff.files.length}
     <div class="diff-overview"><strong>Файлов: {diff.files.length}</strong><span class="diff-added" aria-label={`Добавлено строк: ${diff.additions}`}>+{diff.additions}</span><span class="diff-deleted" aria-label={`Удалено строк: ${diff.deletions}`}>−{diff.deletions}</span></div>
     <div class="diff-files">
-      {#each files as file, index (file.path)}
-        <details class="diff-file" open={index < 3}>
+      {#each diff.files as file (file.path)}
+        <details class="diff-file" open={expanded.get(file.path)} ontoggle={(event) => expanded.set(file.path, event.currentTarget.open)}>
           <summary><Icon name="chevron" size={14} class="diff-chevron" /><span class="diff-file-name"><code>{file.path}</code>{#if file.oldPath && file.oldPath !== file.path}<small>Ранее: {file.oldPath}</small>{/if}</span><span class="diff-file-status">{statusLabels[file.status]}</span><span class="diff-added">+{file.additions}</span><span class="diff-deleted">−{file.deletions}</span></summary>
           {#if file.binary}<p class="diff-file-note">Двоичный файл изменён. Текстовый diff недоступен.</p>
-          {:else if file.lines.length}
-            <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users need to scroll long code lines.) -->
-            <div class="diff-scroll" role="region" aria-label={`Diff файла ${file.path}`} tabindex="0">
-              <div class="diff-lines">
-                {#each file.lines as line}
-                  <div class="diff-line {line.kind}"><span class="diff-line-number" aria-hidden="true">{line.oldLine ?? ''}</span><span class="diff-line-number" aria-hidden="true">{line.newLine ?? ''}</span><span class="diff-marker" aria-hidden="true">{line.kind === 'addition' ? '+' : line.kind === 'deletion' ? '−' : ' '}</span><code class="diff-code">{line.text || ' '}</code></div>
-                {/each}
+          {:else if !file.patch && file.truncated}<p class="diff-file-note">Изменения этого файла слишком велики для просмотра.</p>
+          {:else if expanded.get(file.path)}
+            {@const lines = diffLines(file.patch)}
+            {#if lines.length}
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users need to scroll long code lines.) -->
+              <div class="diff-scroll" role="region" aria-label={`Diff файла ${file.path}`} tabindex="0">
+                <div class="diff-lines">
+                  {#each lines as line}
+                    <div class="diff-line {line.kind}"><span class="diff-line-number" aria-hidden="true">{line.oldLine ?? ''}</span><span class="diff-line-number" aria-hidden="true">{line.newLine ?? ''}</span><span class="diff-marker" aria-hidden="true">{line.kind === 'addition' ? '+' : line.kind === 'deletion' ? '−' : ' '}</span><code class="diff-code">{line.text || ' '}</code></div>
+                  {/each}
+                </div>
               </div>
-            </div>
-          {:else if file.truncated}<p class="diff-file-note">Содержимое файла превышает лимит отображения.</p>
-          {:else}<p class="diff-file-note">Содержимое файла не изменилось; обновлены его имя или свойства.</p>{/if}
-          {#if file.truncated}<p class="diff-file-note">Diff этого файла показан не полностью.</p>{/if}
+            {:else}<p class="diff-file-note">Содержимое файла не изменилось; обновлены его имя или свойства.</p>{/if}
+            {#if file.truncated}<p class="diff-file-note">Diff этого файла показан не полностью.</p>{/if}
+          {/if}
         </details>
       {/each}
     </div>
@@ -115,6 +159,7 @@
   .diff-error { padding: 12px; border: 1px solid var(--error-line); background: var(--error-bg); border-radius: var(--radius-md); color: var(--error); font-size: .85rem; overflow-wrap: anywhere; }
   .diff-error p { margin: 0 0 12px; }
   .diff-note, .diff-warning, .diff-file-note { font-size: .85rem; line-height: 1.7; color: var(--muted); overflow-wrap: anywhere; }
+  .diff-link { padding: 0; border: 0; background: none; color: var(--accent-text); font: inherit; text-decoration: underline; cursor: pointer; }
   .diff-warning { padding: 10px; border: 1px solid var(--warning-line); border-radius: var(--radius-md); background: var(--warning-bg); color: var(--warning); }
   .diff-overview { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 18px 0 12px; font-size: .85rem; }
   .diff-overview strong { font-weight: 550; }
