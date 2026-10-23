@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { Integration, Run } from '../src/lib/types';
+import type { Integration, IntegrationCheck, Run } from '../src/lib/types';
+import { CHECK_OUTPUT_LIMIT } from '../src/lib/integration-checks';
 import { runBoundedProcess } from './adapter';
 import { GitWorkspaces } from './workspaces';
 import { INTEGRATOR_WORKER } from '../src/lib/workers';
@@ -30,6 +31,30 @@ async function git(cwd: string, args: string[], signal: AbortSignal) {
 export const artifact = (path: string) => path.split('/').some(part => /^\.brigd-(?:inputs|outbox)-/.test(part));
 export const ARTIFACT_PATHSPECS = [':(exclude,glob).brigd-inputs-*/**', ':(exclude,glob).brigd-outbox-*/**', ':(exclude,glob)**/.brigd-inputs-*/**', ':(exclude,glob)**/.brigd-outbox-*/**'];
 export const CONFLICT_LIST_LIMIT = 200;
+/** The last `limit` bytes of a process's stdout and stderr in arrival order, cut at a UTF-8 character boundary. */
+export class OutputTail {
+  private chunks: string[] = [];
+  private bytes = 0;
+  private cut = false;
+  constructor(private readonly limit = CHECK_OUTPUT_LIMIT) {}
+  readonly push = (chunk: string) => {
+    this.chunks.push(chunk); this.bytes += Buffer.byteLength(chunk);
+    // Trimmed once twice the limit is buffered, so a chatty check costs constant amortised work per chunk.
+    if (this.bytes > 2 * this.limit) this.trim();
+  };
+  private trim() {
+    if (this.bytes <= this.limit) return;
+    const encoded = Buffer.from(this.chunks.join(''));
+    let start = encoded.length - this.limit;
+    // Continuation bytes (10xxxxxx) belong to a character that starts before the cut.
+    while (start < encoded.length && (encoded[start]! & 0xc0) === 0x80) start++;
+    this.chunks = [encoded.subarray(start).toString('utf8')]; this.bytes = encoded.length - start; this.cut = true;
+  }
+  result(): Pick<IntegrationCheck, 'output' | 'outputTruncated'> {
+    this.trim();
+    return { output: this.chunks.join(''), ...(this.cut ? { outputTruncated: true } : {}) };
+  }
+}
 /** Paths with unmerged index entries, relative to the work tree root. `prefix` addresses Git the way the caller does. */
 export function unmergedPaths(prefix: string[], cwd: string): string[] {
   const child = Bun.spawnSync([...prefix, 'ls-files', '-u', '-z', '--full-name'], { cwd, stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
@@ -113,8 +138,9 @@ export class GitIntegrator implements Integrator {
       const checks: Integration['checks'] = [];
       for (const argv of commands) {
         signal.throwIfAborted();
-        const exitCode = await runBoundedProcess(argv, { cwd: candidatePath, signal, onStdout: () => {} });
-        checks.push({ argv, exitCode }); update({ checks: [...checks] });
+        const tail = new OutputTail();
+        const exitCode = await runBoundedProcess(argv, { cwd: candidatePath, signal, onStdout: tail.push, onStderr: tail.push });
+        checks.push({ argv, exitCode, ...tail.result() }); update({ checks: [...checks] });
         if (exitCode !== 0) throw new IntegrationError('failed', `Проверка ${checks.length} завершилась с кодом ${exitCode}. Целевая ветка сохранена.`);
       }
       if (readGit(candidatePath, ['rev-parse', 'HEAD']) !== targetCommit || readGit(candidatePath, ['write-tree']) !== testedTree ||

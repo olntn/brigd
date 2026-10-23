@@ -5,6 +5,7 @@ import { isAbsolute } from 'node:path';
 import type { Attachment, AutopilotInput, AutopilotOverview, AutopilotState, AutopilotStopReason, CliAccessMode, Comment, ConcurrencySettings, DocBlock, DocImage, DocPage, DocPageContentInput, DocPageCreateInput, DocPageExport, DocPageMarkdownInput, DocPageMoveInput, DocPageSummary, DocSearchHit, FallbackWorkers, FollowupInput, Instruction, InstructionInput, InstructionSnapshot, Integration, IntegratorProfile, IntegratorProfileInput, ModelCatalogEntry, ModelCatalogInput, Provider, Run, RunFollowup, RunReconcile, RunStatus, RunStep, StepAttempt, Tag, TagInput, Task, TaskDetail, TaskInput, TaskLog, TaskLogInput, TaskStepInput, Worker, WorkerInput, WorkerSnapshot, WorkspaceSnapshot } from '../src/lib/types';
 import type { RepositoryLocation } from './workspaces';
 import type { IntegrationRecord, WorkspaceRun } from './workspace-storage';
+import { clock } from './clock';
 import { INSTRUCTION_COUNT_LIMIT } from '../src/lib/instructions';
 import { AUTOPILOT_FAILURE_LIMIT } from '../src/lib/autopilot';
 import { DEFAULT_TASK_PRIORITY, isTaskPriority, TASK_PRIORITIES, TASK_PRIORITY_LABELS } from '../src/lib/priority';
@@ -131,6 +132,14 @@ function validWorkerSnapshot(value: unknown): value is WorkerSnapshot {
 }
 function sameWorker(left: WorkerSnapshot, right: WorkerSnapshot): boolean {
   return left.id === right.id && left.name === right.name && left.description === right.description && left.provider === right.provider && left.model === right.model && left.ultracode === right.ultracode && left.effort === right.effort && left.communicationStyle === right.communicationStyle && left.avatarUrl === right.avatarUrl;
+}
+/** Lists the board polls every two seconds keep the exit codes but leave check output to the card, run and integration reads. */
+function withoutCheckOutput(run: Run): Run;
+function withoutCheckOutput(run: Run | null): Run | null;
+function withoutCheckOutput(run: Run | null): Run | null {
+  const integration = run?.integration;
+  if (!run || !integration?.checks.some(check => check.output !== undefined)) return run;
+  return { ...run, integration: { ...integration, checks: integration.checks.map(({ argv, exitCode }) => ({ argv, exitCode })) } };
 }
 function invalidSnapshot(): never {
   throw new AppError('Повреждён снимок запуска. Запуск остановлен; восстановите базу из резервной копии.', 409);
@@ -374,7 +383,7 @@ export class Store {
         communication_style TEXT NOT NULL DEFAULT '', avatar_url TEXT, updated_at INTEGER NOT NULL
       )`);
       this.db.query(`INSERT OR IGNORE INTO integrator_profile (singleton,mode,provider,model,effort,communication_style,avatar_url,updated_at)
-        VALUES (1,'inherit','codex',NULL,'default','',NULL,?)`).run(Date.now());
+        VALUES (1,'inherit','codex',NULL,'default','',NULL,?)`).run(clock());
     }).immediate();
     // The autopilot switch. It is off after every open: unattended work never resumes on its own after a restart.
     this.db.transaction(() => {
@@ -383,7 +392,7 @@ export class Store {
         started_at INTEGER, stopped_at INTEGER, stop_reason TEXT CHECK(stop_reason IN ('manual','until','failures','restart')),
         failures INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL
       )`);
-      this.db.query('INSERT OR IGNORE INTO autopilot (singleton,enabled,updated_at) VALUES (1,0,?)').run(Date.now());
+      this.db.query('INSERT OR IGNORE INTO autopilot (singleton,enabled,updated_at) VALUES (1,0,?)').run(clock());
     }).immediate();
     this.db.exec(`CREATE TABLE IF NOT EXISTS autopilot_settings (
       singleton INTEGER PRIMARY KEY CHECK(singleton=1), integration_checks TEXT
@@ -442,7 +451,7 @@ export class Store {
         );
       `);
       if (!this.db.query('SELECT name FROM app_migrations WHERE name=?').get('model_catalog_v1')) {
-        const now = Date.now();
+        const now = clock();
         const insert = this.db.query('INSERT INTO model_catalog (id,provider,model_id,label,created_at,updated_at) VALUES (?,?,?,?,?,?)');
         for (const provider of ['codex', 'claude'] as const) {
           for (const model of modelPresets[provider]) insert.run(crypto.randomUUID(), provider, model.id, model.label, now, now);
@@ -651,7 +660,7 @@ export class Store {
     const count = (this.db.query('SELECT count(*) AS n FROM model_catalog WHERE provider=? AND id IS NOT ?').get(provider, excludingId) as Row).n;
     if (count >= MODEL_CATALOG_PROVIDER_LIMIT) throw new AppError(`Можно сохранить не больше ${MODEL_CATALOG_PROVIDER_LIMIT} моделей для каждого провайдера`, 409);
   }
-  createModel(value: ModelCatalogInput, now = Date.now()): ModelCatalogEntry {
+  createModel(value: ModelCatalogInput, now = clock()): ModelCatalogEntry {
     const input = validateModel(value);
     return this.db.transaction(() => {
       this.checkModelCapacity(input.provider, input.modelId);
@@ -661,7 +670,7 @@ export class Store {
       return this.getModel(id);
     }).immediate();
   }
-  updateModel(id: string, value: Partial<ModelCatalogInput>, now = Date.now()): ModelCatalogEntry {
+  updateModel(id: string, value: Partial<ModelCatalogInput>, now = clock()): ModelCatalogEntry {
     return this.db.transaction(() => {
       const current = this.getModel(id);
       const input = { ...current, ...validateModelPatch(value) };
@@ -694,7 +703,7 @@ export class Store {
     validateInstructionSnapshots(snapshots);
     return snapshots;
   }
-  createInstruction(value: InstructionInput, now = Date.now()): Instruction {
+  createInstruction(value: InstructionInput, now = clock()): Instruction {
     const input = validateInstruction(value);
     return this.db.transaction(() => {
       if ((this.db.query('SELECT count(*) AS n FROM instructions').get() as Row).n >= INSTRUCTION_COUNT_LIMIT) {
@@ -707,7 +716,7 @@ export class Store {
       return this.getInstruction(id);
     }).immediate();
   }
-  updateInstruction(id: string, value: Partial<InstructionInput>, now = Date.now()): Instruction {
+  updateInstruction(id: string, value: Partial<InstructionInput>, now = clock()): Instruction {
     return this.db.transaction(() => {
       const current = this.getInstruction(id);
       const input = { ...current, ...validateInstructionPatch(value) };
@@ -798,7 +807,7 @@ export class Store {
     const page = this.getDocPage(id);
     return { id: page.id, parentId: page.parentId, title: page.title, childIds: this.docSiblings(id), updatedAt: page.updatedAt, markdown: docBlocksToMarkdown(page.blocks, { pageId: id }) };
   }
-  createDocPage(value: DocPageCreateInput, now = Date.now()): DocPage {
+  createDocPage(value: DocPageCreateInput, now = clock()): DocPage {
     const input = validateDocPageCreate(value);
     return this.db.transaction(() => {
       if ((this.db.query('SELECT count(*) AS n FROM doc_pages').get() as Row).n >= DOC_PAGE_LIMIT) {
@@ -820,7 +829,7 @@ export class Store {
     }).immediate();
   }
   /** Content saves are optimistic: the caller's version must match, so a stale tab never overwrites newer text. */
-  saveDocPage(id: string, value: DocPageContentInput, now = Date.now()): DocPage {
+  saveDocPage(id: string, value: DocPageContentInput, now = clock()): DocPage {
     const input = validateDocPageContent(value);
     return this.db.transaction(() => {
       const row = this.docRow(id);
@@ -834,7 +843,7 @@ export class Store {
     }).immediate();
   }
   /** Whole-content replacement from Markdown for API callers; the version grows so an open editor notices. */
-  saveDocPageMarkdown(id: string, value: DocPageMarkdownInput, now = Date.now()): DocPage {
+  saveDocPageMarkdown(id: string, value: DocPageMarkdownInput, now = clock()): DocPage {
     const input = validateDocPageMarkdown(value);
     return this.db.transaction(() => {
       const row = this.docRow(id);
@@ -876,7 +885,7 @@ export class Store {
     return (this.db.query('SELECT id,page_id,name,mime,size,created_at FROM doc_images WHERE page_id=? ORDER BY created_at, id').all(pageId) as Row[]).map(row => this.mapDocImage(row));
   }
   /** Only raster images that passed the attachment decoder are accepted; the upload counts as unreferenced until a block uses it. */
-  addDocImage(pageId: string, prepared: PreparedAttachment, now = Date.now()): DocImage {
+  addDocImage(pageId: string, prepared: PreparedAttachment, now = clock()): DocImage {
     if (!prepared.previewable) throw new AppError('Поддерживаются изображения PNG, JPEG, WebP и GIF', 415);
     return this.db.transaction(() => {
       const row = this.docRow(pageId);
@@ -899,7 +908,7 @@ export class Store {
     if (!row) throw new AppError('Изображение не найдено', 404);
     return { image: this.mapDocImage(row), data: row.data };
   }
-  moveDocPage(id: string, value: DocPageMoveInput, now = Date.now()): DocPageSummary {
+  moveDocPage(id: string, value: DocPageMoveInput, now = clock()): DocPageSummary {
     const input = validateDocPageMove(value);
     return this.db.transaction(() => {
       const row = this.docRow(id);
@@ -923,7 +932,7 @@ export class Store {
     }).immediate();
   }
   /** Moves the page and its live descendants to the trash under one stamp so they come back together. */
-  deleteDocPage(id: string, now = Date.now()): void {
+  deleteDocPage(id: string, now = clock()): void {
     this.db.transaction(() => {
       const row = this.docRow(id);
       if (row.deleted_at !== null) return;
@@ -937,7 +946,7 @@ export class Store {
     }).immediate();
   }
   /** Restores the subtree trashed together with the page; a page whose parent is still trashed returns to the root level. */
-  restoreDocPage(id: string, now = Date.now()): DocPageSummary {
+  restoreDocPage(id: string, now = clock()): DocPageSummary {
     return this.db.transaction(() => {
       const row = this.docRow(id);
       if (row.deleted_at === null) return this.mapDocSummary(row);
@@ -975,7 +984,7 @@ export class Store {
       throw new AppError('Тег с таким названием уже существует', 409);
     }
   }
-  createTag(value: TagInput, now = Date.now()): Tag {
+  createTag(value: TagInput, now = clock()): Tag {
     const input = validateTag(value);
     return this.db.transaction(() => {
       this.checkTagName(input.name);
@@ -988,7 +997,7 @@ export class Store {
       return this.getTag(id);
     }).immediate();
   }
-  updateTag(id: string, value: Partial<TagInput>, now = Date.now()): Tag {
+  updateTag(id: string, value: Partial<TagInput>, now = clock()): Tag {
     return this.db.transaction(() => {
       const current = this.getTag(id);
       const input = { ...current, ...validateTagPatch(value) };
@@ -1015,7 +1024,7 @@ export class Store {
     ids.forEach((id, position) => insert.run(taskId, id, position));
   }
   /** Tag assignment is metadata: it never rewrites execution settings or run snapshots. */
-  setTaskTags(id: string, ids: string[], now = Date.now()): Task {
+  setTaskTags(id: string, ids: string[], now = clock()): Task {
     return this.db.transaction(() => {
       this.assertNotArchived(this.getTask(id));
       this.replaceTaskTags(id, ids);
@@ -1041,7 +1050,7 @@ export class Store {
     const match = avatarUrl.match(/^\/api\/avatars\/([a-f0-9]{64})$/);
     if (!match || !this.db.query('SELECT id FROM avatars WHERE id=?').get(match[1]!)) throw new AppError('Выберите загруженный аватар');
   }
-  createWorker(input: WorkerInput, now = Date.now()): Worker {
+  createWorker(input: WorkerInput, now = clock()): Worker {
     const model = validatedModel(input.model);
     const description = validatedDescription(input.description);
     const ultracode = validatedUltracode(input.ultracode);
@@ -1054,7 +1063,7 @@ export class Store {
       return this.getWorker(id);
     }).immediate();
   }
-  updateWorker(id: string, input: WorkerInput & { archived?: boolean }, now = Date.now()): Worker {
+  updateWorker(id: string, input: WorkerInput & { archived?: boolean }, now = clock()): Worker {
     return this.db.transaction(() => {
       const current = this.getWorker(id);
       const model = validatedModel(input.model === undefined && input.provider === current.provider ? current.model : input.model);
@@ -1082,7 +1091,7 @@ export class Store {
     return { worker, reason: '' };
   }
   /** Hands the current fresh turn to a replacement worker in a new session; the failed turn stays in the step history. */
-  substituteWorker(id: string, fence: RunFence, replacement: Worker, error: string, now = Date.now()): Run | null {
+  substituteWorker(id: string, fence: RunFence, replacement: Worker, error: string, now = clock()): Run | null {
     return this.db.transaction(() => {
       const run = this.getRun(id);
       if (run.status !== 'running' || !matchesFence(run, fence) || run.trigger === 'followup' || run.trigger === 'reconcile') return null;
@@ -1101,7 +1110,7 @@ export class Store {
       return this.getRun(id);
     }).immediate();
   }
-  archiveWorker(id: string, now = Date.now()): Worker {
+  archiveWorker(id: string, now = clock()): Worker {
     this.getWorker(id);
     // Keep references and immutable avatars so scheduled tasks and old sessions remain usable.
     this.db.query('UPDATE workers SET archived=1,updated_at=? WHERE id=?').run(now, id);
@@ -1110,7 +1119,7 @@ export class Store {
   /** Removes a profile for good. A card that still names it, even an archived one, must be reassigned or deleted first;
    * replacement and default choices pointing at it are cleared. Runs keep their own snapshots, so a profile that has
    * already worked stays behind only as a hidden row its run history refers to. */
-  deleteWorker(id: string, now = Date.now()): void {
+  deleteWorker(id: string, now = clock()): void {
     this.db.transaction(() => {
       this.getWorker(id);
       const assigned = this.db.query(`SELECT count(*) AS n, coalesce(sum(archived_at IS NOT NULL),0) AS archived FROM tasks WHERE worker_id=?
@@ -1139,7 +1148,7 @@ export class Store {
     return this.mapIntegratorProfile(this.db.query('SELECT * FROM integrator_profile WHERE singleton=1').get() as Row);
   }
   /** Applies to reconcile runs created afterwards; started runs keep their frozen snapshot. */
-  updateIntegratorProfile(input: IntegratorProfileInput, now = Date.now()): IntegratorProfile {
+  updateIntegratorProfile(input: IntegratorProfileInput, now = clock()): IntegratorProfile {
     const model = validatedModel(input.model);
     this.assertAvatar(input.avatarUrl);
     this.db.query('UPDATE integrator_profile SET mode=?,provider=?,model=?,effort=?,communication_style=?,avatar_url=?,updated_at=? WHERE singleton=1')
@@ -1154,7 +1163,7 @@ export class Store {
     return this.mapAutopilot(this.db.query('SELECT * FROM autopilot WHERE singleton=1').get() as Row);
   }
   /** Enabling starts a session: the pool, the failure counter and the report count from this moment. Enabling again only changes the stop time. */
-  setAutopilot(input: AutopilotInput, now = Date.now()): AutopilotState {
+  setAutopilot(input: AutopilotInput, now = clock()): AutopilotState {
     return this.db.transaction(() => {
       const state = this.getAutopilot();
       if (input.enabled && !state.enabled) {
@@ -1168,7 +1177,7 @@ export class Store {
     }).immediate();
   }
   /** The autopilot switches itself off at the stop time, after too many failures or when the service restarts. Running work is never cancelled. */
-  stopAutopilot(reason: Exclude<AutopilotStopReason, 'manual'>, now = Date.now()): AutopilotState {
+  stopAutopilot(reason: Exclude<AutopilotStopReason, 'manual'>, now = clock()): AutopilotState {
     this.db.query('UPDATE autopilot SET enabled=0,stopped_at=?,stop_reason=?,updated_at=? WHERE singleton=1 AND enabled=1').run(now, reason, now);
     return this.getAutopilot();
   }
@@ -1215,10 +1224,11 @@ export class Store {
   }
   autopilotOverview(): AutopilotOverview {
     const state = this.getAutopilot();
-    return { ...state, pool: this.autopilotPool(state.enabled ? state.startedAt : null), attempts: this.autopilotAttempts(state.startedAt) };
+    return { ...state, pool: this.autopilotPool(state.enabled ? state.startedAt : null).map(task => ({ ...task, latestRun: withoutCheckOutput(task.latestRun) })),
+      attempts: this.autopilotAttempts(state.startedAt).map(run => withoutCheckOutput(run)) };
   }
   /** Starts a pool task on the autopilot's behalf; null when the task left the pool or the autopilot was switched off meanwhile. */
-  startAutopilot(taskId: string, mock: boolean, now = Date.now()): Run | null {
+  startAutopilot(taskId: string, mock: boolean, now = clock()): Run | null {
     return this.db.transaction(() => {
       const state = this.getAutopilot();
       if (!state.enabled || (state.until !== null && now >= state.until) || !this.autopilotRows(state.startedAt, taskId).length) return null;
@@ -1228,7 +1238,7 @@ export class Store {
     }).immediate();
   }
   /** Reserves a free process slot and a free repository before the run exists, so the pool never piles up as queued runs. */
-  claimAutopilot(taskId: string, location: RepositoryLocation, mock: boolean, maximum: number, perRepository: number, now = Date.now()): Run | null {
+  claimAutopilot(taskId: string, location: RepositoryLocation, mock: boolean, maximum: number, perRepository: number, now = clock()): Run | null {
     return this.db.transaction(() => {
       if (this.autopilotCapacity(maximum) < 1 || this.repositoryBusy(location.repositoryId, perRepository, false) ||
           this.db.query("SELECT seq FROM execution_requests WHERE repository_id=? AND state='queued'").get(location.repositoryId)) return null;
@@ -1241,7 +1251,7 @@ export class Store {
     const queued = (this.db.query(`SELECT COUNT(*) AS n FROM execution_requests e JOIN runs r ON r.id=e.run_id AND r.turn=e.turn WHERE e.state='queued' AND r.status='queued'`).get() as { n: number }).n;
     return Math.max(0, maximum - this.occupiedSlots() - queued);
   }
-  saveAvatar(data: Uint8Array, mime: string, now = Date.now()): string {
+  saveAvatar(data: Uint8Array, mime: string, now = clock()): string {
     const id = createHash('sha256').update(data).digest('hex');
     this.db.query('INSERT OR IGNORE INTO avatars (id,mime,data,created_at) VALUES (?,?,?,?)').run(id, mime, data, now);
     return `/api/avatars/${id}`;
@@ -1310,7 +1320,7 @@ export class Store {
     for (const id of extraIds) this.db.query('INSERT OR IGNORE INTO run_attachment_inputs(run_id,turn,attachment_id) VALUES (?,?,?)').run(run.id, nextTurn, id);
   }
   /** Bounded cleanup never touches committed files, including files retained by old run snapshots. */
-  cleanupAttachments(now = Date.now(), limit = 100): number {
+  cleanupAttachments(now = clock(), limit = 100): number {
     const bound = Math.max(1, Math.min(100, Math.floor(limit) || 100));
     return this.db.query('DELETE FROM attachments WHERE id IN (SELECT id FROM attachments WHERE task_id IS NULL AND expires_at<=? ORDER BY expires_at LIMIT ?)').run(now, bound).changes;
   }
@@ -1336,7 +1346,7 @@ export class Store {
         identity ? 'agent' : 'user', prepared.name, prepared.mime, prepared.size, prepared.sha256, +prepared.previewable, now, identity ? null : now + ATTACHMENT_STAGING_TTL_MS, payload.data, payload.preview, payload.preview?.byteLength ?? 0);
     return this.mapAttachment(this.db.query(`SELECT ${ATTACHMENT_COLUMNS} FROM attachments a WHERE a.id=?`).get(id) as Row);
   }
-  stageAttachment(prepared: PreparedAttachment, now = Date.now()): Attachment {
+  stageAttachment(prepared: PreparedAttachment, now = clock()): Attachment {
     return this.db.transaction(() => { this.cleanupAttachments(now); return this.insertAttachment(prepared, now); }).immediate();
   }
   deleteStagedAttachment(id: string): void {
@@ -1419,7 +1429,7 @@ export class Store {
     if (Buffer.byteLength(result) > 4096) throw new AppError('Слишком большой результат операции MCP');
     this.db.query('UPDATE mcp_tool_operations SET result=? WHERE key=? AND result IS NULL').run(result, key);
   }
-  publishAgentAttachment(runId: string, fence: RunFence, requestId: string, prepared: PreparedAttachment, caption?: string, now = Date.now()): Attachment {
+  publishAgentAttachment(runId: string, fence: RunFence, requestId: string, prepared: PreparedAttachment, caption?: string, now = clock()): Attachment {
     if (caption !== undefined && (typeof caption !== 'string' || caption.length > 16_000 || caption.includes('\0'))) throw new AppError('Подпись: не больше 16000 символов');
     const cleanCaption = caption?.trim() || null;
     preparedAttachmentPayload(prepared);
@@ -1441,7 +1451,7 @@ export class Store {
       return result;
     }).immediate();
   }
-  publishAgentComment(runId: string, fence: RunFence, requestId: string, value: { body: string; attachmentIds?: string[] }, now = Date.now()): Comment {
+  publishAgentComment(runId: string, fence: RunFence, requestId: string, value: { body: string; attachmentIds?: string[] }, now = clock()): Comment {
     const ids = attachmentIds(value.attachmentIds);
     if (typeof value.body !== 'string' || value.body.length > 16_000 || value.body.includes('\0') || (!value.body.trim() && !ids.length)) throw new AppError('Комментарий: введите текст или приложите файл');
     const body = value.body.trim();
@@ -1460,7 +1470,7 @@ export class Store {
     }).immediate();
   }
   /** The agent's own display-only stage of work; it never changes the run's lifecycle status. */
-  setRunProgress(runId: string, fence: RunFence, value: unknown, now = Date.now()): Run {
+  setRunProgress(runId: string, fence: RunFence, value: unknown, now = clock()): Run {
     const text = normalizeProgress(value);
     if (text === null) throw new AppError(`Статус выполнения: одна строка до ${RUN_PROGRESS_MAX_LENGTH} символов`);
     return this.db.transaction(() => {
@@ -1549,7 +1559,7 @@ export class Store {
     const rows = tagId === undefined
       ? this.db.query('SELECT * FROM tasks ORDER BY created_at DESC, rowid DESC').all()
       : this.db.query('SELECT * FROM tasks WHERE id IN (SELECT task_id FROM task_tags WHERE tag_id=?) ORDER BY created_at DESC, rowid DESC').all(validateTagIds([tagId])[0]!);
-    return (rows as Row[]).map(row => this.mapTask(row));
+    return (rows as Row[]).map(row => this.mapTask(row)).map(task => ({ ...task, latestRun: withoutCheckOutput(task.latestRun) }));
   }
   getTask(id: string): Task {
     const row = this.db.query('SELECT * FROM tasks WHERE id = ?').get(id) as Row | null;
@@ -1574,7 +1584,7 @@ export class Store {
   private assertNotArchived(task: Task) {
     if (task.archivedAt !== null) throw new AppError('Задача в архиве. Восстановите её, чтобы продолжить работу.', 409);
   }
-  archiveTask(id: string, now = Date.now()): Task {
+  archiveTask(id: string, now = clock()): Task {
     return this.db.transaction(() => {
       const task = this.getTask(id);
       if (task.archivedAt !== null) return task;
@@ -1584,7 +1594,7 @@ export class Store {
     }).immediate();
   }
   /** Occurrences that fell due while archived are skipped, never replayed on restore; an auto card rejoins the end of the queue. */
-  restoreTask(id: string, now = Date.now()): Task {
+  restoreTask(id: string, now = clock()): Task {
     return this.db.transaction(() => {
       const task = this.getTask(id);
       if (task.archivedAt === null) return task;
@@ -1666,7 +1676,7 @@ export class Store {
     }
     return steps;
   }
-  createTask(input: TaskInput, now = Date.now()): Task {
+  createTask(input: TaskInput, now = clock()): Task {
     return this.db.transaction(() => {
       const id = crypto.randomUUID();
       const steps = this.taskSteps(input.steps);
@@ -1683,7 +1693,7 @@ export class Store {
       return this.getTask(id);
     }).immediate();
   }
-  updateTask(id: string, input: TaskInput, now = Date.now()): Task {
+  updateTask(id: string, input: TaskInput, now = clock()): Task {
     return this.db.transaction(() => {
       const task = this.getTask(id);
       this.assertNotArchived(task);
@@ -1716,7 +1726,7 @@ export class Store {
     return (this.db.query('SELECT * FROM comments WHERE task_id=? AND seq<=? ORDER BY seq LIMIT ? OFFSET ?')
       .all(taskId, throughSequence, limit, offset) as Row[]).map(row => this.mapComment(row));
   }
-  recordAgentSummary(taskId: string, runId: string, kind: 'agent' | 'result', body: string, afterSequence: number, now = Date.now(), stepIndex: number | null = null): Comment {
+  recordAgentSummary(taskId: string, runId: string, kind: 'agent' | 'result', body: string, afterSequence: number, now = clock(), stepIndex: number | null = null): Comment {
     return this.db.transaction(() => {
       // The CLI may publish its answer through MCP or a callback before returning
       // the same summary. Only reuse this invocation's answer; an earlier turn or
@@ -1729,7 +1739,7 @@ export class Store {
       return this.mapComment({ ...existing, kind });
     }).immediate();
   }
-  comment(taskId: string, runId: string | null, kind: Comment['kind'], body: string, now = Date.now(), stepIndex?: number | null, ids?: string[]): Comment {
+  comment(taskId: string, runId: string | null, kind: Comment['kind'], body: string, now = clock(), stepIndex?: number | null, ids?: string[]): Comment {
     return this.db.transaction(() => {
       const task = this.getTask(taskId);
       if (kind === 'user') this.assertNotArchived(task);
@@ -1743,7 +1753,7 @@ export class Store {
       return this.mapComment(this.db.query('SELECT * FROM comments WHERE id=?').get(id) as Row);
     }).immediate();
   }
-  log(taskId: string, runId: string | null, entry: TaskLogInput, now = Date.now(), stepIndex?: number | null): TaskLog {
+  log(taskId: string, runId: string | null, entry: TaskLogInput, now = clock(), stepIndex?: number | null): TaskLog {
     this.getTask(taskId);
     const run = runId ? this.getRun(runId) : null;
     if (run && run.taskId !== taskId) throw new AppError('Запуск относится к другой задаче', 409);
@@ -1771,7 +1781,7 @@ export class Store {
     this.comment(task.id, id, 'system', mock ? 'Демо-запуск: используется тестовый агент, реальные CLI не вызываются.' : `Запуск ${worker?.provider === 'claude' || (!worker && task.provider === 'claude') ? 'Claude Code' : 'Codex'} через CLI.`, now);
     return this.getRun(id);
   }
-  startManual(taskId: string, mock: boolean, now = Date.now()): Run {
+  startManual(taskId: string, mock: boolean, now = clock()): Run {
     return this.db.transaction(() => {
       const task = this.getTask(taskId);
       if (task.hasCompletedRun) throw new AppError('Задача уже выполнялась успешно. Отправьте продолжение в сохранённую сессию завершённого запуска.', 409);
@@ -1792,7 +1802,7 @@ export class Store {
   private followupFingerprint(input: FollowupInput): string {
     return createHash('sha256').update(JSON.stringify([input.sourceRunId, input.sourceStepIndex, input.body, input.attachmentIds])).digest('hex');
   }
-  startFollowup(taskId: string, value: FollowupInput, now = Date.now()): { run: Run; created: boolean } {
+  startFollowup(taskId: string, value: FollowupInput, now = clock()): { run: Run; created: boolean } {
     const input = validateFollowup(value);
     return this.db.transaction(() => {
       const prior = this.getFollowupRequest(taskId, input);
@@ -1840,7 +1850,7 @@ export class Store {
     }).immediate();
   }
   /** Hands the newest conflicted result of a worktree to the built-in integrator in a fresh session. */
-  startReconcile(sourceRunId: string, now = Date.now()): Run {
+  startReconcile(sourceRunId: string, now = clock()): Run {
     return this.db.transaction(() => {
       const source = this.getRun(sourceRunId);
       const task = this.getTask(source.taskId);
@@ -1877,7 +1887,7 @@ export class Store {
       this.db.query('UPDATE runs SET reconcile_snapshot=? WHERE id=?').run(JSON.stringify({ ...run.reconcile, ...patch }), runId);
     }).immediate();
   }
-  claimDue(mock: boolean, now = Date.now(), settlingTaskIds: readonly string[] = []): Run[] {
+  claimDue(mock: boolean, now = clock(), settlingTaskIds: readonly string[] = []): Run[] {
     return this.db.transaction(() => {
       const due = this.db.query("SELECT * FROM tasks WHERE paused=0 AND archived_at IS NULL AND schedule='interval' AND next_run_at<=?").all(now) as Row[];
       const claimed: Run[] = [];
@@ -1942,7 +1952,7 @@ export class Store {
   }
   /** Records that brigd removed (or is removing) the folder on purpose, so a later continuation may recreate it from the branch.
    * The merged commit is stored in the same write, so a crash between the two never recreates an older tree. */
-  markWorkspaceRemoved(id: string, now = Date.now(), lastIntegratedCommit: string | null = null, removedBy: 'merge' | 'cleanup' = 'merge'): void {
+  markWorkspaceRemoved(id: string, now = clock(), lastIntegratedCommit: string | null = null, removedBy: 'merge' | 'cleanup' = 'merge'): void {
     this.db.transaction(() => {
       let workspace: WorkspaceSnapshot;
       try { workspace = this.getWorkspace(id); } catch { return; }
@@ -1989,7 +1999,7 @@ export class Store {
     const integration = this.db.query("SELECT seq FROM integrations WHERE repository_id=? AND state IN ('queued','checking','merging','cancelling','interrupted')").get(repositoryId);
     return !!uncertain || !!integration || !!shared || exclusive && occupied > 0 || occupied >= perRepository;
   }
-  private executionStatus(run: Run, status: RunStatus, now = Date.now()) {
+  private executionStatus(run: Run, status: RunStatus, now = clock()) {
     this.db.query('UPDATE runs SET status=?,updated_at=? WHERE id=?').run(status, now, run.id);
     if (run.currentStepIndex !== null) {
       updateStep(run.steps[run.currentStepIndex]!, { status, updatedAt: now });
@@ -2010,7 +2020,7 @@ export class Store {
       if (run.status !== 'preparing' || !matchesFence(run, fence)) return null;
       if (run.workspace) {
         // A folder that was reclaimed is back now; remember when, so the agent and the card can tell what is missing in it.
-        const recreated = run.workspace.removedAt ? { recreatedAt: Date.now() } : {};
+        const recreated = run.workspace.removedAt ? { recreatedAt: clock() } : {};
         this.db.query('UPDATE workspaces SET snapshot=? WHERE id=?').run(JSON.stringify({ ...run.workspace, prepared: true, removedAt: null, removedBy: null, ...recreated }), run.workspace.id);
       }
       this.db.query("UPDATE execution_requests SET state='running' WHERE run_id=? AND turn=? AND state='preparing'").run(runId, fence.turn);
@@ -2023,8 +2033,8 @@ export class Store {
       const run = this.getRun(runId);
       if (!['queued', 'preparing'].includes(run.status) || !matchesFence(run, fence)) return;
       this.executionStatus(run, 'running');
-      this.finish(runId, blocked ? 'blocked' : 'failed', null, message, Date.now(), fence);
-      this.log(run.taskId, runId, { kind: 'lifecycle', summary: 'Подготовка запуска остановлена', details: [message] }, Date.now(), run.currentStepIndex);
+      this.finish(runId, blocked ? 'blocked' : 'failed', null, message, clock(), fence);
+      this.log(run.taskId, runId, { kind: 'lifecycle', summary: 'Подготовка запуска остановлена', details: [message] }, clock(), run.currentStepIndex);
     }).immediate();
   }
   settleExecution(runId: string, turn: number, hold = false) {
@@ -2055,11 +2065,11 @@ export class Store {
         // can be captured again; completed historical snapshots stay intact.
         const active = this.db.query(`SELECT id FROM runs WHERE workspace_id=? AND status IN (${OPEN})`).get(run.workspace.id);
         if (active) throw new AppError('Сначала завершите активное продолжение этой рабочей папки.', 409);
-        const next = { ...prior, status: 'queued' as const, rechecks: 0, error: null, checks: [], updatedAt: Date.now() };
+        const next = { ...prior, status: 'queued' as const, rechecks: 0, error: null, checks: [], updatedAt: clock() };
         this.writeIntegration(next); return next;
       }
       const job: Integration = { id: crypto.randomUUID(), runId, repositoryId: run.workspace.repositoryId, status: 'queued', attempt: 0,
-        sourceCommit: null, targetCommit: null, resultCommit: null, candidatePath: null, checks: [], error: null, updatedAt: Date.now() };
+        sourceCommit: null, targetCommit: null, resultCommit: null, candidatePath: null, checks: [], error: null, updatedAt: clock() };
       this.db.query('INSERT INTO integrations (id,run_id,repository_id,state,attempt,snapshot) VALUES (?,?,?,?,?,?)')
         .run(job.id, runId, job.repositoryId, job.status, job.attempt, JSON.stringify(job));
       return job;
@@ -2078,7 +2088,7 @@ export class Store {
         const job = JSON.parse(row.snapshot) as Integration;
         if (this.occupiedSlots() >= maximum) break;
         if (this.integrationWaits(job.repositoryId, row.workspace_id)) continue;
-        const next = { ...job, status: 'checking' as const, attempt: job.attempt + 1, error: null, sourceCommit: null, targetCommit: null, resultCommit: null, candidatePath: null, checks: [], updatedAt: Date.now() };
+        const next = { ...job, status: 'checking' as const, attempt: job.attempt + 1, error: null, sourceCommit: null, targetCommit: null, resultCommit: null, candidatePath: null, checks: [], updatedAt: clock() };
         this.writeIntegration(next); claimed.push(next);
       }
       return claimed;
@@ -2102,7 +2112,7 @@ export class Store {
       if (job.attempt !== attempt || !['checking', 'merging', 'cancelling'].includes(job.status)) return job;
       if (job.status === 'cancelling' && !finish) return job;
       // A cancellation that arrives after the target was already updated cannot undo the merge, so the merge wins.
-      const next: Integration = { ...job, ...patch, id: job.id, runId: job.runId, repositoryId: job.repositoryId, attempt: job.attempt, updatedAt: Date.now(),
+      const next: Integration = { ...job, ...patch, id: job.id, runId: job.runId, repositoryId: job.repositoryId, attempt: job.attempt, updatedAt: clock(),
         ...(job.status === 'cancelling' && patch.status !== 'merged' ? { status: 'cancelled', error: 'Слияние отменено. Уже выполненные Git-операции не откатываются.' } : {}) };
       if (next.status === 'queued') {
         next.rechecks = (job.rechecks ?? 0) + 1;
@@ -2128,7 +2138,7 @@ export class Store {
       if (!row) return;
       const job = JSON.parse(row.snapshot) as Integration;
       if (job.attempt !== attempt || job.status !== 'conflict') return;
-      this.writeIntegration({ ...job, error: [job.error, note].filter(Boolean).join(' ').slice(0, 4_000), updatedAt: Date.now() });
+      this.writeIntegration({ ...job, error: [job.error, note].filter(Boolean).join(' ').slice(0, 4_000), updatedAt: clock() });
     }).immediate();
   }
   cancelIntegration(runId: string, pending: boolean, acknowledgement = false): Integration {
@@ -2137,7 +2147,7 @@ export class Store {
       if (!job) throw new AppError('У запуска нет слияния', 409);
       if (job.status === 'interrupted' && !acknowledgement) throw new AppError('Сначала подтвердите, что прежние процессы проверки и слияния остановлены.', 409);
       if (!['queued', 'checking', 'merging', 'interrupted'].includes(job.status)) throw new AppError('Слияние уже завершено', 409);
-      const next = { ...job, status: pending ? 'cancelling' as const : 'cancelled' as const, updatedAt: Date.now() };
+      const next = { ...job, status: pending ? 'cancelling' as const : 'cancelled' as const, updatedAt: clock() };
       this.writeIntegration(next); return next;
     }).immediate();
   }
@@ -2154,7 +2164,7 @@ export class Store {
       if (run.status !== 'running' || !matchesFence(run, fence)) return;
       validateSessionId(sessionId);
       if (run.sessionId && run.sessionId !== sessionId) throw new AppError('CLI вернул другую сессию; запуск остановлен.', 409);
-      const now = Date.now();
+      const now = clock();
       this.db.query('UPDATE runs SET session_id=?,updated_at=? WHERE id=?').run(sessionId, now, id);
       if (run.currentStepIndex !== null) {
         updateStep(run.steps[run.currentStepIndex]!, { sessionId, updatedAt: now });
@@ -2162,7 +2172,7 @@ export class Store {
       }
     }).immediate();
   }
-  finish(id: string, status: Exclude<RunStatus, 'running'>, summary: string | null, error: string | null, now = Date.now(), fence?: RunFence): Run {
+  finish(id: string, status: Exclude<RunStatus, 'running'>, summary: string | null, error: string | null, now = clock(), fence?: RunFence): Run {
     return this.db.transaction(() => {
       const run = this.getRun(id);
       if (run.status !== 'running' || !matchesFence(run, fence)) return run;
@@ -2207,7 +2217,7 @@ export class Store {
     this.db.query("UPDATE autopilot SET enabled=0,failures=?,stopped_at=?,stop_reason='failures',updated_at=? WHERE singleton=1").run(failures, now, now);
     this.comment(run.taskId, run.id, 'system', `Автопилот выключен: ${AUTOPILOT_FAILURE_LIMIT} запуска подряд завершились ошибкой или блокировкой. Проверьте причину и включите его снова.`, now, run.currentStepIndex);
   }
-  resume(id: string, answer: string, acknowledgeInterruption = false, now = Date.now(), ids?: string[]): Run {
+  resume(id: string, answer: string, acknowledgeInterruption = false, now = clock(), ids?: string[]): Run {
     return this.db.transaction(() => {
       const run = this.getRun(id);
       if (!['waiting_input', 'interrupted'].includes(run.status)) throw new AppError('Этот запуск нельзя продолжить', 409);
@@ -2223,7 +2233,7 @@ export class Store {
       return this.getRun(id);
     }).immediate();
   }
-  retry(id: string, acknowledgeInterruption = false, now = Date.now()): Run {
+  retry(id: string, acknowledgeInterruption = false, now = clock()): Run {
     return this.db.transaction(() => {
       const run = this.getRun(id);
       if (run.currentStepIndex === null || !run.steps.length) throw new AppError('Повтор отдельного этапа доступен только для сложной задачи', 409);
@@ -2239,7 +2249,7 @@ export class Store {
       return this.getRun(id);
     }).immediate();
   }
-  cancel(id: string, now = Date.now(), pending = false, acknowledgeInterruption = false): Run {
+  cancel(id: string, now = clock(), pending = false, acknowledgeInterruption = false): Run {
     return this.db.transaction(() => {
       const run = this.getRun(id);
       if ((run.steps.length || run.followup || this.executionNeedsAcknowledgement(id)) && run.status === 'interrupted' && !acknowledgeInterruption) throw new AppError('Сначала подтвердите, что предыдущий CLI-процесс остановлен. Отмена освобождает задачу для новых запусков.', 409);
@@ -2259,7 +2269,7 @@ export class Store {
       return this.getRun(id);
     }).immediate();
   }
-  completeCancellation(id: string, now = Date.now(), fence?: RunFence) {
+  completeCancellation(id: string, now = clock(), fence?: RunFence) {
     this.db.transaction(() => {
       const run = this.getRun(id);
       if (run.status !== 'cancelling' || !matchesFence(run, fence)) return;
@@ -2270,7 +2280,7 @@ export class Store {
       }
     }).immediate();
   }
-  reconcile(now = Date.now()): number {
+  reconcile(now = clock()): number {
     return this.db.transaction(() => {
       // Unattended work never resumes on its own: interrupted runs need a human check first.
       this.db.query("UPDATE autopilot SET enabled=0,stopped_at=?,stop_reason='restart',updated_at=? WHERE singleton=1 AND enabled=1").run(now, now);

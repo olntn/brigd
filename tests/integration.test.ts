@@ -6,6 +6,9 @@ import { Engine } from '../server/engine';
 import { Store, runFence } from '../server/store';
 import { GitWorkspaces } from '../server/workspaces';
 import { createHandler } from '../server/http';
+import { OutputTail } from '../server/integration';
+import { createAppController } from '../server/task-mcp-app';
+import { CHECK_OUTPUT_LIMIT } from '../src/lib/integration-checks';
 import type { Run } from '../src/lib/types';
 import { controlledAgent, git, outcome, repository, taskInput, until } from './repository-helpers';
 
@@ -82,6 +85,74 @@ test('failed checks preserve the target and retain the candidate with failure de
   expect(store.getTask(run.taskId).status).toBe('merge_failed');
 });
 
+test('each check keeps the end of its stdout and stderr, which survives a restart and is served by HTTP and MCP', async () => {
+  const passing = command("console.log('first check passed')");
+  await configure([passing, command("console.log('compiling'); console.error('FAIL tests/value.test.ts: expected 1'); process.exit(3)")]);
+  const run = await start(); complete(run);
+  const failed = await settled(run);
+  expect(failed.status).toBe('failed');
+  expect(failed.checks[0]).toEqual({ argv: passing, exitCode: 0, output: 'first check passed\n' });
+  // The two pipes are read concurrently, so only their lines, not their mutual order, are fixed.
+  expect(failed.checks[1]).toMatchObject({ exitCode: 3 }); expect(failed.checks[1]!.outputTruncated).toBeUndefined();
+  expect(failed.checks[1]!.output!.split('\n').sort()).toEqual(['', 'FAIL tests/value.test.ts: expected 1', 'compiling']);
+  await engine.shutdown(); store.close(); store = new Store(join(folder, 'data.sqlite'));
+  engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces'), checks), integrationChecks: checks });
+  expect(store.integrationForRun(run.id)!.checks).toEqual(failed.checks);
+  const handler = createHandler(engine, { port: 4310, root: folder, startedAt: 0 });
+  const read = async (path: string) => await (await handler(new Request(`http://127.0.0.1:4310${path}`, { headers: { origin: 'http://127.0.0.1:4310' } }))).json();
+  const detail = await read(`/api/tasks/${run.taskId}`);
+  expect(detail.task.latestRun.integration.checks).toEqual(failed.checks); expect(detail.runs[0].integration.checks).toEqual(failed.checks);
+  // The board polls every task, so its list carries only the exit codes.
+  expect((await read('/api/tasks')).find((task: { id: string }) => task.id === run.taskId).latestRun.integration.checks).toEqual(failed.checks.map(({ argv, exitCode }) => ({ argv, exitCode })));
+  const app = createAppController(store, { taskDefaults: () => ({ cwd: root, provider: 'codex' }), beginOperation: () => { throw new Error('read only'); }, finishOperation: () => {} }, undefined, () => true, () => {});
+  const result = await app.execute('get_run', { run_id: run.id });
+  const first = result.content[0];
+  expect(result.isError).toBeUndefined();
+  expect(first?.type === 'text' && JSON.parse(first.text).integration).toMatchObject({ status: 'failed', attempt: 1, sourceCommit: failed.sourceCommit, targetCommit: failed.targetCommit,
+    error: failed.error, checks: failed.checks });
+});
+
+test('check output keeps only its last 16 KB, cut at a UTF-8 character boundary', async () => {
+  // Three-byte characters do not divide the limit, so the cut falls inside one; the output also arrives in many chunks.
+  await configure([command("process.stdout.write('начало\\n' + 'あ'.repeat(20000) + '\\nконец\\n')")]);
+  const run = await start(); complete(run);
+  const merged = await settled(run);
+  expect(merged.status).toBe('merged');
+  const check = merged.checks[0]!;
+  expect(check.outputTruncated).toBe(true);
+  expect(Buffer.byteLength(check.output!)).toBe(CHECK_OUTPUT_LIMIT - 1);
+  expect(check.output!.startsWith('あ')).toBe(true); expect(check.output!.endsWith('\nконец\n')).toBe(true);
+  expect(check.output).not.toContain('�'); expect(check.output).not.toContain('начало');
+});
+
+test('an output tail keeps the newest bytes, drops a split character and marks only cut output', () => {
+  const short = new OutputTail(8); short.push('ok'); short.push('\n');
+  expect(short.result()).toEqual({ output: 'ok\n' });
+  // 'ab' and three euro signs make 11 bytes; the last 8 start inside the first euro sign.
+  const euro = new OutputTail(8); euro.push('ab'); euro.push('€€'); euro.push('€');
+  expect(euro.result()).toEqual({ output: '€€', outputTruncated: true });
+  // The last 9 of the alternating 4- and 1-byte characters keep three bytes of an emoji, which go as a whole.
+  const emoji = new OutputTail(9); for (let index = 0; index < 50; index++) emoji.push(index % 2 ? 'x' : '😀');
+  expect(emoji.result()).toEqual({ output: 'x😀x', outputTruncated: true });
+});
+
+test('a merge saved before check output was kept still reads, restarts and is served unchanged', async () => {
+  const run = await start(); complete(run);
+  const merged = await settled(run);
+  const legacy = { ...merged, checks: merged.checks.map(({ argv, exitCode }) => ({ argv, exitCode })) };
+  store.db.query('UPDATE integrations SET snapshot=? WHERE id=?').run(JSON.stringify(legacy), merged.id);
+  await engine.shutdown(); store.close(); store = new Store(join(folder, 'data.sqlite'));
+  engine = new Engine(store, false, agent.factory, undefined, { workspaces: new GitWorkspaces(join(folder, 'workspaces'), checks), integrationChecks: checks });
+  expect(store.integrationForRun(run.id)).toEqual(legacy);
+  expect(store.getTask(run.taskId)).toMatchObject({ status: 'completed', latestRun: { integration: legacy } });
+  const handler = createHandler(engine, { port: 4310, root: folder, startedAt: 0 });
+  const response = await handler(new Request(`http://127.0.0.1:4310/api/tasks/${run.taskId}`, { headers: { origin: 'http://127.0.0.1:4310' } }));
+  expect((await response.json()).runs[0].integration).toEqual(legacy);
+  const app = createAppController(store, { taskDefaults: () => ({ cwd: root, provider: 'codex' }), beginOperation: () => { throw new Error('read only'); }, finishOperation: () => {} }, undefined, () => true, () => {});
+  const first = (await app.execute('get_run', { run_id: run.id })).content[0];
+  expect(first?.type === 'text' && JSON.parse(first.text).integration.checks).toEqual(legacy.checks);
+});
+
 test('a textual merge conflict is retained and does not advance the target', async () => {
   await configure(checks, 1, false);
   const run = await start();
@@ -133,7 +204,9 @@ test('a conflict is handed to the built-in integrator in the same worktree and i
 test('manual mode keeps the conflict until the HTTP hand-over, which is refused while the integrator is busy or after success', async () => {
   await configure(checks, 1, false);
   const run = await start(); conflictingTarget('conflicting target\n'); complete(run);
-  expect((await settled(run)).status).toBe('conflict'); await Bun.sleep(40); expect(agent.calls).toHaveLength(1);
+  // An automatic hand-over would have created the integrator run in the same step that stored the conflict.
+  expect((await settled(run)).status).toBe('conflict'); expect(store.detail(run.taskId).runs.map(item => item.trigger)).toEqual(['manual']);
+  expect(agent.calls).toHaveLength(1);
   expect(store.getTask(run.taskId).status).toBe('merge_conflict');
   const handler = createHandler(engine, { port: 4310, root: folder, startedAt: 0 });
   const post = (action: string) => handler(new Request(`http://127.0.0.1:4310/api/runs/${run.id}/${action}`, { method: 'POST', headers: { origin: 'http://127.0.0.1:4310', 'content-type': 'application/json' }, body: '{}' }));
@@ -192,6 +265,27 @@ test('an integrator prepared after the target was repaired finishes without an a
   expect(store.getRun(integrator.id)).toMatchObject({ status: 'completed', sessionId: null });
   expect(readFileSync(join(root, 'src/value.txt'), 'utf8')).toBe('worker result\n');
   expect(existsSync(run.workspace!.path)).toBe(false);
+});
+
+test('a wall clock stepping back keeps the integrator newest and still reclaims the worktree after its merge', async () => {
+  await configure(checks, 1, false);
+  const run = await start(); conflictingTarget('conflicting target\n'); complete(run);
+  const conflict = await settled(run);
+  expect(conflict.status).toBe('conflict');
+  // NTP or WSL corrections move Date.now() back by seconds; a minute makes the step unmistakable.
+  const wall = Date.now;
+  Date.now = () => wall() - 60_000;
+  try {
+    git(root, 'revert', '--no-edit', 'HEAD');
+    const integrator = engine.reconcile(run.id);
+    expect(store.getTask(run.taskId).latestRun!.id).toBe(integrator.id);
+    expect(integrator.startedAt).toBeGreaterThan(store.getRun(run.id).startedAt);
+    const merged = await settled(integrator);
+    expect(merged.status).toBe('merged'); expect(merged.updatedAt).toBeGreaterThan(store.integrationForRun(run.id)!.updatedAt);
+    expect(store.getTask(run.taskId).status).toBe('completed');
+    expect(existsSync(run.workspace!.path)).toBe(false); expect(existsSync(conflict.candidatePath!)).toBe(false);
+    expect(store.detail(run.taskId).logs!.map(entry => entry.summary)).toContain('Рабочая папка запуска удалена после слияния');
+  } finally { Date.now = wall; }
 });
 
 test('dirty target files survive a blocked transfer and explicit retry rechecks before applying', async () => {
@@ -299,9 +393,10 @@ test('the integrator takes the first free place, merges of its repository wait f
   expect(store.getRun(queued.id).status).toBe('queued');
   const target = git(root, 'rev-parse', 'HEAD');
   writeFileSync(join(second.workspace!.path, 'src/second.txt'), 'two'); agent.calls[1]!.resolve(outcome('second'));
-  await until(() => store.getRun(second.id).status === 'completed');
+  // The finished turn releases its place and claims waiting merges in one step; once it is settled, that claim was decided.
+  await until(() => store.getRun(second.id).status === 'completed' &&
+    (store.db.query('SELECT state FROM execution_requests WHERE run_id=?').get(second.id) as { state: string }).state === 'settled');
   // The target must not move while the integrator resolves the conflict against it.
-  await Bun.sleep(60);
   expect(store.integrationForRun(second.id)!.status).toBe('queued'); expect(git(root, 'rev-parse', 'HEAD')).toBe(target);
   expect(store.getRun(queued.id).status).toBe('queued');
   writeFileSync(join(first.workspace!.path, 'src/value.txt'), 'resolved by integrator\n'); agent.calls[2]!.resolve(outcome('integrator-session'));

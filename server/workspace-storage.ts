@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import type { Integration, IntegrationStatus, Run, RunStatus, StorageCleanupResult, StorageEntry, StorageOverview, StorageReason, WorkspaceSnapshot } from '../src/lib/types';
 import { formatBytes } from '../src/lib/format';
 import type { Store } from './store';
+import { clock } from './clock';
 
 /** Chronological statuses of the runs sharing one worktree; the integration status belongs to that run's own merge. */
 export interface WorkspaceRun { id: string; status: RunStatus; integrationStatus: IntegrationStatus | null; integrationUpdatedAt: number | null; startedAt: number; }
@@ -177,7 +178,7 @@ export class WorkspaceStorage {
     const record = this.store.workspaceRecord(workspace.id);
     // This run counts as merged already; the database learns that right after the folders are gone.
     if (!record) return null;
-    const runs = record.runs.map(entry => entry.id === job.runId ? { ...entry, integrationStatus: 'merged' as const, integrationUpdatedAt: Date.now() } : entry);
+    const runs = record.runs.map(entry => entry.id === job.runId ? { ...entry, integrationStatus: 'merged' as const, integrationUpdatedAt: clock() } : entry);
     await this.discardCandidates(workspace.path, workspace.repositoryId, runs);
     if (!existsSync(workspace.path) || workspaceRetention(runs).retained) return null;
     const owned = ownedWorktree(workspace.path, [workspace.repositoryId]);
@@ -186,7 +187,7 @@ export class WorkspaceStorage {
     }
     const size = await measure(workspace.path);
     // Marked first, together with the merged commit: a crash halfway through must not leave a continuation refusing to recreate the folder.
-    this.store.markWorkspaceRemoved(workspace.id, Date.now(), job.sourceCommit, 'merge');
+    this.store.markWorkspaceRemoved(workspace.id, clock(), job.sourceCommit, 'merge');
     await this.removeFolder(workspace.path, workspace.repositoryId);
     const branchDetails: string[] = [];
     try {
@@ -275,7 +276,7 @@ export class WorkspaceStorage {
   }
   private async scan(): Promise<StorageOverview> {
     const note = this.rootNote();
-    if (note) return { ...UNAVAILABLE_STORAGE, note, root: this.root, scannedAt: Date.now() };
+    if (note) return { ...UNAVAILABLE_STORAGE, note, root: this.root, scannedAt: clock() };
     const found = this.listEntries();
     // Records are read after the listing: a workspace row always precedes its folder.
     const workspaces = this.store.listWorkspaceRecords();
@@ -297,7 +298,7 @@ export class WorkspaceStorage {
     const reclaimableBranches = workspaces.filter(record => this.branchRemoval(record.snapshot, record.runs, removableFolders.has(record.snapshot.path)))
       .map(record => record.snapshot.branch!);
     return { available: true, note: null, root: this.root, totalBytes: sum(entries), reclaimableBytes: sum(entries.filter(entry => !entry.retained)),
-      retainedBytes: sum(entries.filter(entry => entry.retained)), entries, reclaimableBranches, scannedAt: Date.now() };
+      retainedBytes: sum(entries.filter(entry => entry.retained)), entries, reclaimableBranches, scannedAt: clock() };
   }
   private classify(item: Found, workspaces: ReturnType<Store['listWorkspaceRecords']>, integrations: Map<string, IntegrationRecord>, repositoryIds: string[]): Omit<StorageEntry, 'bytes' | 'files'> {
     const base = { path: item.path, kind: 'unknown' as const, retained: true, reason: 'foreign' as StorageReason, runId: null, taskId: null, taskTitle: null, startedAt: null };
@@ -365,7 +366,7 @@ export class WorkspaceStorage {
     if (entry.kind === 'worktree' && (entry.runId || entry.reason === 'deleted')) {
       if (!record || !samePath(record.snapshot.path, entry.path) || workspaceRetention(record.runs).retained) return false;
       // Marked first: a crash halfway through must not leave a continuation refusing to recreate the folder.
-      this.store.markWorkspaceRemoved(record.snapshot.id, Date.now(), null, 'cleanup');
+      this.store.markWorkspaceRemoved(record.snapshot.id, clock(), null, 'cleanup');
       return true;
     }
     return !record && entry.reason === 'unknown';

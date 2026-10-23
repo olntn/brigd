@@ -1055,6 +1055,9 @@ dialog::backdrop { background: var(--overlay); }
 .integration-conflicts code { overflow-wrap: anywhere; }
 .integration-checks { padding-left: 20px; font-size: 13px; }
 .integration-checks code { display: block; margin: 4px 0 8px; }
+.integration-output { margin: 0 0 10px; }
+.integration-output summary { cursor: pointer; color: var(--secondary); font-size: .85rem; line-height: 1.7; }
+.integration-output pre { max-height: 24rem; margin: 6px 0 0; padding: 12px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--subtle); color: var(--secondary); font-family: var(--font-mono); font-size: .77rem; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 .integration-path { display: block; padding-top: 8px; }
 .integration-note, .workspace-note { margin: 8px 0 0; font-size: .82rem; line-height: 1.7; color: var(--muted); overflow-wrap: anywhere; }
 .integration-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }

@@ -1,5 +1,7 @@
 import { tk } from './i18n/key';
 
+/** Bytes of a merge check's combined stdout and stderr kept with its exit code: the end of a run names what failed. */
+export const CHECK_OUTPUT_LIMIT = 16 * 1024;
 const invalidCommands = tk('BRIGD_INTEGRATION_CHECKS: укажите 1–10 непустых команд массивами аргументов');
 
 /** Validate argv arrays without shell parsing, with the same limits for UI and environment settings. */

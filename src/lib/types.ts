@@ -341,9 +341,17 @@ export interface Integration {
   candidatePath: string | null;
   /** Paths that failed to merge automatically, relative to the repository root. */
   conflicts?: string[];
-  checks: { argv: string[]; exitCode: number }[];
+  checks: IntegrationCheck[];
   error: string | null;
   updatedAt: number;
+}
+export interface IntegrationCheck {
+  argv: string[];
+  exitCode: number;
+  /** The end of the command's stdout and stderr in arrival order, at most CHECK_OUTPUT_LIMIT bytes of UTF-8. Absent in records saved before output was kept. */
+  output?: string;
+  /** The beginning of the output was cut to fit the limit. */
+  outputTruncated?: boolean;
 }
 export interface Comment {
   attachments?: Attachment[];

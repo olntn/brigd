@@ -146,7 +146,7 @@ describe('integration check settings', () => {
     current = passing;
     const next = await integrator.execute(run, { ...job, attempt: 2 }, new AbortController().signal, () => {});
     expect(next.status).toBe('merged');
-    expect(next.checks).toEqual([{ argv: passing[0], exitCode: 0 }]);
+    expect(next.checks).toEqual([{ argv: passing[0], exitCode: 0, output: '' }]);
     expect(git(root, 'rev-parse', 'HEAD')).toBe(next.resultCommit!);
   });
 });

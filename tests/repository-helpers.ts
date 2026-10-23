@@ -36,6 +36,7 @@ export const taskInput = (cwd: string, patch: Partial<TaskInput> = {}): TaskInpu
 export const outcome = (sessionId = 'saved-session', status: Envelope['status'] = 'completed'): AgentOutcome => ({ sessionId,
   envelope: { status, summary: 'Synthetic result.', questions: status === 'needs_input' ? ['Which outcome?'] : [] } });
 export async function until(ready: () => boolean) {
-  const deadline = Date.now() + 5_000;
-  while (!ready()) { if (Date.now() >= deadline) throw new Error('Condition did not settle'); await Bun.sleep(10); }
+  // A monotonic deadline: the wall clock of a VM or WSL can step by seconds.
+  const deadline = performance.now() + 5_000;
+  while (!ready()) { if (performance.now() >= deadline) throw new Error('Condition did not settle'); await Bun.sleep(10); }
 }
