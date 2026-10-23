@@ -48,11 +48,12 @@
       </summary>
       <div class="log-details">
         {#if run}<p class="log-run-reference">{run.followup ? 'Дополнительный запрос' : run.reconcile ? 'Разрешение конфликта' : 'Запуск'} {run.id.slice(0, 6)}</p>{/if}
-        {#each entry.details as line}<p>{line}</p>{:else}<p>Дополнительные детали для этого события не сохранены.</p>{/each}
+        {#each entry.details as line}<p>{line}</p>{:else}<p>У этого события нет дополнительных деталей.</p>{/each}
         {#if failed(entry)}
           <div class="log-error">
             <div class="log-error-heading"><strong>Ошибка</strong>{#if entry.error?.trim()}<button type="button" class="button secondary" onclick={() => copyError(entry.id, entry.error!)}><Icon name={copied === entry.id ? 'check' : 'code'} size={14} /><span aria-live="polite">{copied === entry.id ? 'Скопировано' : 'Копировать ошибку'}</span></button>{/if}</div>
-            {#if entry.error?.trim()}<pre class="log-error-text" aria-label="Текст ошибки">{entry.error}</pre>{:else}<p>Текст ошибки не был сохранён. Для новых запусков он появится здесь.</p>{/if}
+            {#if entry.error?.trim()}<pre class="log-error-text" aria-label="Текст ошибки">{entry.error}</pre>{:else}<p>Текст ошибки не сохранён: CLI его не передал, либо запись сделана старой версией brigd.</p>{/if}
+            {#if !entry.error?.trim() && run?.error?.trim()}<p class="log-run-outcome"><strong>Итог запуска:</strong> {run.error}</p>{/if}
             {#if copyFailed === entry.id}<p class="log-copy-error" role="status">Не удалось скопировать. Выделите текст ошибки и скопируйте вручную.</p>{/if}
           </div>
         {/if}

@@ -2,7 +2,7 @@ import type { AutopilotInput, AutopilotOverview, AutopilotSettings, CliAccessMod
 import { validateIntegrationChecks } from '../src/lib/integration-checks';
 import { startAgent, buildPrompt, type AgentHandle, type AgentInput, type AgentCallbacks } from './adapter';
 import { AppError, INTEGRATION_RECHECK_LIMIT, Store, runFence, type RunFence } from './store';
-import { UsageLimitError, validateEnvelope, validateSessionId } from './protocol';
+import { ProtocolError, UsageLimitError, validateEnvelope, validateSessionId } from './protocol';
 import { workflowContext } from './workflows';
 import { runUltracode } from '../src/lib/workers';
 import { createTaskBridge } from './task-mcp';
@@ -495,7 +495,11 @@ export class Engine {
     this.store.db.transaction(() => {
       if (!this.store.isCurrent(run.id, fence)) return;
       this.store.finish(run.id, 'failed', null, message.slice(0, 16_000), Date.now(), fence);
-      this.store.log(run.taskId, run.id, { kind: 'lifecycle', summary: 'Ошибка запуска работника', details: [], error: message }, Date.now(), run.currentStepIndex);
+      // The CLI diagnostic (stderr tail, offending output) stays in the log's error block; the comment carries only the message.
+      const diagnostic = error instanceof ProtocolError ? error.diagnostic : undefined;
+      this.store.log(run.taskId, run.id, { kind: 'lifecycle', summary: 'Ошибка запуска работника',
+        details: [diagnostic ? 'Ниже — текст ошибки и диагностика CLI: последние строки stderr или фрагмент его вывода.' : 'Дополнительной диагностики от CLI нет.'],
+        error: diagnostic ? `${message}\n\n${diagnostic}` : message }, Date.now(), run.currentStepIndex);
       this.store.comment(run.taskId, run.id, 'system', message.slice(0, 16_000), Date.now(), run.currentStepIndex);
     }).immediate();
   }

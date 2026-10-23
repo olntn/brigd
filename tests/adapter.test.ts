@@ -99,7 +99,39 @@ describe('provider protocol', () => {
     const parser = new AgentProtocol('codex', capture());
     expect(() => parser.push('not json\n')).toThrow('malformed JSONL');
     expect(() => new AgentProtocol('codex', capture()).accept({ hello: true })).toThrow('invalid event');
-    expect(() => new AgentProtocol('codex', capture()).push('x'.repeat(1024 * 1024 + 1))).toThrow('line limit');
+  });
+  test('an oversized JSONL line, such as a project-wide search result, is skipped instead of aborting the turn', () => {
+    const callbacks = capture(), parser = new AgentProtocol('codex', callbacks);
+    const events = codex();
+    const search = JSON.stringify({ type: 'item.completed', item: { id: 'cmd', type: 'command_execution', command: 'rg TODO', aggregated_output: 'PRIVATE_LINE\n'.repeat(120_000), exit_code: 0, status: 'completed' } });
+    expect(Buffer.byteLength(search)).toBeGreaterThan(1024 * 1024);
+    const wire = [events[0], events[1]].map(e => JSON.stringify(e)).join('\n') + '\n' + search + '\n' + events.slice(2).map(e => JSON.stringify(e)).join('\n') + '\n';
+    for (let i = 0; i < wire.length; i += 64 * 1024) parser.push(wire.slice(i, i + 64 * 1024));
+    expect(parser.finish(0)).toEqual({ sessionId: sid, envelope: completed });
+    expect(parser.discardedBytes).toBe(Buffer.byteLength(search));
+    const skipped = callbacks.logs.filter(log => log.summary === 'Пропущено слишком длинное событие CLI');
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]?.kind).toBe('lifecycle');
+    expect(skipped[0]?.details.join(' ')).toContain(`1 МиБ не разбирается и не сохраняется: ${Buffer.byteLength(search)} байт.`);
+    expect(JSON.stringify(callbacks)).not.toContain('PRIVATE_LINE');
+  });
+  test('an oversized line that arrives whole, or as an unterminated tail, is skipped the same way', () => {
+    const whole = capture(), wholeParser = new AgentProtocol('claude', whole);
+    wholeParser.push(JSON.stringify(claude()[0]) + '\n' + 'x'.repeat(1024 * 1024 + 1) + '\n' + JSON.stringify(claude()[1]) + '\n');
+    expect(wholeParser.finish(0)).toEqual({ sessionId: sid, envelope: completed });
+    expect(wholeParser.discardedBytes).toBe(1024 * 1024 + 1);
+    expect(whole.logs.filter(log => log.summary === 'Пропущено слишком длинное событие CLI')).toHaveLength(1);
+    const tail = capture(), tailParser = new AgentProtocol('codex', tail);
+    tailParser.push(codex().map(e => JSON.stringify(e)).join('\n') + '\n');
+    tailParser.push('{"type":"item.completed","item":{"aggregated_output":"' + 'y'.repeat(1024 * 1024));
+    tailParser.push('y'.repeat(100));
+    expect(tailParser.finish(0)).toEqual({ sessionId: sid, envelope: completed });
+    expect(tailParser.discardedBytes).toBe(Buffer.byteLength('{"type":"item.completed","item":{"aggregated_output":"') + 1024 * 1024 + 100);
+    expect(tail.logs.filter(log => log.summary === 'Пропущено слишком длинное событие CLI')).toHaveLength(1);
+    // Lines within the limit are still parsed strictly after a skipped one.
+    const strict = new AgentProtocol('codex', capture());
+    expect(() => strict.push('z'.repeat(1024 * 1024 + 1) + '\n')).not.toThrow();
+    expect(() => strict.push('not json\n')).toThrow('malformed JSONL');
   });
   test('questions in prose do not manufacture needs_input', () => {
     const result = parse('codex', codex({ ...completed, summary: 'Documented the FAQ: How do I sign in?' }));
@@ -532,6 +564,22 @@ describe('effort launch failures (synthetic CLI, no model calls)', () => {
       }
     } finally { process.env.PATH = previousPath; rmSync(folder, { recursive: true, force: true }); }
   });
+  test('a search result above both the line and the total output limits is dropped and the turn still completes', async () => {
+    const folder = mkdtempSync(join(tmpdir(), 'brigd-oversized-cli-')), previousPath = process.env.PATH;
+    const help = '--print --output-format stream-json --verbose --resume --permission-mode';
+    // One 9.8 MB tool result: over the 1 MiB line limit and, on its own, over the 8 MiB bounded output.
+    writeFileSync(join(folder, 'claude'), `#!${process.execPath}\nif (process.argv.includes('--help')) console.log(${JSON.stringify(help)});\nelse { const [init, result] = ${JSON.stringify(claude())}; console.log(JSON.stringify(init)); console.log(JSON.stringify({ type: 'user', session_id: init.session_id, message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'PRIVATE_MATCH\\n'.repeat(700000) }] } })); console.log(JSON.stringify(result)); }`, { mode: 0o700 });
+    try {
+      process.env.PATH = folder + ':' + previousPath;
+      const callbacks = capture();
+      expect(await startAgent({ provider: 'claude', cwd: folder, instruction: 'Synthetic oversized output check.' }, callbacks).result).toEqual({ sessionId: sid, envelope: completed });
+      const skipped = callbacks.logs.filter(log => log.summary === 'Пропущено слишком длинное событие CLI');
+      expect(skipped).toHaveLength(1);
+      const bytes = Number(/^Строка JSONL длиннее 1 МиБ не разбирается и не сохраняется: (\d+) байт\.$/.exec(skipped[0]?.details[0] ?? '')?.[1]);
+      expect(bytes).toBeGreaterThan(8 * 1024 * 1024);
+      expect(JSON.stringify(callbacks)).not.toContain('PRIVATE_MATCH');
+    } finally { process.env.PATH = previousPath; rmSync(folder, { recursive: true, force: true }); }
+  });
   test.each(['codex', 'claude'] as const)('%s submits native ultra settings on new and resumed CLI processes', async provider => {
     const folder = mkdtempSync(join(tmpdir(), 'brigd-ultra-cli-'));
     const previousPath = process.env.PATH;
@@ -729,6 +777,17 @@ describe('bounded subprocess runner (synthetic processes, no real model calls)',
       cwd: process.cwd(), signal: new AbortController().signal, maxOutputBytes: 1000, onStdout: () => {},
     })).rejects.toMatchObject({ code: 'OUTPUT_LIMIT' });
   });
+  test('output the consumer discards unread does not use up the bounded limit', async () => {
+    let discarded = 0;
+    const code = await runBoundedProcess(synthetic('console.log("x".repeat(10000))'), {
+      cwd: process.cwd(), signal: new AbortController().signal, maxOutputBytes: 1000,
+      discardedBytes: () => discarded, onStdout: chunk => { discarded += Buffer.byteLength(chunk); },
+    });
+    expect(code).toBe(0);
+    await expect(runBoundedProcess(synthetic('console.log("x".repeat(10000))'), {
+      cwd: process.cwd(), signal: new AbortController().signal, maxOutputBytes: 1000, discardedBytes: () => 100, onStdout: () => {},
+    })).rejects.toMatchObject({ code: 'OUTPUT_LIMIT' });
+  });
   test('cancellation rejects explicitly', async () => {
     const abort = new AbortController();
     const result = runBoundedProcess(synthetic('setInterval(() => {}, 1000)'), {
@@ -923,6 +982,93 @@ describe('ephemeral task attachment CLI configuration', () => {
   });
 });
 
+describe('failure diagnostics', () => {
+  const thrown = (action: () => unknown): unknown => { try { action(); } catch (error) { return error; } return undefined; };
+  const diagnosticOf = (error: unknown) => (error as ProtocolError).diagnostic;
+  test('a CLI that dies before any event keeps its redacted stderr tail in the failure diagnostic', () => {
+    const parser = new AgentProtocol('claude', capture());
+    parser.noteStderr('Error: Not logged in. Run `claude login` first.\x1b[0m\n');
+    parser.noteStderr('Config: ANTHROPIC_API_KEY=PRIVATE_SECRET\n');
+    const error = thrown(() => parser.finish(1));
+    expect(error).toBeInstanceOf(ProtocolError);
+    expect((error as Error).message).toBe('The CLI did not return a durable session ID.');
+    expect(diagnosticOf(error)).toBe('Последние строки stderr CLI:\nError: Not logged in. Run `claude login` first.\nConfig: ANTHROPIC_API_KEY=[скрыто]');
+    expect(JSON.stringify(error)).not.toContain('PRIVATE_SECRET');
+  });
+  test('the stderr tail is bounded and only its end survives', () => {
+    const parser = new AgentProtocol('codex', capture());
+    parser.noteStderr('x'.repeat(10_000) + '\nfatal: the real reason\n');
+    const error = thrown(() => parser.finish(2));
+    expect((error as Error).message).toBe('The CLI did not return a durable session ID.');
+    expect(diagnosticOf(error)?.length).toBeLessThanOrEqual(4100);
+    expect(diagnosticOf(error)).toEndWith('fatal: the real reason');
+  });
+  test('non-JSON stdout keeps a bounded excerpt of the offending line beside the stderr tail', () => {
+    const parser = new AgentProtocol('codex', capture());
+    parser.noteStderr('warning: config key deprecated\n');
+    const error = thrown(() => parser.push('Welcome to Codex! ' + 'y'.repeat(600) + '\n'));
+    expect((error as Error).message).toBe('The CLI emitted malformed JSONL output.');
+    expect(diagnosticOf(error)).toStartWith('Фрагмент строки stdout без JSON: Welcome to Codex! yyyy');
+    expect(diagnosticOf(error)).toContain('…\n\nПоследние строки stderr CLI:\nwarning: config key deprecated');
+    expect(diagnosticOf(error)?.length).toBeLessThan(700);
+  });
+  test('exit-code and missing-turn failures carry the diagnostic, successful turns never surface stderr', () => {
+    const exited = new AgentProtocol('codex', capture());
+    exited.noteStderr('panic: boom\n');
+    for (const event of codex()) exited.accept(event);
+    const error = thrown(() => exited.finish(3));
+    expect((error as Error).message).toBe('The CLI exited with code 3. No successful result was accepted.');
+    expect(diagnosticOf(error)).toBe('Последние строки stderr CLI:\npanic: boom');
+    const incomplete = new AgentProtocol('claude', capture());
+    incomplete.accept(claude()[0]);
+    expect(diagnosticOf(thrown(() => incomplete.finish(0)))).toBeUndefined();
+    const fine = new AgentProtocol('codex', capture());
+    fine.noteStderr('warning: harmless\n');
+    for (const event of codex()) fine.accept(event);
+    expect(fine.finish(0).envelope).toEqual(completed);
+  });
+  test('a synthetic CLI failure reaches the run error with its stderr tail attached as the diagnostic', async () => {
+    const folder = mkdtempSync(join(tmpdir(), 'brigd-stderr-cli-')), previousPath = process.env.PATH;
+    const help = '--print --output-format stream-json --verbose --resume --permission-mode --model';
+    writeFileSync(join(folder, 'claude'), `#!${process.execPath}\nif (process.argv.includes('--help')) console.log(${JSON.stringify(help)});\nelse { console.error('Not logged in. token=PRIVATE_TOKEN'); process.exit(1); }`, { mode: 0o700 });
+    try {
+      process.env.PATH = folder + ':' + previousPath;
+      const error = await startAgent({ provider: 'claude', cwd: folder, instruction: 'Synthetic stderr check.', model: 'claude-opus-5-5' }, capture()).result.catch((reason: unknown) => reason);
+      expect(error).toBeInstanceOf(ProtocolError);
+      expect((error as Error).message).toContain('The CLI did not return a durable session ID.');
+      expect((error as Error).message).toContain('Requested claude model: claude-opus-5-5.');
+      expect(diagnosticOf(error)).toBe('Последние строки stderr CLI:\nNot logged in. token=[скрыто]');
+    } finally { process.env.PATH = previousPath; rmSync(folder, { recursive: true, force: true }); }
+  });
+  test('failure entries survive the per-turn log cap', () => {
+    const callbacks = capture(), parser = new AgentProtocol('claude', callbacks);
+    parser.accept(claude()[0]);
+    for (let index = 0; index < 1100; index++) {
+      parser.accept({ type: 'assistant', session_id: sid, message: { content: [{ type: 'tool_use', id: `toolu_${index}`, name: 'Read', input: { file_path: 'src/App.svelte' } }] } });
+    }
+    expect(callbacks.logs).toHaveLength(1000);
+    parser.accept({ type: 'user', session_id: sid, message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_10', is_error: true, content: 'Exit code 1\nrg: regex parse error' }] } });
+    parser.accept({ type: 'result', subtype: 'error_during_execution', session_id: sid, is_error: true, errors: ['API connection error'] });
+    expect(callbacks.logs.slice(1000).map(log => log.summary)).toEqual(['Ошибка инструмента: Read', 'Ошибка Claude Code']);
+    expect(callbacks.logs.at(-1)?.error).toBe('API connection error');
+    expect(() => parser.finish(1)).toThrow('failed turn');
+  });
+  test('empty error texts fall back to the event subtype, type or exit code', () => {
+    const claudeResult = capture();
+    expect(() => parse('claude', [claude()[0], { type: 'result', subtype: 'error_during_execution', session_id: sid, is_error: true }], 0).outcome).toThrow('failed turn');
+    const claudeParser = new AgentProtocol('claude', claudeResult);
+    for (const event of [claude()[0], { type: 'result', subtype: 'error_max_turns', session_id: sid, is_error: true, result: '', errors: [] }]) claudeParser.accept(event);
+    expect(claudeResult.logs.at(-1)).toEqual({ kind: 'lifecycle', summary: 'Ошибка Claude Code', details: ['Результат Claude Code: error_max_turns, is_error.'], error: 'Claude Code завершил ход с результатом error_max_turns без текста ошибки.' });
+    const codexCallbacks = capture(), codexParser = new AgentProtocol('codex', codexCallbacks);
+    codexParser.accept(codex()[0]);
+    codexParser.accept({ type: 'item.completed', item: { id: 'cmd', type: 'command_execution', command: 'rg TODO src', aggregated_output: '', exit_code: 2, status: 'failed' } });
+    codexParser.accept({ type: 'error' });
+    codexParser.accept({ type: 'item.completed', item: { id: 'err', type: 'error' } });
+    expect(codexCallbacks.logs.map(log => log.error)).toEqual(['Команда завершилась с кодом 2 без вывода.', 'Codex прислал событие error без текста ошибки.', 'Codex прислал элемент error без текста ошибки.']);
+    expect(codexCallbacks.logs[1]?.details).toEqual(['Событие CLI: error.']);
+  });
+});
+
 describe('exhausted usage limits', () => {
   const thrown = (action: () => unknown): unknown => { try { action(); } catch (error) { return error; } return undefined; };
   test.each([
@@ -993,6 +1139,10 @@ describe('exhausted usage limits', () => {
     split.noteStderr('ge limit. Try again later.');
     expect(thrown(() => split.finish(2))).toBeInstanceOf(UsageLimitError);
     expect(split.usageLimitDetail).toBe("You've hit your usage limit. Try again later.");
+    const noisy = new AgentProtocol('claude', capture());
+    noisy.noteStderr('warning: output limit reached for the preview\nYou have reached your weekly limit · resets Monday\n');
+    expect(thrown(() => noisy.finish(1))).toBeInstanceOf(UsageLimitError);
+    expect(noisy.usageLimitDetail).toBe('You have reached your weekly limit · resets Monday');
   });
 
   test('mock [limit:provider] exhausts only the named provider while [limit] exhausts both', async () => {

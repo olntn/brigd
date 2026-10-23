@@ -55,8 +55,9 @@ export function codexActionLog(item: Record<string, unknown>, completed: boolean
     details.push(...command.details);
     if (typeof item.exit_code === 'number') details.push(`Код завершения: ${item.exit_code}.`);
     if (typeof item.aggregated_output === 'string') details.push(`Объём вывода: ${new TextEncoder().encode(item.aggregated_output).byteLength} байт.`);
+    const silent = typeof item.exit_code === 'number' ? `Команда завершилась с кодом ${item.exit_code} без вывода.` : 'Команда завершилась с ошибкой без вывода.';
     return { kind: 'command', summary: `${completed ? failed ? 'Ошибка команды' : 'Команда завершена' : 'Выполняет команду'}: ${command.label}`, details,
-      error: completed && failed ? sanitizeLogError(item.aggregated_output) ?? error : undefined };
+      error: completed && failed ? sanitizeLogError(item.aggregated_output) ?? error ?? silent : undefined };
   }
   if (item.type === 'file_change') {
     const changes = Array.isArray(item.changes) ? item.changes.filter(record) : [];

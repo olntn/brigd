@@ -210,7 +210,8 @@ test('older failed tool logs explain when their error text was not saved', async
   await expect(failedLogs).toHaveCount(2);
   for (const log of await failedLogs.all()) {
     await log.locator('summary').click();
-    await expect(log.getByText('Текст ошибки не был сохранён. Для новых запусков он появится здесь.', { exact: true })).toBeVisible();
+    await expect(log.getByText('Текст ошибки не сохранён: CLI его не передал, либо запись сделана старой версией brigd.', { exact: true })).toBeVisible();
+    await expect(log.getByText('Итог запуска: Ошибка всего запуска не является текстом ошибки инструмента.', { exact: true })).toBeVisible();
     await expect(log.getByRole('button', { name: 'Копировать ошибку', exact: true })).toHaveCount(0);
     await expect(log.getByLabel('Текст ошибки', { exact: true })).toHaveCount(0);
   }
