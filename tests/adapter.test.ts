@@ -185,6 +185,20 @@ describe('provider protocol', () => {
     const ordinary = { ...permission, item: { ...permission.item, aggregated_output: 'Test assertion failed' } };
     expect(parse('codex', [...codex(), ordinary]).outcome.envelope.status).toBe('completed');
   });
+  test('Codex full access treats denial words in failed command output as ordinary output', () => {
+    // A failing test suite or a search through this project prints such phrases from fixtures and source.
+    const output = '(pass) provider protocol > Codex permission failures are blocked\nexpect(text).toContain(\'approval is required\')\nEPERM: operation not permitted\n(fail) an unrelated check';
+    const failed = { type: 'item.completed', item: { id: 'cmd', type: 'command_execution', command: 'bun run test', status: 'failed', exit_code: 1, aggregated_output: output } };
+    const parser = new AgentProtocol('codex', capture(), undefined, 'full');
+    const [started, turn, message, done] = codex();
+    for (const event of [started, turn, failed]) parser.accept(event);
+    expect(parser.permissionBlocked).toBe(false);
+    for (const event of [message, done]) parser.accept(event);
+    expect(parser.finish(0).envelope).toEqual(completed);
+    const restricted = new AgentProtocol('codex', capture());
+    for (const event of [started, turn, failed]) restricted.accept(event);
+    expect(restricted.permissionBlocked).toBe(true);
+  });
   test('Claude tool permission error is blocked', () => {
     const denied = { type: 'user', message: { content: [{ type: 'tool_result', is_error: true, content: 'Permission was denied.' }] } };
     expect(parse('claude', [...claude(), denied]).outcome.envelope.status).toBe('blocked');

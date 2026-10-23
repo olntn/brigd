@@ -371,7 +371,9 @@ export class AgentProtocol {
         if (log) this.log(`${event.type}:${typeof item.id === 'string' ? item.id : JSON.stringify(log)}`, log);
         if (item.status === 'failed' && isPermissionDenial(errorText(item.error))) this.nativeBlock = true;
         if (event.type === 'item.completed' && item.type === 'agent_message') this.finalResponse = item.text;
-        if (item.type === 'command_execution') {
+        // Without a sandbox or approvals, a failed command's output is the program's own text, such as
+        // test names or searched source, never a Codex decision. Codex still reports real refusals as events.
+        if (item.type === 'command_execution' && this.cliAccess !== 'full') {
           if ((item.status === 'failed' || (typeof item.exit_code === 'number' && item.exit_code !== 0)) &&
               isPermissionDenial(errorText(item.aggregated_output) || errorText(item.error))) this.nativeBlock = true;
         }
