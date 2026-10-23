@@ -268,19 +268,53 @@ test('interrupted integration keeps its reservation across restart and requires 
   expect((await settled(run)).status).toBe('merged'); await until(() => agent.calls.length === 1);
 });
 
-test('parallel independent runs have separate branches and their integrations are serialized and checked together', async () => {
+test('parallel runs have separate branches; a finished result is merged while the other agent works, and the next check includes it', async () => {
   const count = join(folder, 'count');
   await configure([command(`const fs=require('node:fs'); fs.appendFileSync(${JSON.stringify(count)},JSON.stringify(fs.readdirSync('src'))+'\\n');`)], 2);
   const first = await start(), second = await start();
   expect(first.workspace!.path).not.toBe(second.workspace!.path); expect(first.workspace!.baseCommit).toBe(second.workspace!.baseCommit);
   writeFileSync(join(first.workspace!.path, 'src/first.txt'), 'one'); agent.calls[0]!.resolve(outcome('first'));
-  await until(() => store.integrationForRun(first.id)?.status === 'queued');
-  expect(git(root, 'rev-parse', 'HEAD')).toBe(first.workspace!.baseCommit!);
+  expect((await settled(first)).status).toBe('merged');
+  // The other agent keeps working in its own worktree; the merge does not touch it.
+  expect(store.getRun(second.id).status).toBe('running'); expect(agent.calls).toHaveLength(2);
+  expect(git(root, 'ls-files')).toContain('src/first.txt'); expect(existsSync(join(second.workspace!.path, 'src/first.txt'))).toBe(false);
   writeFileSync(join(second.workspace!.path, 'src/second.txt'), 'two'); agent.calls[1]!.resolve(outcome('second'));
-  expect((await settled(first)).status).toBe('merged'); expect((await settled(second)).status).toBe('merged');
+  expect((await settled(second)).status).toBe('merged');
   expect(git(root, 'ls-files')).toContain('src/first.txt'); expect(git(root, 'ls-files')).toContain('src/second.txt');
   const observations = readFileSync(count, 'utf8').trim().split('\n').map(value => JSON.parse(value) as string[]);
-  expect(observations).toHaveLength(2); expect(observations[1]).toContain('first.txt'); expect(observations[1]).toContain('second.txt');
+  expect(observations).toHaveLength(2); expect(observations[0]).not.toContain('second.txt');
+  expect(observations[1]).toContain('first.txt'); expect(observations[1]).toContain('second.txt');
+});
+
+test('the integrator takes the first free place, merges of its repository wait for it and its result is checked first', async () => {
+  await configure(checks, 2);
+  const first = await start(), second = await start();
+  const queued = engine.start(store.createTask(taskInput(root)).id);
+  expect(queued.status).toBe('queued');
+  conflictingTarget('conflicting target\n'); complete(first);
+  await until(() => agent.calls.length === 3);
+  // The conflict went ahead of the task that was waiting longer.
+  const integrator = store.getTask(first.taskId).latestRun!;
+  expect(agent.calls[2]!.input.reconcile).toBeDefined(); expect(integrator).toMatchObject({ trigger: 'reconcile', status: 'running' });
+  expect(store.getRun(queued.id).status).toBe('queued');
+  const target = git(root, 'rev-parse', 'HEAD');
+  writeFileSync(join(second.workspace!.path, 'src/second.txt'), 'two'); agent.calls[1]!.resolve(outcome('second'));
+  await until(() => store.getRun(second.id).status === 'completed');
+  // The target must not move while the integrator resolves the conflict against it.
+  await Bun.sleep(60);
+  expect(store.integrationForRun(second.id)!.status).toBe('queued'); expect(git(root, 'rev-parse', 'HEAD')).toBe(target);
+  expect(store.getRun(queued.id).status).toBe('queued');
+  writeFileSync(join(first.workspace!.path, 'src/value.txt'), 'resolved by integrator\n'); agent.calls[2]!.resolve(outcome('integrator-session'));
+  const resolved = await settled(integrator), merged = await settled(second);
+  expect(resolved.status).toBe('merged'); expect(merged.status).toBe('merged');
+  // The reconciled result was checked before the result that had been waiting for it.
+  expect(git(root, 'merge-base', '--is-ancestor', resolved.resultCommit!, merged.resultCommit!)).toBe('');
+  expect(merged.targetCommit).toBe(resolved.resultCommit!);
+  await until(() => agent.calls.length === 4);
+  // The waiting task starts from a target that already holds both results.
+  expect(store.getRun(queued.id).workspace!.baseCommit).toBe(merged.resultCommit!);
+  expect(readFileSync(join(agent.calls[3]!.input.cwd, 'src/value.txt'), 'utf8')).toBe('resolved by integrator\n');
+  expect(existsSync(join(agent.calls[3]!.input.cwd, 'src/second.txt'))).toBe(true);
 });
 
 test('checks that modify tracked files cannot cause untested code to be transferred', async () => {

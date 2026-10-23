@@ -62,7 +62,7 @@ brigd запускает небольшой MCP-помощник через stdi
 | Запуски | `start_task`, `followup_task`, `list_runs`, `get_run`, `get_run_diff`, `resume_run`, `retry_run`, `cancel_run`, `integrate_run`, `cancel_integration`, `reconcile_run` |
 | Работники | `list_workers`, `get_worker`, `create_worker`, `update_worker`, `archive_worker`; восстановление — `update_worker` с `data.archived: false` |
 | Инструкции, теги, модели | `list_*`, `get_*`, `create_*`, `update_*`, `delete_*` для `instructions`/`instruction`, `tags`/`tag` и `models`/`model` |
-| Настройки | `get_app_info`, `get_general_settings`, `update_general_settings`, `get_permission_settings`, `update_permission_settings`, `get_autopilot_settings`, `update_autopilot_settings`, `get_autopilot`, `update_autopilot`, `move_autopilot_task`, `get_integrator`, `update_integrator`, `get_cli_config`, `configure_cli` |
+| Настройки | `get_app_info`, `get_general_settings`, `update_general_settings`, `get_permission_settings`, `update_permission_settings`, `get_autopilot_settings`, `update_autopilot_settings`, `get_concurrency_settings`, `update_concurrency_settings`, `get_autopilot`, `update_autopilot`, `move_autopilot_task`, `get_integrator`, `update_integrator`, `get_cli_config`, `configure_cli` |
 | Бэкапы | `list_backups`, `create_backup`, `rename_backup`, `set_backup_auto_update`, `delete_backup`, `restore_backup` |
 | Документация | `list_doc_pages`, `search_doc_pages`, `get_doc_page`, `create_doc_page`, `update_doc_page`, `delete_doc_page` |
 

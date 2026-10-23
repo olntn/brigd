@@ -262,6 +262,8 @@ export function createHandler(engine: Engine, options: HttpOptions) {
         catch (error) { throw new AppError(error instanceof Error ? error.message : 'Некорректный BRIGD_INTEGRATION_CHECKS'); }
         return json(engine.setAutopilotSettings({ integrationChecks }));
       }
+      if (path === '/api/settings/concurrency' && method === 'GET') return json(engine.getConcurrencySettings());
+      if (path === '/api/settings/concurrency' && method === 'PATCH') return json(engine.setConcurrencySettings(await body(req)));
       if (path === '/api/autopilot' && method === 'GET') return json(engine.store.autopilotOverview());
       if (path === '/api/autopilot' && method === 'PATCH') return json(engine.setAutopilot(validateAutopilot(await body(req))));
       if (path === '/api/integrator' && method === 'GET') return json(engine.store.getIntegratorProfile());
